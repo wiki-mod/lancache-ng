@@ -11932,6 +11932,95 @@ end
             Ok((buf, pos > 0))
         }
 
+        // What: newest lines of the programs, merged.
+        // Why: syslog-ng keeps one folder per program.
+        // From: Issue #1683 | PR #1980
+        fn newest_lines(
+            root: &Path,
+            programs: &[String],
+            max: usize,
+            chunk: u64,
+        ) -> Vec<serde_json::Value> {
+            let mut all = Vec::new();
+            for p in programs {
+                for line in tail_lines(&root.join(p), max, chunk) {
+                    all.push((p.clone(), line));
+                }
+            }
+            all.sort_by(|a, b| b.1.cmp(&a.1));
+            all.truncate(max);
+            all.into_iter()
+                .map(|(p, l)| {
+                    let (stamp, text) = l.split_once(' ').unwrap_or(("", l.as_str()));
+                    // What: drop "host program: " ahead.
+                    // Why: the program has its own column.
+                    // From: Issue #1683 | PR #1980
+                    let lead = format!(" {p}: ");
+                    let text = text.split_once(lead.as_str()).map_or(text, |(_, m)| m);
+                    serde_json::json!({"host": p, "timestamp": stamp, "message": text})
+                })
+                .collect()
+        }
+
+        // What: programs, on/off switches, newest lines.
+        // Why: page, REST and CLI read one log view.
+        // From: Issue #1683 | PR #2020
+        pub fn program_logs(
+            s: &crate::config::Settings,
+            only: Option<&str>,
+            n: Option<usize>,
+        ) -> Result<serde_json::Value, String> {
+            let root = std::path::PathBuf::from(s.text("SYSLOG_LOG_ROOT")?);
+            let max = n.unwrap_or(s.num::<usize>("UI_LOG_LINES")?);
+            let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
+            let programs = s.list("SYSLOG_PROGRAMS");
+            let muted = s.list("SYSLOG_MUTED");
+            // What: every folder in store, plus the list.
+            // Why: the store may hold folders not listed.
+            // From: Issue #1683 | PR #1980
+            let mut names = programs.clone();
+            let dirs = crate::shared::fs::entries_if_present(&root)
+                .map_err(|e| format!("{}: {e}", root.display()))?;
+            for d in dirs.iter().filter(|d| d.is_dir()) {
+                if let Some(n) = d.file_name() {
+                    crate::config::add_once(&mut names, &n.to_string_lossy());
+                }
+            }
+            let read: Vec<String> = match only {
+                Some(p) if names.iter().any(|x| x == p) => vec![p.to_string()],
+                Some(p) => return Err(format!("{p}: no such log program")),
+                None => names.clone(),
+            };
+            let switches: Vec<serde_json::Value> = programs
+                .iter()
+                .map(|p| serde_json::json!({"program": p, "on": !muted.contains(p)}))
+                .collect();
+            Ok(serde_json::json!({
+                "hosts": names,
+                "switches": switches,
+                "lines": newest_lines(&root, &read, max, chunk),
+            }))
+        }
+
+        // What: lancache-ng logs [program] [n] as JSON.
+        // Why: a read; it needs no running ui.
+        // From: Issue #1683 | PR #2020
+        pub fn logs_run(args: &[String]) -> Result<(), String> {
+            let s = crate::config::Settings::from_process()?;
+            let (program, n) = match args {
+                [] => (None, None),
+                [p] if p.parse::<usize>().is_ok() => (None, p.parse().ok()),
+                [p] => (Some(p.as_str()), None),
+                [p, n] => (
+                    Some(p.as_str()),
+                    Some(n.parse().map_err(|_| format!("{n}: no number"))?),
+                ),
+                _ => return Err("usage: logs [program] [n]".into()),
+            };
+            println!("{}", program_logs(&s, program, n)?);
+            Ok(())
+        }
+
         // What: last `limit` lines of the newest file.
         // Why: reads from the end; big logs stay cheap.
         // From: Issue #1683 | PR #1980
@@ -14018,71 +14107,40 @@ mod ui {
         finish(result, &back)
     }
 
-    // What: newest lines of all programs, merged.
-    // Why: syslog-ng keeps one folder per program.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn newest_lines(
-        root: &Path,
-        programs: &[String],
-        max: usize,
-        chunk: u64,
-    ) -> Vec<Value> {
-        let mut all = Vec::new();
-        for p in programs {
-            for line in access::tail_lines(&root.join(p), max, chunk) {
-                all.push((p.clone(), line));
-            }
-        }
-        all.sort_by(|a, b| b.1.cmp(&a.1));
-        all.truncate(max);
-        all.into_iter()
-            .map(|(p, l)| {
-                let (stamp, text) = l.split_once(' ').unwrap_or(("", l.as_str()));
-                // What: drop "host program: " ahead.
-                // Why: the program has its own column.
-                // From: Issue #1683 | PR #1980
-                let lead = format!(" {p}: ");
-                let text = text.split_once(lead.as_str()).map_or(text, |(_, m)| m);
-                json!({"host": p, "timestamp": stamp, "message": text})
-            })
-            .collect()
-    }
-
     // What: logs page.
     // Why: newest lines plus on/off per program.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         let s = app.settings();
-        let root = PathBuf::from(s.text("SYSLOG_LOG_ROOT")?);
         let max = s.num::<usize>("UI_LOG_LINES")?;
-        let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
-        let programs = s.list("SYSLOG_PROGRAMS");
-        let muted = s.list("SYSLOG_MUTED");
-        // What: every folder store holds, plus the list.
-        // Why: the store may name folders the list lacks.
-        // From: Issue #1683 | PR #1980
-        let mut names = programs.clone();
-        let dirs = crate::shared::fs::entries_if_present(&root)
-            .map_err(|e| format!("{}: {e}", root.display()))?;
-        for d in dirs.iter().filter(|d| d.is_dir()) {
-            if let Some(n) = d.file_name() {
-                config::add_once(&mut names, &n.to_string_lossy());
-            }
-        }
-        let hosts = names.clone();
-        let lines = tokio::task::spawn_blocking(move || newest_lines(&root, &names, max, chunk))
+        let c = s.clone();
+        let v = tokio::task::spawn_blocking(move || access::program_logs(&c, None, None))
             .await
-            .map_err(|e| e.to_string())?;
-        let switches: Vec<Value> = programs
-            .iter()
-            .map(|p| json!({"program": p, "on": !muted.contains(p)}))
-            .collect();
+            .map_err(|e| e.to_string())??;
         let mut ctx = Context::new();
-        ctx.insert("syslog_logs", &lines);
-        ctx.insert("syslog_hosts", &hosts);
-        ctx.insert("log_switches", &switches);
+        ctx.insert("syslog_logs", &v["lines"]);
+        ctx.insert("syslog_hosts", &v["hosts"]);
+        ctx.insert("log_switches", &v["switches"]);
         ctx.insert("logs_max_entries", &max);
         app.page("logs.html", ctx, &csrf)
+    }
+
+    // What: GET logs ?program=&n= as JSON.
+    // Why: REST read on the reader of page and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn logs_api(
+        State(app): Shared,
+        axum::extract::Query(q): axum::extract::Query<Fields>,
+    ) -> Response {
+        let s = app.settings();
+        let program = Some(field(&q, "program")).filter(|p| !p.is_empty());
+        let n = field(&q, "n").parse::<usize>().ok();
+        let r =
+            tokio::task::spawn_blocking(move || access::program_logs(&s, program.as_deref(), n))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+        json_reply(r.map(Some), "")
     }
 
     // What: save forward targets and muted programs.
@@ -16261,7 +16319,6 @@ mod ui {
             .route(&p("UI_ROUTE_SETUP_SAVE")?, post(save))
             .route(&p("UI_ROUTE_PASSWORD")?, post(password))
             .route(&p("UI_PAGE_LOGS")?, get(logs))
-            .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
             .route(&p("UI_PAGE_CACHEHAMSTER")?, get(cachehamster))
             .route(&p("UI_PAGE_DOMAINS")?, get(domains))
             .route(&p("UI_PAGE_DHCP")?, get(dhcp))
@@ -16351,6 +16408,8 @@ mod ui {
             .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
             .route(&p("UI_ROUTE_STATS_LIST")?, get(stats_list_api))
             .route(&p("UI_ROUTE_STATS_SAMPLE")?, post(stats_sample_api))
+            .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
+            .route(&p("UI_ROUTE_LOGS")?, get(logs_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -17056,6 +17115,7 @@ async fn main() -> std::process::ExitCode {
         "cache" => code(shared::tidy::cache_run(&argv).await),
         "cdn" => code(shared::cdn::cdn_run(&argv).await),
         "stats" => code(shared::rrd::stats_run(&argv).await),
+        "logs" => code(shared::access::logs_run(&argv)),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -17075,8 +17135,8 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 9] = [
-    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache", "cdn", "stats",
+const GROUPS: [&str; 10] = [
+    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache", "cdn", "stats", "logs",
 ];
 
 // What: turn a role Result into a process exit code.
