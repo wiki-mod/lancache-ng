@@ -2402,10 +2402,10 @@ install_state_root() {
     local install_dir="$1" env_file="$2" state
     state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
         || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-    # What: a quickstart .env may lack LANCACHE_STATE_DIR
-    # Why: its state lives in the quickstart dir (v0.3.2)
+    # What: quickstart and secondary .env lack the key
+    # Why: their state lives in their own dir
     # From: Issue #1683 | PR #1858
-    if [[ -z "$state" ]] && is_quickstart_install "$install_dir"; then
+    if [[ -z "$state" ]] && { is_quickstart_install "$install_dir" || is_secondary_dir "$install_dir"; }; then
         state="$install_dir"
     elif [[ -z "$state" ]]; then
         state=$(production_state_root_default "$install_dir") \
@@ -2780,7 +2780,8 @@ resolve_stack_dir() {
 # From: Issue #1683 | PR #1858
 is_quickstart_install() {
     local dir="$1"
-    ! is_deploy_prod_install_dir "$dir" && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
+    ! is_deploy_prod_install_dir "$dir" && ! is_secondary_dir "$dir" \
+        && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
 }
 
 # What: puts back lost files and dirs the old stack mounts
@@ -7555,6 +7556,11 @@ perform_stack_update_flow() {
 cmd_update() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
+    # What: update refuses a secondary dir
+    # Why: it would migrate the secondary into a primary
+    # From: Issue #1683 | PR #2017
+    ! is_secondary_dir "$install_dir" \
+        || die "$install_dir is a secondary DNS node; update only runs a primary. Refresh it in that directory with: setup.sh secondary --rotate (asks for a new token). Nothing was changed."
     # What: a lone setup.sh first fetches its channel code
     # Why: without it a v0.3 quickstart is not migrated
     # From: Issue #1683
