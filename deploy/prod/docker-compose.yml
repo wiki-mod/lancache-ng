@@ -38,7 +38,10 @@ x-environment:
     LANCACHE_SETTINGS_FILE: ${SOT_STACK_ENV_FILE:?SOT_STACK_ENV_FILE is required}
     SNMP_COMMUNITY: ${SNMP_COMMUNITY}
     IP_HTTP: ${IP_HTTP:?IP_HTTP is required}
-    IP_HTTPS: ${IP_HTTPS:?IP_HTTPS is required}
+    # What: IP_HTTPS may be empty: HTTPS is optional.
+    # Why: a second LAN IP exists only with HTTPS on.
+    # From: Issue #1683 | PR #2020
+    IP_HTTPS: ${IP_HTTPS:-}
   services-ui: &env-services-ui
     # What: compose project name for container lookups.
     # Why: -p or .env may rename it; labels must match.
@@ -234,14 +237,14 @@ services:
       # Why: the ui owns every config file; nginx reads.
       # From: Issue #1683 | PR #1980
       - lancache-config:${SOT_CONFIG_DIR}:ro
-    # What: HTTP port on both IPs; HTTPS relayed or MITM.
-    # Why: IP_HTTP relays TLS, IP_HTTPS intercepts it.
-    # From: Issue #1683 | PR #1858
+    # What: IP_HTTP relays TLS; IP_HTTPS intercepts it.
+    # Why: HTTPS optional: no IP_HTTPS binds loopback.
+    # From: Issue #1683 | PR #2020
     ports:
       - "${IP_HTTP}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
       - "${IP_HTTP}:${SOT_PROXY_HTTPS_PORT}:${SOT_NGINX_PASSTHROUGH_PORT}"
-      - "${IP_HTTPS}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
-      - "${IP_HTTPS}:${SOT_PROXY_HTTPS_PORT}:${SOT_PROXY_HTTPS_PORT}"
+      - "${IP_HTTPS:-${SOT_HTTPS_OFF_BIND_IP}}:${SOT_PROXY_HTTP_PORT}:${SOT_PROXY_HTTP_PORT}"
+      - "${IP_HTTPS:-${SOT_HTTPS_OFF_BIND_IP}}:${SOT_PROXY_HTTPS_PORT}:${SOT_PROXY_HTTPS_PORT}"
 
   # What: PowerDNS auth and recursor, NOTIFY and AXFR.
   # Why: one container answers on IP_HTTP and IP_HTTPS.
@@ -276,13 +279,13 @@ services:
       - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:?PDNS_FILTER_STATE_DIR is required}:${SOT_DNS_STATE_DIR}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
-    # Why: one container port each keeps the caches apart.
-    # From: Issue #1683
+    # Why: HTTPS optional: no IP_HTTPS binds loopback.
+    # From: Issue #1683 | PR #2020
     ports:
       - "${IP_HTTP}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/udp"
       - "${IP_HTTP}:${SOT_DNS_PORT}:${SOT_DNS_PORT}/tcp"
-      - "${IP_HTTPS}:${SOT_DNS_PORT}:${SOT_DNS_HTTPS_PORT}/udp"
-      - "${IP_HTTPS}:${SOT_DNS_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
+      - "${IP_HTTPS:-${SOT_HTTPS_OFF_BIND_IP}}:${SOT_DNS_PORT}:${SOT_DNS_HTTPS_PORT}/udp"
+      - "${IP_HTTPS:-${SOT_HTTPS_OFF_BIND_IP}}:${SOT_DNS_PORT}:${SOT_DNS_HTTPS_PORT}/tcp"
       # What: PowerDNS AXFR listener on IP_HTTP, UDP+TCP.
       # Why: secondaries pull zones from this port.
       # From: Issue #1683 | PR #1912
