@@ -7866,9 +7866,7 @@ cmd_debug() {
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    local ip_http ip_https cache_dir
-    ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
-    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
+    local cache_dir
     cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
 
     print_step "Container status"
@@ -7910,17 +7908,16 @@ cmd_debug() {
         print_host_addresses_failed "$?"
     fi
 
-    # What: the health gate's proxy probe for each LAN IP
+    # What: the gate's functional probe, in a subshell
     # Why: debug shows the cause the update would stop on
     # From: Issue #1683 | PR #1858
     print_step "Health checks"
-    local ip proxy_svc
-    proxy_svc=$(prod_env_default PROXY_SERVICE) || exit $?
     _UPDATE_STACK_DIR="$install_dir" _UPDATE_ENV_FILE="$env_file"
-    for ip in "$ip_http" "$ip_https"; do
-        [[ -n "$ip" ]] || continue
-        _verify_healthz_endpoint "$proxy_svc" "$ip" || print_warn "Proxy probe for $ip failed; see above."
-    done
+    if ( verify_stack_functional_health ); then
+        print_ok "The functional probe of the health gate passes"
+    else
+        print_warn "The functional probe of the health gate fails; see above."
+    fi
 }
 
 # What: bundles redacted diagnostics for a bug report
