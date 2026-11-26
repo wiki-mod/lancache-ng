@@ -10790,28 +10790,57 @@ end
             Ok(reply)
         }
 
-        // What: true on a usable server reply.
+        // What: stratum of a usable server reply.
         // Why: mode 4 and stratum 1..15 mean synced.
         // From: Issue #1683 | PR #1980
-        pub fn answers(host: &str, port: u64, wait: Duration) -> bool {
+        fn stratum(host: &str, port: u64, wait: Duration) -> Option<u8> {
             ask(host, port, wait)
-                .map(|r| r[0] & 0x07 == MODE_SERVER && (1..=15).contains(&r[1]))
-                .unwrap_or(false)
+                .ok()
+                .filter(|r| r[0] & 0x07 == MODE_SERVER && (1..=15).contains(&r[1]))
+                .map(|r| r[1])
         }
 
-        // What: does the stack's own NTP server answer.
-        // Why: one check for page, a CLI and a REST call.
+        // What: own NTP: on, address, answer, stratum.
+        // Why: one check for pages, REST and CLI.
         // From: Issue #1683 | PR #2020
-        pub async fn own_answers(s: &crate::config::Settings) -> Result<bool, String> {
-            if !s.flag("NTP_ENABLED")? {
-                return Ok(false);
-            }
+        pub async fn status(s: &crate::config::Settings) -> Result<serde_json::Value, String> {
+            let on = s.flag("NTP_ENABLED")?;
             let ip = s.text("IP_HTTP")?;
             let port = s.uint("NTP_PORT")?;
             let wait = Duration::from_millis(s.uint("NTP_PROBE_WAIT_MS")?);
-            tokio::task::spawn_blocking(move || answers(&ip, port, wait))
-                .await
-                .map_err(|e| e.to_string())
+            let host = ip.clone();
+            let st = match on {
+                true => tokio::task::spawn_blocking(move || stratum(&host, port, wait))
+                    .await
+                    .map_err(|e| e.to_string())?,
+                false => None,
+            };
+            Ok(serde_json::json!({
+                "enabled": on, "address": ip, "port": port,
+                "answers": st.is_some(), "stratum": st
+            }))
+        }
+
+        // What: does the stack's own NTP server answer.
+        // Why: pages and DHCP need the yes or no only.
+        // From: Issue #1683 | PR #2020
+        pub async fn own_answers(s: &crate::config::Settings) -> Result<bool, String> {
+            Ok(status(s).await?["answers"].as_bool().unwrap_or(false))
+        }
+
+        // What: lancache-ng ntp check: own NTP as JSON.
+        // Why: NTP reads have their CLI with their owner.
+        // From: Issue #1683 | PR #2020
+        pub async fn ntp_run(args: &[String]) -> Result<(), String> {
+            if args.first().map(String::as_str) != Some("check") {
+                return Err("commands: check".into());
+            }
+            let v = status(&crate::config::Settings::from_process()?).await?;
+            println!("{v}");
+            match (v["enabled"].as_bool(), v["answers"].as_bool()) {
+                (Some(true), Some(false)) => Err("ntp check: own NTP does not answer".into()),
+                _ => Ok(()),
+            }
         }
     }
 
@@ -14303,6 +14332,14 @@ mod ui {
         json_reply(zone_snapshots(&app.settings()).map(Some), "")
     }
 
+    // What: own NTP status as JSON.
+    // Why: REST diagnosis on the reader of pages and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn ntp_api(State(app): Shared) -> Response {
+        let r = crate::shared::ntp::status(&app.settings()).await;
+        json_reply(r.map(Some), "")
+    }
+
     // What: nginx stub_status numbers as JSON.
     // Why: REST diagnosis on the reader of page and CLI.
     // From: Issue #1683 | PR #2020
@@ -14744,6 +14781,7 @@ mod ui {
             .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
             .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
             .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
+            .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -15435,6 +15473,7 @@ async fn main() -> std::process::ExitCode {
         "config" => code(config::run(&argv)),
         "system" => code(shared::docker::system_run(&argv).await),
         "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
+        "ntp" => code(shared::ntp::ntp_run(&argv).await),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -15454,7 +15493,7 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 4] = ["dhcp", "config", "system", "proxy"];
+const GROUPS: [&str; 5] = ["dhcp", "config", "system", "proxy", "ntp"];
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
