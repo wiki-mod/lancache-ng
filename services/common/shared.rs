@@ -153,11 +153,7 @@ pub mod fs {
         mode: u32,
         owner: Owner,
     ) -> io::Result<bool> {
-        let same = match fs::read(path) {
-            Ok(old) => old == contents,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-            Err(e) => return Err(e),
-        };
+        let same = read_if_present(path)?.is_some_and(|old| old == contents);
         if same {
             set_path_owner(path, owner, Some(mode))?;
         } else {
@@ -187,21 +183,53 @@ pub mod fs {
         }
     }
 
+    // What: file bytes, or None if the file is absent.
+    // Why: a missing file is a normal first state.
+    // From: Issue #1683
+    pub fn read_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
+        match fs::read(path) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    // What: paths in a folder; an absent one is empty.
+    // Why: a folder made on first write may not exist.
+    // From: Issue #1683
+    pub fn entries_if_present(dir: &Path) -> io::Result<Vec<PathBuf>> {
+        match fs::read_dir(dir) {
+            Ok(rd) => rd.map(|e| e.map(|e| e.path())).collect(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    // What: change time in unix seconds, else 0.
+    // Why: ages and snapshot times are plain seconds.
+    // From: Issue #1683 | PR #1980
+    pub fn modified_secs(meta: &fs::Metadata) -> u64 {
+        meta.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
+    }
+
     // What: every regular file below root.
     // Why: retention sums and prunes by size and age.
     // From: Issue #1683 | PR #1980
-    pub fn files_under(root: &Path) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    pub fn files_under(root: &Path) -> Vec<(PathBuf, fs::Metadata)> {
         let mut out = Vec::new();
         let mut dirs = vec![root.to_path_buf()];
         while let Some(dir) = dirs.pop() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
             };
-            for entry in entries {
-                let path = entry?.path();
-                let meta = fs::symlink_metadata(&path)?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
                 if meta.is_dir() {
                     dirs.push(path);
                 } else if meta.is_file() {
@@ -209,7 +237,7 @@ pub mod fs {
                 }
             }
         }
-        Ok(out)
+        out
     }
 
     // What: total and free bytes of a filesystem.
@@ -309,9 +337,13 @@ pub mod secret {
                 Ok(text)
             }
         };
-        match read() {
-            Ok(text) => usable(text),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+        match fs::read_if_present(path)? {
+            Some(raw) => {
+                let text = String::from_utf8(raw)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                usable(text.trim().to_string())
+            }
+            None => {
                 let text = create();
                 let mode = fs::PRIVATE_MODE;
                 match fs::write(path, text.as_bytes(), mode, Place::Exclusive, owner) {
@@ -320,7 +352,6 @@ pub mod secret {
                     Err(e) => Err(e),
                 }
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -341,6 +372,44 @@ pub mod secret {
             Some(v) => Ok(v),
             None => load_or_create(&file_of(dir, key), || random_hex(32), owner),
         }
+    }
+
+    // What: one secret by its key: env, else the file.
+    // Why: every program gets the same key the same way.
+    // From: Issue #1683
+    pub fn get(s: &crate::config::Settings, key: &str) -> Result<String, String> {
+        resolve(&crate::config::process_env, &dir(s)?, key, Owner::default())
+            .map_err(|e| format!("{key}: {e}"))
+    }
+
+    // What: path of the DDNS TSIG secret file.
+    // Why: Kea DDNS and PowerDNS share this key.
+    // From: Issue #1683 | PR #1980
+    pub fn tsig_file(s: &crate::config::Settings) -> Result<PathBuf, String> {
+        Ok(file_of(&dir(s)?, "DDNS_TSIG_KEY"))
+    }
+
+    // What: fresh 32-byte TSIG secret, base64.
+    // Why: PowerDNS and Kea both read base64.
+    // From: Issue #1683 | PR #1980
+    pub fn new_tsig() -> String {
+        use base64::Engine as _;
+        key_bytes(&random_hex(32))
+            .map(|key| base64::engine::general_purpose::STANDARD.encode(key))
+            .unwrap_or_default()
+    }
+
+    // What: TSIG secret; a rotated file wins.
+    // Why: a ui rotation beats the setup.sh value.
+    // From: Issue #1683 | PR #1980
+    pub fn tsig_secret(s: &crate::config::Settings) -> Result<String, String> {
+        let file = tsig_file(s)?;
+        if !file.exists()
+            && let Some(v) = crate::config::env_set(&crate::config::process_env, "DDNS_TSIG_KEY")
+        {
+            return Ok(v);
+        }
+        load_or_create(&file, new_tsig, Owner::default()).map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
     }
 
     // What: 32 raw key bytes from 64 hex digits.
@@ -802,6 +871,39 @@ pub mod pdns {
             let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
             self.call(Method::PUT, &path, None).await.map(drop)
         }
+
+        // What: give a zone a signing key once.
+        // Why: a new key each apply breaks every anchor.
+        // From: Issue #1683 | PR #2019
+        pub async fn secure(&self, zone: &str) -> Result<(), String> {
+            let text = self.call(Method::GET, &zone_path(zone), None).await?;
+            let v: Value = serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
+            if v["dnssec"].as_bool() == Some(true) {
+                return Ok(());
+            }
+            let keys = format!("{}/cryptokeys", zone_path(zone));
+            let body = json!({"keytype": "csk", "active": true, "published": true});
+            self.call(Method::POST, &keys, Some(body)).await?;
+            let rectify = format!("{}/rectify", zone_path(zone));
+            self.call(Method::PUT, &rectify, None).await.map(drop)
+        }
+
+        // What: SHA-256 DS rows of the active keys.
+        // Why: the parent zone and the anchors need them.
+        // From: Issue #1683 | PR #2019
+        pub async fn ds(&self, zone: &str) -> Result<Vec<String>, String> {
+            let path = format!("{}/cryptokeys", zone_path(zone));
+            let text = self.call(Method::GET, &path, None).await?;
+            let keys: Vec<Value> =
+                serde_json::from_str(&text).map_err(|e| format!("keys of {zone}: {e}"))?;
+            Ok(keys
+                .iter()
+                .filter(|k| k["active"].as_bool() == Some(true))
+                .flat_map(|k| k["ds"].as_array().cloned().unwrap_or_default())
+                .filter_map(|d| d.as_str().map(str::to_string))
+                .filter(|d| d.split_whitespace().nth(2) == Some("2"))
+                .collect())
+        }
     }
 }
 
@@ -913,6 +1015,24 @@ pub mod dns {
         name.ends_with(&format!(".{zone}"))
     }
 
+    // What: true for the zone itself or a name below it.
+    // Why: one rule for "this name lies in that zone".
+    // From: Issue #1683 | PR #2019
+    pub fn is_within(name: &str, zone: &str) -> bool {
+        name == zone || is_below(name, zone)
+    }
+
+    // What: longest zone of a list that holds a name.
+    // Why: a record or a DS goes into exactly that zone.
+    // From: Issue #1683 | PR #2019
+    pub fn zone_of(name: &str, zones: &[String]) -> Option<String> {
+        zones
+            .iter()
+            .filter(|z| is_within(name, z))
+            .max_by_key(|z| z.len())
+            .cloned()
+    }
+
     // What: true for a name in the reverse DNS tree.
     // Why: the reverse DNS tree is under arpa.
     // From: Issue #1683 | PR #2017
@@ -938,6 +1058,55 @@ pub mod dns {
         }
     }
 
+    // What: the last label of a name, without dots.
+    // Why: endings decide top zones and refused names.
+    // From: Issue #1683 | PR #2019
+    pub fn ending(name: &str) -> &str {
+        let bare = name.trim_end_matches('.');
+        bare.rsplit('.').next().unwrap_or(bare)
+    }
+
+    // What: checked LAN domains, main domain first.
+    // Why: one rule for zones, DDNS, records and the ui.
+    // From: Issue #1683
+    pub fn validate_lan_domains(main: &str, extra: &[String]) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for raw in std::iter::once(main).chain(extra.iter().map(String::as_str)) {
+            let zone = canonical_zone(raw);
+            let name = zone.trim_end_matches('.');
+            // What: one label like "lan" is allowed.
+            // Why: setup.sh offers it; the NTA covers it.
+            // From: Issue #1683
+            if !is_dns_name(name, false, false) {
+                return Err(format!("LAN domain {raw:?} is no domain name"));
+            }
+            // What: reverse and RFC 6761 endings refused.
+            // Why: hosts answer localhost, invalid locally.
+            // From: Issue #1683 | PR #2019
+            match ending(name) {
+                "arpa" => return Err(format!("LAN domain {raw:?} is a reverse zone")),
+                e @ ("localhost" | "invalid") => {
+                    return Err(format!("LAN domain {raw:?} ends in the special name {e}"));
+                }
+                _ => {}
+            }
+            if out.contains(&zone) {
+                return Err(format!("LAN domain {name} is listed twice"));
+            }
+            out.push(zone);
+        }
+        Ok(out)
+    }
+
+    // What: DHCP_DOMAIN, then DNS_EXTRA_LAN_DOMAINS.
+    // Why: DHCP and the NS names use the main domain.
+    // From: Issue #1683
+    pub fn lan_domains(s: &Settings) -> Result<Vec<String>, String> {
+        let main = lan_zone(s)?;
+        let main = main.trim_end_matches('.');
+        validate_lan_domains(main, &s.list("DNS_EXTRA_LAN_DOMAINS"))
+    }
+
     // What: the LAN zone, DHCP_DOMAIN in canonical form.
     // Why: PowerDNS compares names with a trailing dot.
     // From: Issue #1683 | PR #2017
@@ -946,7 +1115,7 @@ pub mod dns {
     }
 
     // What: zones the stack serves itself.
-    // Why: LAN, local.LAN and optional reverse zones.
+    // Why: one zone per LAN domain, optional reverse.
     // From: Issue #1683 | PR #1980
     pub fn managed_zones(s: &Settings) -> Result<Vec<String>, String> {
         // What: a secondary serves the primary's zones.
@@ -959,12 +1128,40 @@ pub mod dns {
                 .map(|z| canonical_zone(z))
                 .collect());
         }
-        let lan = lan_zone(s)?;
-        let mut zones = vec![format!("local.{lan}"), lan];
-        if s.flag("DNS_SERVE_RFC1918")? {
+        let mut zones = lan_domains(s)?;
+        if s.flag("DNS_LOCAL_REVERSE_ZONES")? {
             zones.extend(private_reverse_zones(s));
         }
         Ok(zones)
+    }
+
+    // What: top zones of endings the Internet lacks.
+    // Why: a signed .lan needs its own top zone.
+    // From: Issue #1683 | PR #2019
+    pub fn top_zones(s: &Settings, psl: &crate::nginx_conf::Psl) -> Result<Vec<String>, String> {
+        let mut out: Vec<String> = Vec::new();
+        for zone in lan_domains(s)? {
+            let last = ending(&zone);
+            if !psl.is_tld(last) {
+                crate::config::add_once(&mut out, &canonical_zone(last));
+            }
+        }
+        Ok(out)
+    }
+
+    // What: the listed zone that holds a zone's parent.
+    // Why: the DS of a zone belongs in that parent.
+    // From: Issue #1683 | PR #2019
+    pub fn parent_zone(zone: &str, zones: &[String]) -> Option<String> {
+        let (_, up) = zone.split_once('.')?;
+        zone_of(up, zones)
+    }
+
+    // What: zone of the pre-multi-domain layout.
+    // Why: local.<domain> held no records; it is merged.
+    // From: Issue #1683
+    pub fn legacy_local_zone(lan: &str) -> String {
+        canonical_zone(&format!("local.{}", lan.trim_end_matches('.')))
     }
 
     // What: compare serials by RFC 1982.
@@ -1153,14 +1350,21 @@ pub mod dhcp {
     // Why: option 42 holds IPs; dead names are skipped.
     // From: Issue #1683 | PR #1980
     pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
-        use std::net::ToSocketAddrs as _;
         // What: IP_HTTP while own NTP is handed out.
         // Why: LanCache-NG-NTP answers on the HTTP IP.
         // From: Issue #1683
         if own_ntp(s)? {
             return Ok(vec![s.text("IP_HTTP")?]);
         }
-        s.list("DHCP_NTP_SERVERS")
+        Ok(ipv4_of(&s.list("DHCP_NTP_SERVERS"), "DHCP_NTP_SERVERS"))
+    }
+
+    // What: IPv4 text of each host; names resolve.
+    // Why: option 42 holds IPs; dead names are skipped.
+    // From: Issue #1683 | PR #1980
+    pub fn ipv4_of(hosts: &[String], key: &str) -> Vec<String> {
+        use std::net::ToSocketAddrs as _;
+        hosts
             .iter()
             .map(|host| {
                 if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
@@ -1168,15 +1372,14 @@ pub mod dhcp {
                 }
                 (host.as_str(), 0)
                     .to_socket_addrs()
-                    .map_err(|e| format!("DHCP_NTP_SERVERS: cannot resolve {host}: {e}"))?
+                    .map_err(|e| format!("{key}: cannot resolve {host}: {e}"))?
                     .find_map(|a| match a {
                         std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
                         std::net::SocketAddr::V6(_) => None,
                     })
-                    .ok_or_else(|| format!("DHCP_NTP_SERVERS: {host} has no IPv4 address"))
+                    .ok_or_else(|| format!("{key}: {host} has no IPv4 address"))
             })
             .filter_map(|r: Result<String, String>| r.map_err(|e| eprintln!("{e}; skipped")).ok())
-            .map(Ok)
             .collect()
     }
 
@@ -1218,6 +1421,16 @@ pub mod dhcp {
         pub fn is_dnsmasq(self) -> bool {
             matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
         }
+    }
+
+    // What: the dhcp service name while the mode is off.
+    // Why: pages hide it; apply and the watch keep it off.
+    // From: Issue #1683 | PR #2017
+    pub fn off_service(s: &Settings) -> Result<Option<String>, String> {
+        if Mode::from_settings(s)? != Mode::Off {
+            return Ok(None);
+        }
+        s.text("DHCP_SERVICE").map(Some)
     }
 
     // What: an option the ui sets by its own field.
@@ -1263,6 +1476,17 @@ pub mod dhcp {
         name: "domain-search",
         code: 119,
     };
+
+    // What: value of one Kea option in a subnet.
+    // Why: forms show options by name, Kea stores a list.
+    // From: Issue #1683 | PR #1980
+    pub fn option_data(subnet: &serde_json::Value, name: &str) -> String {
+        let rows = subnet["option-data"].as_array().into_iter().flatten();
+        let hit = rows.into_iter().find(|o| o["name"] == name);
+        hit.and_then(|o| o["data"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
 
     // What: check a custom option code.
     // Why: 0 and 255 are pad/end; managed have fields.
@@ -1340,6 +1564,90 @@ pub mod docker {
     // Why: fixed by Docker Compose.
     // From: Issue #1683 | PR #1980
     pub const SERVICE_LABEL: &str = "com.docker.compose.service";
+
+    // What: Docker health of one container.
+    // Why: degraded and starting are not failures.
+    // From: Issue #1683 | PR #1980
+    #[derive(Debug, PartialEq)]
+    pub enum Health {
+        Healthy,
+        Degraded,
+        Starting,
+        Unhealthy,
+        Stopped(String),
+        Unknown(String),
+    }
+
+    impl Health {
+        // What: read docker inspect State.
+        // Why: newest check output DEGRADED: refines ok.
+        // From: Issue #1296
+        pub fn from_inspect(inspect: &Value) -> Self {
+            let state = inspect.pointer("/State/Status").and_then(Value::as_str);
+            if state != Some("running") {
+                return Health::Stopped(state.unwrap_or("unknown").into());
+            }
+            let status = inspect
+                .pointer("/State/Health/Status")
+                .and_then(Value::as_str);
+            let degraded = last_check(inspect)
+                .lines()
+                .any(|l| l.starts_with("DEGRADED: "));
+            match status.unwrap_or("none") {
+                "healthy" if degraded => Health::Degraded,
+                "healthy" | "none" => Health::Healthy,
+                "starting" => Health::Starting,
+                "unhealthy" => Health::Unhealthy,
+                other => Health::Unknown(other.into()),
+            }
+        }
+
+        // What: the state word for logs and the alarm file.
+        // Why: a stopped one names its Docker state.
+        // From: Issue #1683 | PR #1980
+        pub fn word(&self) -> String {
+            match self {
+                Health::Healthy => "healthy".into(),
+                Health::Degraded => "degraded".into(),
+                Health::Starting => "starting".into(),
+                Health::Unhealthy => "unhealthy".into(),
+                Health::Stopped(s) | Health::Unknown(s) => s.clone(),
+            }
+        }
+
+        // What: the one colour rule of bar and watchdog.
+        // Why: a stop the user wanted is gray, else red.
+        // From: Issue #1683
+        pub fn colour(&self, wanted: bool) -> &'static str {
+            match self {
+                Health::Healthy => "green",
+                Health::Degraded => "amber",
+                Health::Starting | Health::Unknown(_) => "yellow",
+                Health::Unhealthy => "red",
+                Health::Stopped(_) if wanted => "red",
+                Health::Stopped(_) => "gray",
+            }
+        }
+
+        // What: true for unhealthy or stopped.
+        // Why: only these count toward a restart.
+        // From: Issue #1683 | PR #1980
+        pub fn failing(&self) -> bool {
+            matches!(self, Health::Unhealthy | Health::Stopped(_))
+        }
+    }
+
+    // What: output of the newest health check.
+    // Why: it names the reason of a bad state.
+    // From: Issue #1683 | PR #1980
+    pub fn last_check(inspect: &Value) -> &str {
+        inspect
+            .pointer("/State/Health/Log")
+            .and_then(Value::as_array)
+            .and_then(|log| log.last())
+            .and_then(|e| e["Output"].as_str())
+            .unwrap_or_default()
+    }
 
     // What: compose service of a container row, if any.
     // Why: one reader of the service label of a row.
@@ -1528,6 +1836,20 @@ pub mod docker {
             serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
         }
 
+        // What: the service containers of this stack.
+        // Why: a "compose run" one is no service.
+        // From: Issue #1683
+        pub async fn stack(&self, s: &crate::config::Settings) -> Result<Vec<Value>, String> {
+            let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+            let project = s.text("COMPOSE_PROJECT")?;
+            let mut rows = self
+                .project(&project, limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            rows.retain(|r| r["Labels"][ONEOFF_LABEL].as_str() != Some("True"));
+            Ok(rows)
+        }
+
         // What: full state of one container.
         // Why: health, restarts and state come from here.
         // From: Issue #1683 | PR #1980
@@ -1570,7 +1892,7 @@ pub mod docker {
             };
             let path = format!("/containers/{name}/{verb}");
             // What: 304 is ok here; call() says so already.
-            // Why: mode off stops dhcp on every apply.
+            // Why: stopping a stopped one is no error.
             // From: Issue #1683 | PR #1980
             self.call(Method::POST, &path, None, limit).await.map(drop)
         }
@@ -2066,14 +2388,11 @@ pub mod snapshot {
         // Why: longer digit string is newer, then text.
         // From: Issue #1683 | PR #1980
         pub fn list(&self) -> Result<Vec<String>, String> {
-            let entries = match std::fs::read_dir(&self.dir) {
-                Ok(rd) => rd,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-                Err(e) => return Err(format!("{}: {e}", self.dir.display())),
-            };
+            let entries = crate::fs::entries_if_present(&self.dir)
+                .map_err(|e| format!("{}: {e}", self.dir.display()))?;
             let mut ids: Vec<String> = entries
-                .filter_map(Result::ok)
-                .filter_map(|e| e.file_name().into_string().ok())
+                .iter()
+                .filter_map(|p| p.file_name()?.to_str().map(String::from))
                 .filter(|n| is_id(n) && self.path(n).is_file())
                 .collect();
             ids.sort_by(|a, b| crate::config::longest_first(a, b));
@@ -2563,6 +2882,10 @@ pub mod pdns_conf {
         let rows = [
             ("launch", s.text("PDNS_LAUNCH")?),
             ("gsqlite3-database", s.text("PDNS_DATABASE")?),
+            // What: the backend keeps DNSSEC keys.
+            // Why: own endings are signed and anchored.
+            // From: Issue #1683 | PR #2019
+            ("gsqlite3-dnssec", yes(true)),
             ("local-address", joined("PDNS_LISTEN")),
             ("local-port", s.uint("PDNS_AUTH_PORT")?.to_string()),
             ("primary", yes(primary)),
@@ -2642,12 +2965,394 @@ pub mod pdns_conf {
         Ok(out)
     }
 }
+// What: compare a secondary's loaded serials to ours.
+// Why: ui status and watchdog alarm use one owner.
+// From: Issue #1683 | PR #2019
+pub mod peer {
+    use crate::config::Settings;
+    use std::collections::BTreeMap;
+
+    // What: both serials of one managed zone.
+    // Why: the health check reports every zone.
+    // From: Issue #1683 | PR #1980
+    pub struct PeerZone {
+        pub zone: String,
+        pub primary: Option<u32>,
+        pub secondary: Option<u32>,
+    }
+
+    // What: state of one zone on a secondary, mild to bad.
+    // Why: the order picks the worst; callers name a state.
+    // From: Issue #1683 | PR #2017
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum ZoneState {
+        InSync,
+        Ahead,
+        Unknown,
+        Behind,
+        Missing,
+        Error,
+    }
+
+    impl ZoneState {
+        // What: the word of a state in answers and logs.
+        // Why: the page maps this word to label and colour.
+        // From: Issue #1683 | PR #2017
+        pub fn word(self) -> &'static str {
+            match self {
+                ZoneState::InSync => "in_sync",
+                ZoneState::Ahead => "ahead",
+                ZoneState::Unknown => "unknown",
+                ZoneState::Behind => "behind",
+                ZoneState::Missing => "missing",
+                ZoneState::Error => "error",
+            }
+        }
+    }
+
+    // What: SOA serial of one zone in a zone list.
+    // Why: serials show whether a secondary is in sync.
+    // From: Issue #1683 | PR #1980
+    pub fn serial_of(zones: &[crate::pdns::Zone], zone: &str) -> Option<u32> {
+        zones.iter().find(|z| z.name == zone).map(|z| z.serial)
+    }
+
+    // What: both serials of every managed zone.
+    // Why: table and check compare the same rows.
+    // From: Issue #1683 | PR #2017
+    pub fn peer_zones(
+        s: &Settings,
+        ours: &[crate::pdns::Zone],
+        theirs: &[crate::pdns::Zone],
+    ) -> Result<Vec<PeerZone>, String> {
+        Ok(crate::dns::managed_zones(s)?
+            .into_iter()
+            .map(|zone| PeerZone {
+                primary: serial_of(ours, &zone),
+                secondary: serial_of(theirs, &zone),
+                zone,
+            })
+            .collect())
+    }
+
+    // What: state of one zone from its two serials.
+    // Why: the peer status is the worst zone state.
+    // From: Issue #1683
+    pub fn zone_state(z: &PeerZone) -> ZoneState {
+        use crate::dns::Sync;
+        // What: let-else instead of None in a tuple.
+        // Why: CodeQL read that None as unused.
+        // From: Issue #1683
+        let Some(p) = z.primary else {
+            return ZoneState::Error;
+        };
+        let Some(r) = z.secondary else {
+            return ZoneState::Missing;
+        };
+        match crate::dns::sync_state(p, r) {
+            Sync::InSync => ZoneState::InSync,
+            Sync::Ahead => ZoneState::Ahead,
+            Sync::Unknown => ZoneState::Unknown,
+            Sync::Behind => ZoneState::Behind,
+        }
+    }
+
+    // What: the worst state of the zones; none: in sync.
+    // Why: one lagging zone decides the peer status.
+    // From: Issue #1683 | PR #2017
+    pub fn worst_state(zones: &[PeerZone]) -> ZoneState {
+        zones
+            .iter()
+            .map(zone_state)
+            .max()
+            .unwrap_or(ZoneState::InSync)
+    }
+
+    // What: TSIG key in PowerDNS; returns its name.
+    // Why: zones are made with the key; it comes first.
+    // From: Issue #1683
+    pub async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
+        let name = s.text("DDNS_TSIG_NAME")?;
+        let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
+        own_api(
+            s,
+            crate::http::client(s)?,
+            &crate::secret::get(s, "PDNS_API_KEY")?,
+        )?
+        .set_tsigkey(&name, &algorithm, &crate::secret::tsig_secret(s)?)
+        .await?;
+        Ok(name)
+    }
+
+    // What: bind the TSIG key to every existing zone.
+    // Why: zones of older versions were created without it.
+    // From: Issue #1683 | PR #1858
+    pub async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
+        let api = own_api(
+            s,
+            crate::http::client(s)?,
+            &crate::secret::get(s, "PDNS_API_KEY")?,
+        )?;
+        let secondary = crate::dns::Role::from_settings(s)? == crate::dns::Role::Secondary;
+        let key = vec![key.to_string()];
+        for z in api.zones().await? {
+            if secondary {
+                api.set_secondary_tsig(&z.name, &key[0]).await?;
+            } else {
+                api.set_metadata(&z.name, "TSIG-ALLOW-AXFR", &key).await?;
+            }
+        }
+        Ok(())
+    }
+
+    // What: create missing zones on a secondary.
+    // Why: the zone list comes from registration.
+    // From: Issue #1683 | PR #1858
+    pub async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
+        let zones = s.list("DNS_SECONDARY_ZONES");
+        let port = primary_xfr_port(s, zones.first()).await?;
+        let masters = vec![crate::dns::host_port(&s.text("DNS_XFR_PRIMARY")?, port)];
+        // What: no removal; the primary's check prunes.
+        // Why: this list is from setup and may be older.
+        // From: Issue #1683
+        match_zones(
+            &own_api(
+                s,
+                crate::http::client(s)?,
+                &crate::secret::get(s, "PDNS_API_KEY")?,
+            )?,
+            &zones,
+            &masters,
+            key,
+            false,
+            "secondary",
+        )
+        .await
+    }
+
+    // What: a secondary holds exactly the wanted zones.
+    // Why: one rule at setup and in the primary's check.
+    // From: Issue #1683
+    pub async fn match_zones(
+        api: &crate::pdns::Api,
+        zones: &[String],
+        masters: &[String],
+        key: &str,
+        prune: bool,
+        who: &str,
+    ) -> Result<(), String> {
+        let have = api.zones().await?;
+        let wanted: Vec<String> = zones.iter().map(|z| crate::pdns::zone_id(z)).collect();
+        for id in &wanted {
+            if let Some(z) = have.iter().find(|z| z.name == *id) {
+                if z.masters != masters {
+                    api.set_masters(id, masters).await?;
+                }
+            } else {
+                api.create_secondary(id, masters, key).await?;
+                // What: pull the new zone now.
+                // Why: else pdns waits a xfr cycle.
+                // From: Issue #1683
+                api.axfr_retrieve(id).await?;
+                eprintln!("{who}: secondary zone {id} added");
+            }
+        }
+        // What: drop copies the primary no longer serves.
+        // Why: a removed LAN domain must stop answering.
+        // From: Issue #1683
+        for z in have
+            .iter()
+            .filter(|z| prune && z.kind == "Slave" && !wanted.contains(&z.name))
+        {
+            api.delete_zone(&z.name).await?;
+            eprintln!("{who}: secondary zone {} removed", z.name);
+        }
+        Ok(())
+    }
+
+    // What: port 53 if the primary answers aa there.
+    // Why: an older primary has its recursor on DNS_PORT.
+    // From: Issue #1683
+    pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
+        let fallback = s.uint("PDNS_AUTH_PORT")?;
+        let Some(zone) = zone else {
+            return Ok(fallback);
+        };
+        let primary = s.text("DNS_XFR_PRIMARY")?;
+        let probe = soa_on_dns_port(s, &primary, zone).await;
+        // What: no aa or no answer: stay on PDNS_AUTH_PORT.
+        // Why: a failed probe must not stop the zones step.
+        // From: Issue #1683
+        let chosen = match &probe {
+            Ok(soa) if soa.serves_zone() => s.uint("DNS_PORT")?,
+            _ => fallback,
+        };
+        eprintln!("primary {primary}: {probe:?}; XFR port {chosen}");
+        Ok(chosen)
+    }
+
+    // What: non-RD SOA query to DNS_PORT of one address.
+    // Why: XFR port choice and the NS check ask the same.
+    // From: Issue #1683
+    pub async fn soa_on_dns_port(
+        s: &Settings,
+        address: &str,
+        zone: &str,
+    ) -> Result<crate::dns::Soa, String> {
+        let ip = crate::dns::parse_ip(address)?;
+        let port = s.num::<u16>("DNS_PORT")?;
+        let addr = std::net::SocketAddr::new(ip, port);
+        let wait = std::time::Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
+        let zone = zone.to_string();
+        tokio::task::spawn_blocking(move || crate::dns::soa_probe(addr, &zone, wait))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    // What: the zone list of one secondary by address.
+    // Why: the watchdog and the ui read the same list.
+    // From: Issue #1683
+    pub async fn zones_at(s: &Settings, address: &str) -> Result<Vec<crate::pdns::Zone>, String> {
+        let key = crate::secret::get(s, "PDNS_API_KEY")?;
+        api_at(s, crate::http::client(s)?, address, &key)?
+            .zones()
+            .await
+    }
+
+    // What: one API client per recursor.
+    // Why: flush and statistics reach every recursor.
+    // From: Issue #1683 | PR #2017
+    pub fn recursor_apis(s: &Settings) -> Result<Vec<crate::pdns::Api>, String> {
+        let key = crate::secret::get(s, "RECURSOR_API_KEY")?;
+        let client = crate::http::client(s)?;
+        Ok(s.list("RECURSOR_API_URLS")
+            .iter()
+            .map(|url| crate::pdns::Api::new(client.clone(), url, &key))
+            .collect())
+    }
+
+    // What: serial each zone was last flushed at.
+    // Why: one rule for the ui and the dns helper.
+    // From: Issue #1683
+    #[derive(Default)]
+    pub struct Flushed(Option<BTreeMap<String, u32>>);
+
+    impl Flushed {
+        // What: zones whose serial moved since the flush.
+        // Why: at start pdns NOTIFY already wiped them.
+        // From: Issue #1683
+        pub fn due(&mut self, zones: &BTreeMap<String, u32>) -> Vec<(String, u32)> {
+            let seen = self.0.get_or_insert_with(|| zones.clone());
+            seen.retain(|zone, _| zones.contains_key(zone));
+            zones
+                .iter()
+                .filter(|(zone, serial)| seen.get(*zone) != Some(*serial))
+                .map(|(zone, serial)| (zone.clone(), *serial))
+                .collect()
+        }
+
+        // What: note a flush that worked.
+        // Why: a failed one stays due for the next round.
+        // From: Issue #1683
+        pub fn done(&mut self, zone: &str, serial: u32) {
+            self.0
+                .get_or_insert_with(BTreeMap::new)
+                .insert(zone.to_string(), serial);
+        }
+    }
+
+    // What: clears one zone in every recursor cache.
+    // Why: an edit shows at once, not after the poll.
+    // From: Issue #1683 | PR #1980
+    pub async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
+        for r in recursor_apis(s)? {
+            r.flush(zone, true).await?;
+        }
+        Ok(())
+    }
+
+    // What: pdns API of this node, primary or secondary.
+    // Why: records and zones live only in PowerDNS.
+    // From: Issue #1683 | PR #2019
+    pub fn own_api(
+        s: &Settings,
+        client: reqwest::Client,
+        key: &str,
+    ) -> Result<crate::pdns::Api, String> {
+        Ok(crate::pdns::Api::new(
+            client,
+            &s.text("PDNS_PRIMARY_API_URL")?,
+            key,
+        ))
+    }
+
+    // What: pdns API of one peer by its address.
+    // Why: zone list, AXFR request and sync use it.
+    // From: Issue #1683 | PR #2019
+    pub fn api_at(
+        s: &Settings,
+        client: reqwest::Client,
+        address: &str,
+        key: &str,
+    ) -> Result<crate::pdns::Api, String> {
+        let host = crate::dns::host_port(address, s.uint("PDNS_AUTH_API_PORT")?);
+        let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
+        Ok(crate::pdns::Api::new(client, &url, key))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{PeerZone, worst_state, zone_state};
+
+        // What: a zone row with the two given serials.
+        // Why: the tests differ only in the serials.
+        // From: Issue #1683 | PR #2017
+        fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
+            PeerZone {
+                zone: "z".into(),
+                primary,
+                secondary,
+            }
+        }
+
+        #[test]
+        fn zone_state_names_each_case() {
+            assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
+            assert_eq!(zone_state(&zone(Some(3), Some(4))).word(), "ahead");
+            assert_eq!(zone_state(&zone(Some(4), Some(3))).word(), "behind");
+            assert_eq!(zone_state(&zone(Some(3), None)).word(), "missing");
+            assert_eq!(zone_state(&zone(None, Some(3))).word(), "error");
+        }
+
+        #[test]
+        fn one_lagging_zone_decides_the_status() {
+            let zones = vec![zone(Some(3), Some(3)), zone(Some(5), Some(4))];
+            assert_eq!(worst_state(&zones).word(), "behind");
+            assert_eq!(worst_state(&[]).word(), "in_sync");
+        }
+    }
+}
 
 // What: recursor.yml, RPZ zone and Lua files.
 // Why: two recursors: HTTP mode and HTTPS mode.
 // From: Issue #1683 | PR #1980
 pub mod recursor_conf {
     use crate::config::Settings;
+
+    // What: live DNSSEC state of the own zones.
+    // Why: render stays pure; pdns holds the keys.
+    // From: Issue #1683 | PR #2019
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    pub struct Chain {
+        // What: top zone and its DS rows; none = NTA.
+        // Why: a missing DS must never leave it unchecked.
+        // From: Issue #1683 | PR #2019
+        pub anchors: Vec<(String, Vec<String>)>,
+        // What: zones whose chain from an anchor holds.
+        // Why: only those may lose their NTA.
+        // From: Issue #1683 | PR #2019
+        pub secured: Vec<String>,
+    }
 
     // What: which of the two recursors.
     // Why: keys differ only by HTTP or HTTPS.
@@ -2689,11 +3394,8 @@ pub mod recursor_conf {
         items
             .iter()
             .map(|i| {
-                if i.contains(['"', '\\', '\n', '\r']) {
-                    Err(format!("value {i:?} has quote or line break"))
-                } else {
-                    Ok([indent, "- \"", i.as_str(), "\"\n"].concat())
-                }
+                crate::config::plain(i)?;
+                Ok([indent, "- \"", i.as_str(), "\"\n"].concat())
             })
             .collect()
     }
@@ -2742,20 +3444,32 @@ pub mod recursor_conf {
     // What: Lua config that loads the RPZ file.
     // Why: the recursor reads RPZ only via Lua.
     // From: Issue #1683 | PR #1980
-    pub fn lua(s: &Settings, rpz_file: &str) -> Result<String, String> {
+    pub fn lua(s: &Settings, rpz_file: &str, chain: &Chain) -> Result<String, String> {
         let policy = s.text("RPZ_POLICY_NAME")?;
-        if [rpz_file, policy.as_str()]
-            .iter()
-            .any(|v| v.contains(['"', '\\', '\n']))
-        {
-            return Err("RPZ path or policy name is not plain".into());
-        }
+        crate::config::plain(rpz_file)?;
+        crate::config::plain(&policy)?;
         let mut lua = format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n");
-        // What: no DNSSEC check for the local zones.
-        // Why: they are unsigned; the root denies them.
+        // What: no DNSSEC check for an unchained zone.
+        // Why: the root denies it; no chain, no proof.
         // From: Issue #1683 | PR #1980
         for z in crate::dns::managed_zones(s)? {
-            lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
+            if !chain.secured.contains(&z) {
+                lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
+            }
+        }
+        // What: a top zone is anchored by its own DS.
+        // Why: .lan and .local then validate (POC 25.11.).
+        // From: Issue #1683 | PR #2019
+        for (zone, ds) in &chain.anchors {
+            let name = zone.trim_end_matches('.');
+            crate::config::plain(name)?;
+            if ds.is_empty() {
+                lua += &format!("addNTA(\"{name}\")\n");
+            }
+            for row in ds {
+                crate::config::plain(row)?;
+                lua += &format!("addTA(\"{name}\", \"{row}\")\n");
+            }
         }
 
         // What: no DNSSEC check for private domains.
@@ -2766,7 +3480,31 @@ pub mod recursor_conf {
                 lua += &format!("addNTA(\"{z}\")\n");
             }
         }
+        lua += &root_copy(s)?;
         Ok(lua)
+    }
+
+    // What: Lua line that keeps a root zone copy cached.
+    // Why: fewer root queries; none if "." goes upstream.
+    // From: Issue #1683 | PR #2019
+    fn root_copy(s: &Settings) -> Result<String, String> {
+        let all_upstream = !upstream_servers(s)?.is_empty()
+            && upstream_zones(s, "DNS_UPSTREAM_ZONES")?
+                .iter()
+                .any(|z| z == ".");
+        if all_upstream || !s.flag("ROOT_ZONE_MIRROR")? {
+            return Ok(String::new());
+        }
+        let url = s.text("ROOT_ZONE_MIRROR_URL")?;
+        crate::config::plain(&url)?;
+        // What: the recursor checks ZONEMD and DNSSEC.
+        // Why: both are defaults of zoneToCache.
+        // From: Issue #1683 | PR #2019
+        Ok(format!(
+            "zoneToCache(\".\", \"url\", \"{url}\", {{ refreshPeriod={}, retryOnErrorPeriod={} }})\n",
+            s.uint("ROOT_ZONE_MIRROR_REFRESH")?,
+            s.uint("ROOT_ZONE_MIRROR_RETRY")?
+        ))
     }
 
     // What: domain list for upstream forwarding.
@@ -2793,7 +3531,7 @@ pub mod recursor_conf {
         if key == "DNS_UPSTREAM_ZONES" {
             for m in crate::dns::managed_zones(s)? {
                 let m = m.trim_end_matches('.').to_ascii_lowercase();
-                if let Some(z) = out.iter().find(|z| **z == m || crate::dns::is_below(z, &m)) {
+                if let Some(z) = out.iter().find(|z| crate::dns::is_within(z, &m)) {
                     return Err(format!(
                         "{key}: {z} is the local zone {m}; it is answered here"
                     ));
@@ -2869,10 +3607,17 @@ pub mod recursor_conf {
         which: Which,
         api_key: &str,
         lua_file: &str,
+        chain: &Chain,
     ) -> Result<String, String> {
         let u = |k: &str| s.uint(k).map(|v| v.to_string());
         let auth = crate::pdns_conf::auth_endpoint(s)?;
-        let zones = crate::dns::managed_zones(s)?;
+        let mut zones = crate::dns::managed_zones(s)?;
+        // What: the top zones go to pdns too.
+        // Why: else the root copy denies them (POC case d).
+        // From: Issue #1683 | PR #2019
+        for (zone, _) in &chain.anchors {
+            crate::config::add_once(&mut zones, zone);
+        }
         let local: String = zones
             .iter()
             .map(|z| {
@@ -2939,7 +3684,7 @@ pub mod recursor_conf {
         }
         y += &format!(
             "recursor:\n  serve_rfc1918: {}\n",
-            s.flag("DNS_SERVE_RFC1918")?
+            s.flag("DNS_LOCAL_REVERSE_ZONES")?
         );
         y += &format!("  socket_dir: \"{}\"\n", s.text("RECURSOR_RUN_DIR")?);
         y += &format!("  forward_zones:\n{local}{recurse}");
@@ -3038,16 +3783,6 @@ pub mod dnsdist_conf {
         pub backend: String,
     }
 
-    // What: refuses a quote, backslash or line break.
-    // Why: the value goes into a Lua string unchanged.
-    // From: Issue #1683 | PR #2017
-    fn plain(v: &str) -> Result<&str, String> {
-        if v.contains(['"', '\\', '\n', '\r']) {
-            return Err(format!("value {v:?} has quote or line break"));
-        }
-        Ok(v)
-    }
-
     // What: dnsdist Lua config from plain values.
     // Why: no Settings needed; the tests call it.
     // From: Issue #1683
@@ -3061,22 +3796,22 @@ pub mod dnsdist_conf {
         let first = listeners.first().ok_or("dnsdist needs a listener")?;
         let mut out = String::from("setACL({})\n");
         for net in acl {
-            out += &format!("addACL(\"{}\")\n", plain(net)?);
+            out += &format!("addACL(\"{}\")\n", crate::config::plain(net)?);
         }
         let mut call = "setLocal";
         for l in listeners {
             for addr in listen {
-                let addr = plain(addr)?;
+                let addr = crate::config::plain(addr)?;
                 let local = crate::dns::host_port(addr, l.port);
                 out += &format!("{call}(\"{local}\")\n");
                 call = "addLocal";
             }
         }
-        let source = plain(source)?;
+        let source = crate::config::plain(source)?;
         let mut server = |pool: &str, address: &str| -> Result<(), String> {
             out += &format!(
                 "newServer({{address=\"{}\", pool=\"{pool}\", name=\"{pool}\", source=\"{source}\", useProxyProtocol=true, healthCheckMode=\"up\"}})\n",
-                plain(address)?
+                crate::config::plain(address)?
             );
             Ok(())
         };
@@ -3259,26 +3994,59 @@ pub mod kea_conf {
         u32::from(ip) & mask == u32::from(net) & mask
     }
 
+    // What: subnet DDNS suffix from its domain-name.
+    // Why: Kea D2 picks the zone by the FQDN suffix.
+    // From: Issue #1683
+    pub fn subnet_ddns_suffix(s: &Settings, subnet: &mut Value) -> Result<(), String> {
+        let lans = crate::dns::lan_domains(s)?;
+        let domain = crate::dhcp::option_data(subnet, crate::dhcp::DOMAIN_NAME.name);
+        let zone = Some(domain)
+            .filter(|d| !d.is_empty())
+            .map(|d| crate::dns::canonical_zone(&d));
+        let Some(obj) = subnet.as_object_mut() else {
+            return Err("subnet is no JSON object".into());
+        };
+        // What: the main domain uses the global suffix.
+        // Why: a foreign domain-name has no zone here.
+        // From: Issue #1683
+        match zone.filter(|z| lans.iter().skip(1).any(|l| l == z)) {
+            Some(z) => obj.insert("ddns-qualifying-suffix".into(), Value::from(z)),
+            None => obj.remove("ddns-qualifying-suffix"),
+        };
+        Ok(())
+    }
+
     // What: the option rows of the SOT subnet.
     // Why: router, DNS, domain and NTP come from the SOT.
     // From: Issue #1683 | PR #1980
     fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
-        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
-        let mut rows = Vec::new();
-        rows.push(json!({"name": ROUTERS.name, "data": s.text("DHCP_GATEWAY")?}));
-        let dns = crate::dhcp::dns_addrs(s).join(", ");
-        rows.push(json!({"name": DNS_SERVERS.name, "data": dns}));
-        rows.push(json!({"name": DOMAIN_NAME.name, "data": domain}));
-        rows.push(json!({"name": DOMAIN_SEARCH.name, "data": domain}));
+        let dns = crate::dhcp::dns_addrs(s);
         let ntp = crate::dhcp::ntp_addrs(s)?;
-        if !ntp.is_empty() {
-            rows.push(json!({"name": NTP_SERVERS.name, "data": ntp.join(", ")}));
-        }
+        let mut rows = named_rows(&s.text("DHCP_GATEWAY")?, &dns, domain, &ntp);
         let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
         for (code, data) in crate::dhcp::custom_options(s, &raw)? {
             rows.push(json!({"code": code, "data": data}));
         }
         Ok(rows)
+    }
+
+    // What: the named options of one Kea subnet.
+    // Why: settings and the subnet form give the same rows.
+    // From: Issue #1683
+    pub fn named_rows(gateway: &str, dns: &[String], domain: &str, ntp: &[String]) -> Vec<Value> {
+        use crate::dhcp::{DNS_SERVERS, DOMAIN_NAME, DOMAIN_SEARCH, NTP_SERVERS, ROUTERS};
+        let mut rows = vec![
+            json!({"name": ROUTERS.name, "data": gateway}),
+            json!({"name": DNS_SERVERS.name, "data": dns.join(", ")}),
+        ];
+        if !domain.is_empty() {
+            rows.push(json!({"name": DOMAIN_NAME.name, "data": domain}));
+            rows.push(json!({"name": DOMAIN_SEARCH.name, "data": domain}));
+        }
+        if !ntp.is_empty() {
+            rows.push(json!({"name": NTP_SERVERS.name, "data": ntp.join(", ")}));
+        }
+        rows
     }
 
     // What: the pool of a subnet as Kea writes it.
@@ -3310,12 +4078,14 @@ pub mod kea_conf {
         let domain = lan_domain(s)?;
         let (valid, max) = crate::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
         let pool = pool_text(&s.text("DHCP_RANGE_START")?, &s.text("DHCP_RANGE_END")?);
-        // What: the LAN domain of the last render.
-        // Why: kept subnets follow a changed DHCP_DOMAIN.
-        // From: Issue #1683 | PR #1980
+        // What: last main domain, if no LAN domain now.
+        // Why: kept subnets follow only a dropped domain.
+        // From: Issue #1683
+        let lans = crate::dns::lan_domains(s)?;
         let before = existing
             .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
             .and_then(Value::as_str)
+            .filter(|d| !lans.contains(&crate::dns::canonical_zone(d)))
             .map(|d| d.trim_end_matches('.').to_string());
         let id = s.uint("DHCP_SUBNET_ID")?;
         let kept = existing
@@ -3363,7 +4133,10 @@ pub mod kea_conf {
             }
         }
         let mut subnets = vec![main];
-        subnets.extend(old.filter(|x| x["id"].as_u64() != Some(id)).cloned());
+        for mut sn in old.filter(|x| x["id"].as_u64() != Some(id)).cloned() {
+            subnet_ddns_suffix(s, &mut sn)?;
+            subnets.push(sn);
+        }
         let updates = s.flag("DHCP_DDNS")?;
         Ok(json!({"Dhcp4": {
             "interfaces-config": {
@@ -3391,7 +4164,7 @@ pub mod kea_conf {
             "ddns-override-client-update": true,
             "ddns-replace-client-name": s.text("KEA_DDNS_REPLACE_CLIENT_NAME")?,
             "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
-            "ddns-qualifying-suffix": format!("{domain}."),
+            "ddns-qualifying-suffix": crate::pdns::zone_id(&domain),
             "loggers": log_rows(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
         }}))
     }
@@ -3422,7 +4195,13 @@ pub mod kea_conf {
             "port": s.uint("PDNS_AUTH_PORT")?
         }]);
         let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
-        let lan = crate::dns::lan_zone(s)?;
+        // What: one forward entry per LAN domain.
+        // Why: D2 rejects a name outside every listed zone.
+        // From: Issue #1683
+        let forward: Vec<Value> = crate::dns::lan_domains(s)?
+            .iter()
+            .map(|z| entry(z))
+            .collect();
         let reverse: Vec<Value> = crate::dns::private_reverse_zones(s)
             .iter()
             .map(|z| entry(z))
@@ -3435,7 +4214,7 @@ pub mod kea_conf {
                 "algorithm": s.text("DDNS_TSIG_ALGORITHM")?,
                 "secret": secret
             }],
-            "forward-ddns": {"ddns-domains": [entry(&lan)]},
+            "forward-ddns": {"ddns-domains": forward},
             "reverse-ddns": {"ddns-domains": reverse},
             "loggers": log_rows(s, &["kea-dhcp-ddns"])?
         }}))
@@ -3656,6 +4435,14 @@ pub mod nginx_conf {
             let labels: Vec<&str> = name.split('.').collect();
             let keep = self.suffix_labels(&labels) + 1;
             (labels.len() >= keep).then(|| labels[labels.len() - keep..].join("."))
+        }
+
+        // What: does the Internet know this one label?
+        // Why: an unknown ending gets its own top zone.
+        // From: Issue #1683 | PR #2019
+        pub fn is_tld(&self, label: &str) -> bool {
+            let l = label.to_ascii_lowercase();
+            self.plain.contains(&l) || self.wild.contains(&l)
         }
     }
 
@@ -3980,18 +4767,21 @@ pub mod nginx_conf {
     pub fn files(s: &Settings, h: &Hosts, https: bool) -> Result<Vec<(String, String)>, String> {
         let p = plan(s)?;
         let keys = h.keys();
+        let fallback = s.text("NGINX_DEFAULT_CERT")?;
+        // What: client, cdn and cert maps, HTTPS off too.
+        // Why: proxy-params.conf reads the first two.
+        // From: Issue #1683 | PR #2019
         let mut out = vec![
             (p.acl.clone(), acl_file(&p)),
             (s.text("NGINX_STREAM_TARGETS_FILE")?, stream_file(&p, &keys)),
+            (
+                s.text("NGINX_HTTPS_MAP_FILE")?,
+                https_map(&p, &keys, &fallback),
+            ),
         ];
         if !https {
             return Ok(out);
         }
-        let fallback = s.text("NGINX_DEFAULT_CERT")?;
-        out.push((
-            s.text("NGINX_HTTPS_MAP_FILE")?,
-            https_map(&p, &keys, &fallback),
-        ));
         let listen = format!(
             "{HEAD}listen {0}:{1} ssl proxy_protocol default_server;\nlisten {0}:{2} ssl;\n",
             p.lo, p.mitm, p.health
@@ -4060,7 +4850,7 @@ pub mod apply {
     // What: an owner's reload commands, "owner:cmd+arg".
     // Why: RELOAD_EXEC in the SOT; no list in code.
     // From: Issue #1683
-    fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
+    pub fn exec_cmds<'a>(exec: &'a [String], owner: &'a str) -> impl Iterator<Item = Vec<&'a str>> {
         exec_rows(exec).filter_map(move |(o, cmd)| (o == owner).then_some(cmd))
     }
 
@@ -4145,7 +4935,7 @@ pub mod apply {
 // From: Issue #1683 | PR #1980
 pub mod render {
     use crate::config::Settings;
-    use crate::recursor_conf::{self, Which};
+    use crate::recursor_conf::{self, Chain, Which};
     use crate::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
     use std::path::{Path, PathBuf};
 
@@ -4164,7 +4954,7 @@ pub mod render {
     // Why: apply::plan needs the owner per change.
     // From: Issue #1683 | PR #1980
     pub struct File {
-        pub owner: &'static str,
+        pub owner: String,
         pub path: PathBuf,
         pub body: String,
     }
@@ -4203,30 +4993,26 @@ pub mod render {
             }
         }
 
-        // What: adds a file, or records the error.
+        // What: adds a file of the service a SOT key names.
         // Why: a render reports all errors at once.
         // From: Issue #1683 | PR #1980
-        fn add_file(&mut self, owner: &'static str, path_key: &str, body: Result<String, String>) {
-            match (self.s.text(path_key), body) {
-                (Ok(p), Ok(body)) => self.files.push(File {
+        fn add_file(&mut self, service_key: &str, path_key: &str, body: Result<String, String>) {
+            let owner = self.s.text(service_key);
+            match (owner, self.s.text(path_key), body) {
+                (Ok(owner), Ok(p), Ok(body)) => self.files.push(File {
                     owner,
                     path: PathBuf::from(p),
                     body,
                 }),
-                (Err(e), _) | (_, Err(e)) => self.errs.push(e),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => self.errs.push(e),
             }
         }
         // What: adds a JSON value as a pretty file.
         // Why: a JSON error is recorded like any other.
         // From: Issue #1683 | PR #1980
-        fn put_json(
-            &mut self,
-            owner: &'static str,
-            key: &str,
-            v: Result<serde_json::Value, String>,
-        ) {
+        fn put_json(&mut self, service_key: &str, key: &str, v: Result<serde_json::Value, String>) {
             let body = v.and_then(|v| serde_json::to_string_pretty(&v).map_err(|e| e.to_string()));
-            self.add_file(owner, key, body);
+            self.add_file(service_key, key, body);
         }
     }
 
@@ -4244,21 +5030,25 @@ pub mod render {
     // What: the files of services and dns.
     // Why: the full and the DNS-only render share it.
     // From: Issue #1683 | PR #2004
-    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)]) {
+    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)], chain: &Chain) {
         let s = o.s;
-        o.add_file("services", "CHRONY_CONF_FILE", chrony::render(s));
-        o.add_file("services", "SYSLOG_CONF_FILE", log::render(s));
+        o.add_file("SERVICES_SERVICE", "CHRONY_CONF_FILE", chrony::render(s));
+        o.add_file("SERVICES_SERVICE", "SYSLOG_CONF_FILE", log::render(s));
         o.add_file(
-            "services",
+            "SERVICES_SERVICE",
             "SNMPD_CONF_FILE",
             crate::snmp::render(s, &[], &[]),
         );
         o.add_file(
-            "dns",
+            "DNS_SERVICE",
             "PDNS_CONF_FILE",
             pdns_conf::auth(s, &sec.pdns_api_key),
         );
-        o.add_file("dns", "DNSDIST_CONF_FILE", crate::dnsdist_conf::render(s));
+        o.add_file(
+            "DNS_SERVICE",
+            "DNSDIST_CONF_FILE",
+            crate::dnsdist_conf::render(s),
+        );
         for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
             let Ok(answer) = s.text(ip_key) else { continue };
             let rpz_key = which.key("RPZ_FILE");
@@ -4270,21 +5060,23 @@ pub mod render {
                 .map(|b| content_serial(&b))
                 .unwrap_or(1);
             o.add_file(
-                "dns",
+                "DNS_SERVICE",
                 &rpz_key,
                 recursor_conf::rpz(s, names, &answer, serial),
             );
-            let lua = s.text(&rpz_key).and_then(|p| recursor_conf::lua(s, &p));
-            o.add_file("dns", &lua_key, lua);
+            let lua = s
+                .text(&rpz_key)
+                .and_then(|p| recursor_conf::lua(s, &p, chain));
+            o.add_file("DNS_SERVICE", &lua_key, lua);
             let yaml = s
                 .text(&lua_key)
-                .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l));
-            o.add_file("dns", &which.key("CONF_FILE"), yaml);
+                .and_then(|l| recursor_conf::yaml(s, which, &sec.recursor_api_key, &l, chain));
+            o.add_file("DNS_SERVICE", &which.key("CONF_FILE"), yaml);
         }
         match s.flag("DNS_FILTER_AAAA") {
             Ok(true) => {
                 let body = Ok(recursor_conf::AAAA_FILTER_LUA.to_string());
-                o.add_file("dns", "RECURSOR_AAAA_LUA_FILE", body);
+                o.add_file("DNS_SERVICE", "RECURSOR_AAAA_LUA_FILE", body);
             }
             Ok(false) => {}
             Err(e) => o.errs.push(e),
@@ -4300,7 +5092,7 @@ pub mod render {
         // Why: the dhcp entry reads it at every start.
         // From: Issue #1683 | PR #1980
         let mode = s.text("DHCP_MODE").map(|m| format!("{m}\n"));
-        o.add_file("dhcp", "DHCP_MODE_FILE", mode);
+        o.add_file("DHCP_SERVICE", "DHCP_MODE_FILE", mode);
         match dhcp::Mode::from_settings(s) {
             Ok(dhcp::Mode::Off) => {}
             Ok(dhcp::Mode::Kea) => {
@@ -4310,19 +5102,23 @@ pub mod render {
                     .and_then(|p| std::fs::read(p).ok())
                     .and_then(|b| serde_json::from_slice(&b).ok());
                 o.put_json(
-                    "dhcp",
+                    "DHCP_SERVICE",
                     "KEA_DHCP4_CONF_FILE",
                     kea_conf::dhcp4(s, kept.as_ref()),
                 );
                 o.put_json(
-                    "dhcp",
+                    "DHCP_SERVICE",
                     "KEA_CTRL_CONF_FILE",
                     kea_conf::ctrl_agent(s, &sec.kea_ctrl_token),
                 );
                 let ddns = kea_conf::ddns(s, &sec.tsig_name, &sec.tsig_secret);
-                o.put_json("dhcp", "KEA_DDNS_CONF_FILE", ddns);
+                o.put_json("DHCP_SERVICE", "KEA_DDNS_CONF_FILE", ddns);
             }
-            Ok(mode) => o.add_file("dhcp", "DNSMASQ_CONF_FILE", dnsmasq_conf::render(s, mode)),
+            Ok(mode) => o.add_file(
+                "DHCP_SERVICE",
+                "DNSMASQ_CONF_FILE",
+                dnsmasq_conf::render(s, mode),
+            ),
             Err(e) => o.errs.push(e),
         }
     }
@@ -4338,9 +5134,16 @@ pub mod render {
     // Why: nginx files and certificates need the same set.
     // From: Issue #1683 | PR #2017
     fn cache_hosts(s: &Settings, domains: &str) -> Result<nginx_conf::Hosts, String> {
+        nginx_conf::hosts(domains, &psl(s)?)
+    }
+
+    // What: the Public Suffix List next to the templates.
+    // Why: cache names and own endings read one list.
+    // From: Issue #1683 | PR #2019
+    pub fn psl(s: &Settings) -> Result<nginx_conf::Psl, String> {
         let dir = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
-        let psl = nginx_conf::Psl::parse(&read(&dir.join(s.text("NGINX_PSL_FILE")?))?);
-        nginx_conf::hosts(domains, &psl)
+        let text = read(&dir.join(s.text("NGINX_PSL_FILE")?))?;
+        Ok(nginx_conf::Psl::parse(&text))
     }
 
     // What: the nginx files of the proxy.
@@ -4359,20 +5162,21 @@ pub mod render {
         }
         let hosts = cache_hosts(s, domains)?;
         let https = s.flag("HTTPS_ENABLED")?;
+        let proxy = s.text("PROXY_SERVICE")?;
         for name in s.list("NGINX_TEMPLATES") {
             if !https && name.ends_with("https.conf") {
                 continue;
             }
             let body = nginx_conf::template(&read(&src.join(&name))?, s)?;
             o.files.push(File {
-                owner: "proxy",
+                owner: proxy.clone(),
                 path: dst.join(&name),
                 body,
             });
         }
         for (rel, body) in nginx_conf::files(s, &hosts, https)? {
             o.files.push(File {
-                owner: "proxy",
+                owner: proxy.clone(),
                 path: dst.join(rel),
                 body,
             });
@@ -4381,7 +5185,7 @@ pub mod render {
         // Why: proxy-params.conf aliases it; ui owns files.
         // From: Issue #1683 | PR #1980
         o.files.push(File {
-            owner: "proxy",
+            owner: proxy,
             path: dst.join(s.text("NGINX_HEALTHZ_FILE")?),
             body: format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?),
         });
@@ -4508,10 +5312,48 @@ pub mod render {
         domains.lines().filter_map(crate::dns::cdn_entry).collect()
     }
 
+    // What: secrets the configs embed.
+    // Why: made once; restarts never change them.
+    // From: Issue #1683 | PR #1858
+    pub fn secrets(s: &Settings) -> Result<Secrets, String> {
+        use crate::secret;
+        Ok(Secrets {
+            pdns_api_key: secret::get(s, "PDNS_API_KEY")?,
+            recursor_api_key: secret::get(s, "RECURSOR_API_KEY")?,
+            tsig_name: s.text("DDNS_TSIG_NAME")?,
+            tsig_secret: secret::tsig_secret(s)?,
+            kea_ctrl_token: secret::get(s, "KEA_CTRL_TOKEN")?,
+        })
+    }
+
+    // What: write rendered files; list the changed.
+    // Why: an unchanged file never wakes its owner.
+    // From: Issue #1683 | PR #1980
+    pub fn write_files(s: &Settings, files: &[File]) -> Result<Vec<crate::config::Change>, String> {
+        let mode = s.mode("UI_CONFIG_FILE_MODE")?;
+        let mut out = Vec::new();
+        for f in files {
+            // What: a first write wakes no owner.
+            // Why: owners read it at start; a HUP kills.
+            // From: Issue #1683 | PR #1980
+            let wake = f.path.exists();
+            let owner = crate::fs::Owner::default();
+            let changed = crate::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner);
+            if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
+                out.push(crate::config::Change {
+                    key: f.path.display().to_string(),
+                    owner: f.owner.clone(),
+                    effect: crate::config::Effect::Reload,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     // What: render all files; report every error.
     // Why: one call for the ui; nothing half written.
     // From: Issue #1683 | PR #1980
-    pub fn all(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
+    pub fn all(s: &Settings, sec: &Secrets, chain: &Chain) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
         let domains = match crate::cdn::effective(s) {
             Ok(d) => d,
@@ -4520,7 +5362,7 @@ pub mod render {
                 String::new()
             }
         };
-        dns_files(&mut o, sec, &cdn_names(&domains));
+        dns_files(&mut o, sec, &cdn_names(&domains), chain);
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
             o.errs.push(e);
@@ -4534,13 +5376,17 @@ pub mod render {
     pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
         let mut o = Out::new(s);
         let domains = crate::cdn::effective(s).map_err(|e| vec![e])?;
-        dns_files(&mut o, sec, &cdn_names(&domains));
+        // What: a secondary renders without anchors.
+        // Why: it keeps the NTA until the zone list.
+        // From: Issue #1683 | PR #2019
+        dns_files(&mut o, sec, &cdn_names(&domains), &Chain::default());
         // What: dns files and the snmpd.conf.
         // Why: snmpd waits for its file and blocks a stop.
         // From: Issue #1683
         let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
+        let dns = s.text("DNS_SERVICE").map_err(|e| vec![e])?;
         o.files
-            .retain(|f| f.owner == "dns" || Some(&f.path) == snmpd.as_ref());
+            .retain(|f| f.owner == dns || Some(&f.path) == snmpd.as_ref());
         o.finish()
     }
 }
@@ -5388,42 +6234,18 @@ pub mod tidy {
         pub mtime: u64,
     }
 
-    // What: change time in unix seconds, else 0.
-    // Why: ages are compared as plain seconds.
-    // From: Issue #1683 | PR #1980
-    fn mtime(meta: &std::fs::Metadata) -> u64 {
-        meta.modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs())
-    }
-
     // What: all regular files below a folder.
     // Why: base for age, size and pack runs.
     // From: Issue #1683 | PR #1980
     pub fn files(dir: &Path) -> Vec<Item> {
-        let mut out = Vec::new();
-        let mut todo = vec![dir.to_path_buf()];
-        while let Some(d) = todo.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else {
-                continue;
-            };
-            for e in rd.flatten() {
-                let Ok(meta) = std::fs::symlink_metadata(e.path()) else {
-                    continue;
-                };
-                if meta.is_dir() {
-                    todo.push(e.path());
-                } else if meta.is_file() {
-                    out.push(Item {
-                        path: e.path(),
-                        size: meta.len(),
-                        mtime: mtime(&meta),
-                    });
-                }
-            }
-        }
-        out
+        crate::fs::files_under(dir)
+            .into_iter()
+            .map(|(path, meta)| Item {
+                path,
+                size: meta.len(),
+                mtime: crate::fs::modified_secs(&meta),
+            })
+            .collect()
     }
 
     // What: remove files older than days.

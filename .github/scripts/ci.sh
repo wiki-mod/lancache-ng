@@ -3831,12 +3831,19 @@ ci_cmd_update_psl() {
     _ci_run "[CI-ERROR-CACHE-0037]" "dir=\"${dest}\" reason=\"PSL not put in place\"" cp -f -- "${dir}/${name}" "${dest}/${name}"
 }
 
+# What: memo key of a rust keep or drop listing.
+# Why: one format for the read and the two writes.
+# From: Issue #1683 | PR #2019
+_ci_rust_memo_key() {
+    printf 'rust-%s-%s' "$1" "$2"
+}
+
 # What: Rust items of a listing row's blob; $3 keep|drop.
 # Why: A3: plan read each library per service and ref.
 # From: Issue #1683 | PR #1858
 _ci_listing_items() {
     local oid="${1#*$'\t'}" mode="${3:-drop}" blob out row keep="" drop=""
-    if out="$(_ci_job_memo_get "rust-${mode}-${oid}")"; then
+    if out="$(_ci_job_memo_get "$(_ci_rust_memo_key "${mode}" "${oid}")")"; then
         printf '%s\n' "${out}"
         return 0
     fi
@@ -3860,8 +3867,8 @@ _ci_listing_items() {
     done <<< "${out}"
     keep="${keep%$'\n'}"
     drop="${drop%$'\n'}"
-    [ -z "${keep}" ] || _ci_job_memo_put "rust-keep-${oid}" "${keep}" || return 2
-    [ -z "${drop}" ] || _ci_job_memo_put "rust-drop-${oid}" "${drop}" || return 2
+    [ -z "${keep}" ] || _ci_job_memo_put "$(_ci_rust_memo_key keep "${oid}")" "${keep}" || return 2
+    [ -z "${drop}" ] || _ci_job_memo_put "$(_ci_rust_memo_key drop "${oid}")" "${drop}" || return 2
     if [ "${mode}" = keep ]; then
         printf '%s\n' "${keep}"
     else
@@ -6483,16 +6490,9 @@ _ci_sccache_env() {
     export SCCACHE_SERVER_UDS="${sock_dir}/s${step}.sock"
     probe="$(_ci_sccache_start)" || prc=$?
     [ "${prc}" -eq 0 ] && return 0
-    if [ "${mode}" = required ]; then
-        ci_error "[CI-ERROR-CACHE-0008]" "prefix=\"${prefix}\" chain=\"${chain:-local}\" rc=${prc} reason=\"required sccache cache did not start; fail closed\"" "${probe}"
-        unset RUSTC_WRAPPER
-        _ci_sccache_stop
-        unset SCCACHE_SERVER_UDS
-        return 2
-    fi
-    # What: optional: drop redis, then remote, then local.
-    # Why: AG-CI-011: optional mode keeps correctness.
-    # From: Issue #1683 | PR #1858
+    # What: a cache that will not start is absence.
+    # Why: §72.2: absence degrades to direct rustc.
+    # From: Issue #1683 | PR #2019
     while [ -n "${chain}" ]; do
         next="$(_ci_sccache_chain_next "${chain}")"
         ci_error "[CI-WARN-CACHE-0003]" "prefix=\"${prefix}\" chain=\"${chain}\" next=\"${next:-local}\" rc=${prc} reason=\"sccache cache level unavailable\"" "${probe}"
@@ -7626,16 +7626,15 @@ _ci_sccache_report() {
     # From: Issue #1683 | PR #1912
     cause="$(_ci_capture 1 grep -E 'storage check result|storage write check failed|cache storage (read check|failed to read)|Error executing cache write|Cache read error|Cache timed out|compile result: cache error' "${log}")" || return 2
     cause="$(_ci_capture 1 grep -vE "${ok}" <<< "${cause}")" || return 2
-    if [ "${_CI_SCCACHE_MODE}" = required ]; then
-        ci_error "[CI-ERROR-CACHE-0016]" "errors=\"${errs# }\" log=\"${log}\" reason=\"required sccache cache level failed\"" "${cause}"
-        return 2
-    fi
-    ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${log}\" reason=\"sccache cache level failed\"" "${cause}"
+    # What: cache errors after a build that compiled.
+    # Why: §72.2: a cache fault only warns, never fails.
+    # From: Issue #1683 | PR #2019
+    ci_error "[CI-WARN-CACHE-0017]" "mode=${_CI_SCCACHE_MODE} errors=\"${errs# }\" log=\"${log}\" reason=\"sccache cache level fault; build compiled\"" "${cause}"
 }
 
-# What: cargo build; only optional sccache may be dropped.
+# What: cargo build; an sccache outage degrades (§72.2).
 # Why: a real build error fails at once, never degrades.
-# From: Issue #1683 | PR #1912
+# From: Issue #1683 | PR #2019
 _ci_rust_cargo_build() {
     local crates="$1" musl_target="$2" cargo_jobs="$3" crate
     local cargo_log cargo_status degraded=0
@@ -7679,18 +7678,17 @@ _ci_rust_cargo_build() {
             ci_log "[CI-ERROR-RUSTBUILD-0014]" "rc=${cargo_status} reason=\"accelerator outage output but no accelerator left\""
             return "${cargo_status}"
         fi
-        # What: a required sccache never drops mid-build.
-        # Why: AG-CI-011: required mode fails closed.
-        # From: Issue #1683 | PR #1912
-        if [ "${layers[0]}" = sccache ] && [ "${_CI_SCCACHE_MODE}" = required ]; then
-            ci_log "[CI-ERROR-RUSTBUILD-0053]" "rc=${cargo_status} reason=\"sccache outage under SCCACHE_REDIS_MODE=required; fail closed\""
-            return 2
-        fi
         case "${layers[0]}" in
             ccache|distcc)
+                # What: ccache/distcc outage; kept failing.
+                # Why: §72.2 degrade is a follow-up here.
+                # From: Issue #1683 | PR #1912
                 ci_log "[CI-ERROR-RUSTBUILD-0011]" "rc=${cargo_status} layer=${layers[0]} reason=\"configured accelerator outage; no fallback (AG-CI-007)\""
                 return 2 ;;
             sccache)
+                # What: sccache outage; drop it and retry.
+                # Why: §72.2: absence degrades; required.
+                # From: Issue #1683 | PR #2019
                 unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX
                 ci_log "[CI-WARN-RUSTBUILD-0013]" "reason=\"accelerator outage; retry without sccache\"" ;;
         esac

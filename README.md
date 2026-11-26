@@ -582,6 +582,36 @@ nslookup lancache.steamcontent.com 192.0.2.10
 
 If DNS routing works, known CDN domains should resolve to your cache IP instead of a public CDN IP.
 
+## LAN domains
+
+Every local name ends in a LAN domain, for example `printer.home.lan`.
+`setup.sh install` asks for the main LAN domain (`DHCP_DOMAIN`) and for
+optional additional LAN domains (`DNS_EXTRA_LAN_DOMAINS`, comma separated).
+
+- Each LAN domain is its own zone in PowerDNS. The recursors answer it locally
+  and never forward it to an upstream resolver.
+- The main domain is the one DHCP hands to the main subnet; the name server
+  names use it too.
+- Admin UI, DNS page, Primary DNS tab: the domain list adds a domain, makes a
+  domain the main domain or removes one. A domain that still has records cannot
+  be removed. The dropdown below picks the domain whose records the page shows
+  and edits.
+- Admin UI, DHCP page: the domain of a Kea subnet is picked from the LAN
+  domains. With DDNS on, Kea registers the clients of that subnet in that
+  domain.
+- Installations from before multi-domain support had a second, empty zone
+  `local.<domain>`. At start the Admin UI moves any records of that zone into
+  `<domain>` (same names, snapshot of both zones first) and deletes it. If a
+  name and type exist in both zones, the old zone stays and the log names the
+  record.
+- A secondary follows the primary's LAN domains on its own. Right after a LAN
+  domain is added or removed, and in every secondary check, the primary sets the
+  zones of each registered secondary over that secondary's PowerDNS API: new zones
+  are created with the TSIG key and pulled, zones the primary no longer serves
+  are deleted. On the secondary the dns helper `lancache-dns` updates the
+  resolver's forward zones and flushes changed zones, so both answer a new or
+  removed domain alike within seconds.
+
 ## Testing the cache
 
 A simple test:
@@ -652,7 +682,7 @@ the Admin UI shows it under DNS, Secondary DNS.
 The order is: check, ask, then act.
 
 1. Check, before anything is installed or changed: the name (one DNS label:
-   letters, digits and inner dashes, at most 63 characters) and the host. A
+   letters, digits and inner dashes, at most 32 characters, SOT `DNS_SECONDARY_NAME_MAX`) and the host. A
    secondary needs its own host: if this host holds a LanCache-NG install
    (settings below the state root, the host service, or a dns container of
    the primary or another secondary, running or stopped), setup stops at
@@ -805,7 +835,7 @@ LANCACHE_IMAGE_TAG=<set-by-setup>
 
 `PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.0.2.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`Settings::load` in `services/common/config.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
 
-The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback). `setup.sh secondary` also writes `KEEP_KNOWN_GOOD_CONFIGS` to the secondary's `.env`, but no service reads it.
+The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback).
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
 `master`) is the install default (SOT `release.install_channel`). On update, a

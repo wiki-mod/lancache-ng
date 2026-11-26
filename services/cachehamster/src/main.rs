@@ -13,17 +13,12 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use futures_util::{StreamExt, stream};
-use lancache_ng::config::{Settings, process_env};
+use lancache_ng::config::Settings;
 use lancache_ng::fs::{Owner, PRIVATE_MODE, Place, write};
 use lancache_ng::{clock, http, secret};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-
-// What: env var naming the saved settings file.
-// Why: same lookup as ui and watchdog.
-// From: Issue #1683 | PR #1980
-const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: file names below CACHEHAMSTER_DATA_DIR.
 // Why: the daemon owns jobs; commands drop inbox files.
@@ -189,8 +184,7 @@ impl Ctx {
     // Why: every part of the service reads them once.
     // From: Issue #871 | PR #1980
     fn load() -> Result<Self, String> {
-        let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-        let s = Settings::load(&process_env, saved.as_deref())?;
+        let s = Settings::from_process()?;
         let dir = PathBuf::from(s.text("CACHEHAMSTER_DATA_DIR")?);
         let api = s.text("STEAM_API_URL")?.trim_end_matches('/').to_string();
         let bind = s.list("CACHEHAMSTER_BIND_FILES");
@@ -223,13 +217,11 @@ impl Ctx {
 // Why: a missing file is a normal first state.
 // From: Issue #871 | PR #1980
 fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, String> {
-    match std::fs::read(path) {
-        Ok(raw) => serde_json::from_slice(&raw)
-            .map(Some)
-            .map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    let raw =
+        lancache_ng::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    raw.map(|b| serde_json::from_slice(&b))
+        .transpose()
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: remove a file; a missing file is fine.
@@ -299,10 +291,9 @@ fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], Strin
 // Why: the plaintext token never touches the disk.
 // From: Issue #871 | PR #1858
 fn load_session(dir: &Path, bind: &[String]) -> Result<Option<Session>, String> {
-    let sealed = match std::fs::read(dir.join(TOKEN_FILE)) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{TOKEN_FILE}: {e}")),
+    let read = lancache_ng::fs::read_if_present(&dir.join(TOKEN_FILE));
+    let Some(sealed) = read.map_err(|e| format!("{TOKEN_FILE}: {e}"))? else {
+        return Ok(None);
     };
     // What: an old or moved login opens no more.
     // Why: the operator must know to scan the QR again.
@@ -326,19 +317,29 @@ fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
     )
 }
 
-// What: POST a form to a Steam Web API method.
+// What: how a Steam Web API call sends its values.
+// Why: write calls post a form, read calls use GET.
+// From: Issue #871 | PR #1980
+enum Req<'a> {
+    Get(&'a [(&'a str, &'a str)]),
+    Post(&'a [(&'a str, &'a str)]),
+}
+
+// What: one Steam Web API call; its "response" part.
 // Why: one owner for URL, error text and the response key.
 // From: Issue #871 | PR #1980
-async fn steam_post(
+async fn steam_api(
     client: &reqwest::Client,
-    c: &Ctx,
+    api: &str,
     method: &str,
-    form: &[(&str, &str)],
+    req: Req<'_>,
 ) -> Result<Value, String> {
-    let url = format!("{}/{method}/v1/", c.api);
-    let resp = client
-        .post(&url)
-        .form(form)
+    let url = format!("{api}/{method}/v1/");
+    let call = match req {
+        Req::Get(query) => client.get(&url).query(query),
+        Req::Post(form) => client.post(&url).form(form),
+    };
+    let resp = call
         .send()
         .await
         .map_err(|e| format!("{method}: {}", http::error_chain(&e)))?;
@@ -351,30 +352,6 @@ async fn steam_post(
         .to_string();
     if !status.is_success() {
         return Err(format!("{method}: HTTP {status}, eresult {eresult}"));
-    }
-    let body: Value = resp.json().await.map_err(|e| format!("{method}: {e}"))?;
-    Ok(body.get("response").cloned().unwrap_or(Value::Null))
-}
-
-// What: GET a Steam Web API method with query values.
-// Why: read-only service calls use GET.
-// From: Issue #871 | PR #1980
-async fn steam_get(
-    client: &reqwest::Client,
-    c: &Ctx,
-    method: &str,
-    query: &[(&str, &str)],
-) -> Result<Value, String> {
-    let url = format!("{}/{method}/v1/", c.api);
-    let resp = client
-        .get(&url)
-        .query(query)
-        .send()
-        .await
-        .map_err(|e| format!("{method}: {}", http::error_chain(&e)))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("{method}: HTTP {status}"));
     }
     let body: Value = resp.json().await.map_err(|e| format!("{method}: {e}"))?;
     Ok(body.get("response").cloned().unwrap_or(Value::Null))
@@ -440,14 +417,14 @@ async fn login_begin(c: &Ctx, client: &reqwest::Client) -> Result<Value, String>
     // Why: the CM refuses tokens of a mobile login.
     // From: Issue #871 | PR #1980
     let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
-    let r = steam_post(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IAuthenticationService/BeginAuthSessionViaQR",
-        &[
+        Req::Post(&[
             ("device_friendly_name", &device),
             ("platform_type", &platform),
-        ],
+        ]),
     )
     .await?;
     let pending = Pending {
@@ -473,11 +450,11 @@ async fn login_poll(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> 
     let Some(mut p) = read_json::<Pending>(&c.path(PENDING_FILE))? else {
         return Ok(json!({"state": "idle"}));
     };
-    let r = steam_post(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IAuthenticationService/PollAuthSessionStatus",
-        &[("client_id", &p.client_id), ("request_id", &p.request_id)],
+        Req::Post(&[("client_id", &p.client_id), ("request_id", &p.request_id)]),
     )
     .await?;
     if let Some(token) = field(&r, "refresh_token") {
@@ -528,14 +505,14 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
     if live {
         return Ok(s.access_token.clone());
     }
-    let r = steam_post(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IAuthenticationService/GenerateAccessTokenForApp",
-        &[
+        Req::Post(&[
             ("refresh_token", &s.refresh_token),
             ("steamid", &s.steam_id),
-        ],
+        ]),
     )
     .await?;
     field(&r, "access_token")
@@ -548,16 +525,16 @@ async fn access_token(c: &Ctx, client: &reqwest::Client, s: &Session) -> Result<
 async fn library(c: &Ctx, client: &reqwest::Client) -> Result<Value, String> {
     let s = load_session(&c.dir, &c.bind)?.ok_or("not logged in")?;
     let token = access_token(c, client, &s).await?;
-    let r = steam_get(
+    let r = steam_api(
         client,
-        c,
+        &c.api,
         "IPlayerService/GetOwnedGames",
-        &[
+        Req::Get(&[
             ("access_token", &token),
             ("steamid", &s.steam_id),
             ("include_appinfo", "1"),
             ("include_played_free_games", "1"),
-        ],
+        ]),
     )
     .await?;
     let games: Vec<Value> = r
@@ -676,14 +653,8 @@ fn status(c: &Ctx) -> Result<Value, String> {
 // From: Issue #871 | PR #1980
 fn take_inbox(c: &Ctx, jobs: &mut Vec<Job>, consume: bool) -> Result<(), String> {
     let dir = c.path(INBOX_DIR);
-    let mut names: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .map(|e| e.map(|e| e.path()))
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("{}: {e}", dir.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
+    let mut names =
+        lancache_ng::fs::entries_if_present(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     names.sort();
     for path in names {
         match read_json::<Order>(&path) {
@@ -774,17 +745,21 @@ impl Pace {
     }
 }
 
+// What: minutes after midnight of HH:MM; 24:00 too.
+// Why: the window and the clock are read the same way.
+// From: Issue #871 | PR #1980
+fn minutes(t: &str) -> Option<u32> {
+    let (h, m) = t.trim().split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h <= 24 && m < 60 && h * 60 + m <= 1440).then_some(h * 60 + m)
+}
+
 // What: daily window HH:MM-HH:MM; may cross midnight.
 // Why: downloads run from one time until another.
 // From: Issue #871 | PR #1980
 fn window(text: &str) -> Result<(u32, u32), String> {
-    let mins = |t: &str| -> Option<u32> {
-        let (h, m) = t.trim().split_once(':')?;
-        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
-        (h <= 24 && m < 60 && h * 60 + m <= 1440).then_some(h * 60 + m)
-    };
     text.split_once('-')
-        .and_then(|(a, b)| Some((mins(a)?, mins(b)?)))
+        .and_then(|(a, b)| Some((minutes(a)?, minutes(b)?)))
         .ok_or_else(|| format!("CACHEHAMSTER_WINDOW={text}: use HH:MM-HH:MM"))
 }
 
@@ -795,13 +770,10 @@ fn in_window((from, to): (u32, u32)) -> bool {
     if to.abs_diff(from) == 1440 || from == to {
         return true;
     }
-    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H %M"))
+    let now = lancache_ng::tool::run(std::process::Command::new("date").arg("+%H:%M"))
         .ok()
         .and_then(|out| String::from_utf8(out).ok())
-        .and_then(|t| {
-            let (h, m) = t.trim().split_once(' ')?;
-            Some(h.parse::<u32>().ok()? * 60 + m.parse::<u32>().ok()?)
-        });
+        .and_then(|t| minutes(&t));
     match now {
         Some(n) if from < to => (from..to).contains(&n),
         Some(n) => n >= from || n < to,
@@ -886,8 +858,8 @@ impl Dl {
             .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
             .pool_max_idle_per_host(connections);
         let ca = lancache_ng::render::ca_cert(s)?;
-        match std::fs::read(&ca) {
-            Ok(pem) => {
+        match lancache_ng::fs::read_if_present(&ca).map_err(|e| format!("{}: {e}", ca.display()))? {
+            Some(pem) => {
                 let cert = reqwest::Certificate::from_pem(&pem)
                     .map_err(|e| format!("{}: {e}", ca.display()))?;
                 builder = builder.tls_certs_merge([cert]);
@@ -895,10 +867,9 @@ impl Dl {
             // What: no CA yet: logged; https then fails.
             // Why: the ui issues it only in HTTPS mode.
             // From: Issue #871 | PR #2017
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            None => {
                 eprintln!("cachehamster: no stack CA {}; https fails", ca.display());
             }
-            Err(e) => return Err(format!("{}: {e}", ca.display())),
         }
         let client = builder
             .build()
@@ -997,6 +968,10 @@ struct SteamCfg {
     cdn_host: String,
     branch: String,
     os: String,
+    // What: the shared client with the SOT timeouts.
+    // Why: no Steam request may hang without a limit.
+    // From: Issue #871
+    web: reqwest::Client,
 }
 
 impl SteamCfg {
@@ -1021,6 +996,7 @@ impl SteamCfg {
             cdn_host: c.s.text("STEAM_CDN_HOST")?,
             branch: c.s.text("STEAM_BRANCH")?,
             os: c.s.text("STEAM_OS")?,
+            web: http::client(&c.s)?,
         })
     }
 }
@@ -1151,18 +1127,29 @@ fn depot_gid(d: &Kv, cfg: &SteamCfg) -> Option<u64> {
 // From: Issue #871 | PR #1985
 type Depots = (Vec<(u32, u64)>, Vec<(u32, u32)>);
 
+// What: the depot nodes of an app with their ids.
+// Why: keys like "branches" in "depots" are no depot.
+// From: Issue #871 | PR #1985
+fn depot_nodes(app: &Kv) -> Vec<(u32, &Kv)> {
+    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
+        return Vec::new();
+    };
+    depots
+        .0
+        .iter()
+        .filter_map(|(id, v)| match (v, id.parse::<u32>()) {
+            (KvValue::Node(d), Ok(id)) => Some((id, d)),
+            _ => None,
+        })
+        .collect()
+}
+
 // What: split the depots of one app.
 // Why: shared depots of a base app must not be skipped.
 // From: Issue #871 | PR #1985
 fn depots_of(app: &Kv, cfg: &SteamCfg) -> Depots {
     let (mut own, mut borrowed) = (Vec::new(), Vec::new());
-    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
-        return (own, borrowed);
-    };
-    for (id, v) in &depots.0 {
-        let (KvValue::Node(d), Ok(id)) = (v, id.parse::<u32>()) else {
-            continue;
-        };
+    for (id, d) in depot_nodes(app) {
         if let Some(gid) = depot_gid(d, cfg) {
             own.push((id, gid));
         } else if let Some(from) = d.text("depotfromapp").and_then(|t| t.parse().ok()) {
@@ -1358,16 +1345,14 @@ impl Cm {
         let steam_id: u64 = steam_id_of(&s.refresh_token)?
             .parse()
             .map_err(|e| format!("steam id: {e}"))?;
-        let list: Value = client
-            .get(format!("{}/ISteamDirectory/GetCMList/v1/", cfg.api))
-            .query(&[("cellid", cfg.cell.as_str())])
-            .send()
-            .await
-            .map_err(|e| format!("CM list: {}", http::error_chain(&e)))?
-            .json()
-            .await
-            .map_err(|e| format!("CM list: {e}"))?;
-        let host = list["response"]["serverlist_websockets"][0]
+        let list = steam_api(
+            client,
+            &cfg.api,
+            "ISteamDirectory/GetCMList",
+            Req::Get(&[("cellid", cfg.cell.as_str())]),
+        )
+        .await?;
+        let host = list["serverlist_websockets"][0]
             .as_str()
             .ok_or("CM list: no websocket server")?
             .to_string();
@@ -1387,9 +1372,7 @@ impl Cm {
         // What: a login id of its own per CM connection.
         // Why: two jobs logged each other off (eresult 34).
         // From: Issue #871 | PR #1985
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
+        let nanos = u32::try_from(clock::unix_nanos() % 1_000_000_000).unwrap_or(0);
         let ip = PbOut::default().fixed32(1, nanos | 1);
         let logon = PbOut::default()
             .int(1, cfg.logon[0])
@@ -1455,12 +1438,7 @@ impl Cm {
     // Why: Multi frames bundle many, maybe gzipped.
     // From: Issue #871 | PR #1980
     fn unpack(&mut self, raw: &[u8]) -> Result<(), String> {
-        let word = |b: &[u8], at: usize| -> Result<u32, String> {
-            b.get(at..at + 4)
-                .and_then(|w| w.try_into().ok())
-                .map(u32::from_le_bytes)
-                .ok_or_else(|| "CM frame too short".to_string())
-        };
+        let word = |b: &[u8], at: usize| le32(b, at, "CM frame");
         let raw_emsg = word(raw, 0)?;
         // What: skip frames without the protobuf flag.
         // Why: a frame without it is no protobuf message.
@@ -1646,12 +1624,7 @@ fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
         .map_err(|e| format!("manifest zip: {e}"))?
         .read_to_end(&mut raw)
         .map_err(|e| format!("manifest zip: {e}"))?;
-    let word = |at: usize| -> Result<u32, String> {
-        raw.get(at..at + 4)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
-            .ok_or_else(|| "manifest too short".to_string())
-    };
+    let word = |at: usize| le32(&raw, at, "manifest");
     if word(0)? != PAYLOAD_MAGIC {
         return Err("manifest payload magic missing".into());
     }
@@ -1683,8 +1656,7 @@ async fn app_urls(
     dl: &Dl,
     app: u32,
 ) -> Result<(Vec<String>, u64, Vec<String>), String> {
-    let web = reqwest::Client::new();
-    let mut cm = Cm::login(cfg, &web).await?;
+    let mut cm = Cm::login(cfg, &cfg.web).await?;
     let info = app_info(&mut cm, app).await?;
     // What: keep the depots for the library cache view.
     // Why: a preloaded game shows its size at once.
@@ -1755,16 +1727,10 @@ async fn app_urls(
 // Why: evict must not drop the shared base of mods.
 // From: Issue #871 | PR #1991
 fn depot_ids(app: &Kv) -> Vec<u32> {
-    let Some(depots) = app.node("appinfo").unwrap_or(app).node("depots") else {
-        return Vec::new();
-    };
-    depots
-        .0
-        .iter()
-        .filter_map(|(id, v)| match v {
-            KvValue::Node(d) if d.text("depotfromapp").is_none() => id.parse().ok(),
-            _ => None,
-        })
+    depot_nodes(app)
+        .into_iter()
+        .filter(|(_, d)| d.text("depotfromapp").is_none())
+        .map(|(id, _)| id)
         .collect()
 }
 
@@ -1783,14 +1749,10 @@ fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
 // From: Issue #871 | PR #1991
 fn known_depots(dir: &Path) -> Result<BTreeMap<u32, Vec<u32>>, String> {
     let dir = dir.join(DEPOTS_DIR);
-    let rd = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
+    let paths =
+        lancache_ng::fs::entries_if_present(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut out = BTreeMap::new();
-    for e in rd {
-        let path = e.map_err(|e| e.to_string())?.path();
+    for path in paths {
         let Some(app) = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1830,27 +1792,16 @@ fn walk_cache(
     sizes: &mut BTreeMap<u32, u64>,
     freed: &mut (u64, u64),
 ) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for e in rd {
-        let e = e.map_err(|e| e.to_string())?;
-        let ty = e.file_type().map_err(|e| e.to_string())?;
-        if ty.is_dir() {
-            walk_cache(&e.path(), drop, sizes, freed)?;
-            continue;
-        }
-        if !ty.is_file() {
-            continue;
-        }
-        let Some(depot) = key_depot(&e.path()) else {
+    for (path, meta) in lancache_ng::fs::files_under(dir) {
+        let Some(depot) = key_depot(&path) else {
             continue;
         };
-        let len = e.metadata().map(|m| m.len()).unwrap_or(0);
         if drop(depot) {
-            remove(&e.path())?;
-            freed.0 += len;
+            remove(&path)?;
+            freed.0 += meta.len();
             freed.1 += 1;
         } else {
-            *sizes.entry(depot).or_default() += len;
+            *sizes.entry(depot).or_default() += meta.len();
         }
     }
     Ok(())
@@ -1877,18 +1828,10 @@ fn cached(c: &Ctx) -> Result<Value, String> {
 // Why: one button empties the whole cache.
 // From: Issue #871 | PR #1991
 fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for e in rd {
-        let e = e.map_err(|e| e.to_string())?;
-        let ty = e.file_type().map_err(|e| e.to_string())?;
-        if ty.is_dir() {
-            wipe_dir(&e.path(), freed)?;
-        } else if ty.is_file() {
-            let len = e.metadata().map(|m| m.len()).unwrap_or(0);
-            remove(&e.path())?;
-            freed.0 += len;
-            freed.1 += 1;
-        }
+    for (path, meta) in lancache_ng::fs::files_under(dir) {
+        remove(&path)?;
+        freed.0 += meta.len();
+        freed.1 += 1;
     }
     Ok(())
 }
@@ -1907,7 +1850,7 @@ fn wipe(c: &Ctx) -> Result<Value, String> {
 // From: Issue #871 | PR #1991
 async fn lookup(c: &Ctx, app: u32) -> Result<Vec<u32>, String> {
     let cfg = SteamCfg::load(c)?;
-    let mut cm = Cm::login(&cfg, &reqwest::Client::new()).await?;
+    let mut cm = Cm::login(&cfg, &cfg.web).await?;
     let ids = depot_ids(&app_info(&mut cm, app).await?);
     save_depots(&c.dir, app, &ids)?;
     Ok(ids)
@@ -2001,8 +1944,7 @@ impl Runner {
                     j.set(State::Waiting);
                 }
             }
-            let body = serde_json::to_vec_pretty(&*list).map_err(|e| e.to_string())?;
-            return c.save(JOBS_FILE, &body);
+            return save_jobs(c, &list);
         }
         let now = clock::unix_secs();
         let logged_in = c.path(TOKEN_FILE).exists();
@@ -2040,9 +1982,26 @@ impl Runner {
             };
             self.running.insert(j.id.clone(), task);
         }
-        let body = serde_json::to_vec_pretty(&*list).map_err(|e| e.to_string())?;
-        c.save(JOBS_FILE, &body)
+        save_jobs(c, &list)
     }
+}
+
+// What: write the job list to jobs.json.
+// Why: the daemon is the one writer; one format.
+// From: Issue #871 | PR #1980
+fn save_jobs(c: &Ctx, list: &[Job]) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
+    c.save(JOBS_FILE, &body)
+}
+
+// What: u32, little endian, at a byte offset.
+// Why: CM frames and manifests both carry such words.
+// From: Issue #871 | PR #1980
+fn le32(b: &[u8], at: usize, what: &str) -> Result<u32, String> {
+    b.get(at..at + 4)
+        .and_then(|w| w.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| format!("{what} too short"))
 }
 
 // What: the daemon loop.

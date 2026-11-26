@@ -6,18 +6,14 @@
 // Why: the how lives in shared.rs; no config here.
 // From: Issue #1683 | PR #1980
 
-use lancache_ng::config::{Settings, process_env};
-use lancache_ng::{cert, clock, dns, docker, fs, http, pdns, tidy};
+use lancache_ng::config::Settings;
+use lancache_ng::docker::Health;
+use lancache_ng::{cert, clock, docker, fs, http, tidy};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-// What: env name of the saved settings file.
-// Why: needed before any setting can be read.
-// From: Issue #1683 | PR #1980
-const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: weight of one finding.
 // Why: the ui sorts and colours by it.
@@ -85,69 +81,6 @@ struct Report<'a> {
     cache: &'a Value,
 }
 
-// What: Docker health of one container.
-// Why: degraded and starting are not failures.
-// From: Issue #1683 | PR #1980
-#[derive(Debug, PartialEq)]
-enum Health {
-    Healthy,
-    Degraded,
-    Starting,
-    Unhealthy,
-    Stopped(String),
-    Unknown(String),
-}
-
-impl Health {
-    // What: read docker inspect State.
-    // Why: newest check output DEGRADED: refines ok.
-    // From: Issue #1296
-    fn from_inspect(inspect: &Value) -> Self {
-        let state = inspect.pointer("/State/Status").and_then(Value::as_str);
-        if state != Some("running") {
-            return Health::Stopped(state.unwrap_or("unknown").into());
-        }
-        let status = inspect
-            .pointer("/State/Health/Status")
-            .and_then(Value::as_str);
-        let last = inspect
-            .pointer("/State/Health/Log")
-            .and_then(Value::as_array)
-            .and_then(|log| log.last())
-            .and_then(|e| e["Output"].as_str())
-            .unwrap_or_default();
-        let degraded = last.lines().any(|l| l.starts_with("DEGRADED: "));
-        match status.unwrap_or("none") {
-            "healthy" if degraded => Health::Degraded,
-            "healthy" | "none" => Health::Healthy,
-            "starting" => Health::Starting,
-            "unhealthy" => Health::Unhealthy,
-            other => Health::Unknown(other.into()),
-        }
-    }
-
-    // What: state word and colour of the status row.
-    // Why: one mapping; the page holds none.
-    // From: Issue #1683 | PR #1980
-    fn word_and_colour(&self) -> (String, &'static str) {
-        match self {
-            Health::Healthy => ("healthy".into(), "green"),
-            Health::Degraded => ("degraded".into(), "amber"),
-            Health::Starting => ("starting".into(), "yellow"),
-            Health::Unhealthy => ("unhealthy".into(), "red"),
-            Health::Stopped(s) => (s.clone(), "red"),
-            Health::Unknown(s) => (s.clone(), "yellow"),
-        }
-    }
-
-    // What: true for unhealthy or stopped.
-    // Why: only these count toward a restart.
-    // From: Issue #1683 | PR #1980
-    fn failing(&self) -> bool {
-        matches!(self, Health::Unhealthy | Health::Stopped(_))
-    }
-}
-
 // What: failure streaks and restart times.
 // Why: restart after RESTART_AFTER misses, capped.
 // From: Issue #1683 | PR #1980
@@ -180,8 +113,7 @@ impl Memory {
 // Why: ui changes reach the watchdog via the file.
 // From: Issue #1683 | PR #1980
 fn load() -> Result<Settings, String> {
-    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-    Settings::load(&process_env, saved.as_deref())
+    Settings::from_process()
 }
 
 // What: check every container; heal on a streak.
@@ -192,24 +124,18 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
     let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
-    let project = s.text("COMPOSE_PROJECT")?;
     let stopped = s.list("SERVICES_STOPPED");
-    let dhcp_off = s.text("DHCP_MODE")? == "off";
-    let dhcp_service = s.text("DHCP_SERVICE")?;
-    for row in api
-        .project(&project, limit)
-        .await
-        .map_err(|e| e.to_string())?
-    {
+    let dhcp_off = lancache_ng::dhcp::off_service(s)?;
+    for row in api.stack(s).await? {
         let Some(service) = docker::service_of(&row) else {
             continue;
         };
         let name = docker::name_of(&row).unwrap_or(service);
         let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
         let health = Health::from_inspect(&inspect);
-        let (word, colour) = health.word_and_colour();
         let by_user = stopped.iter().any(|x| x == service);
-        let wanted = !(by_user || dhcp_off && service == dhcp_service);
+        let wanted = !(by_user || dhcp_off.as_deref() == Some(service));
+        let (word, colour) = (health.word(), health.colour(wanted));
         f.containers.push(serde_json::json!({
             "service": service, "name": name, "health": word,
             "colour": colour, "stopped_by_user": by_user,
@@ -409,28 +335,50 @@ fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
 // Why: shows a lost NOTIFY or a broken AXFR.
 // From: Issue #1683 | PR #1980
 async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
-    let far = s.text_or_empty("PDNS_SECONDARY_API_URL");
-    if far.is_empty() {
+    use lancache_ng::peer;
+    // What: the registered secondaries, not a lone URL.
+    // Why: one list owns the peers; each gets a check.
+    // From: Issue #1683 | PR #2019
+    let peers = lancache_ng::pdns_conf::secondaries(s);
+    if peers.is_empty() {
         return Ok(());
     }
-    let key = s.text("PDNS_API_KEY")?;
+    let key = lancache_ng::secret::get(s, "PDNS_API_KEY")?;
     let client = http::client(s)?;
-    let near = pdns::Api::new(client.clone(), &s.text("PDNS_PRIMARY_API_URL")?, &key);
-    let far = pdns::Api::new(client, &far, &key);
-    let ours = near.zones().await.map_err(|e| format!("primary: {e}"))?;
-    let theirs = far.zones().await.map_err(|e| format!("secondary: {e}"))?;
-    let seen: BTreeMap<&str, u32> = theirs.iter().map(|z| (z.name.as_str(), z.serial)).collect();
-    for z in &ours {
-        let Some(&other) = seen.get(z.name.as_str()) else {
-            f.crit(&z.name, "zone missing on secondary");
-            continue;
+    let ours = peer::own_api(s, client.clone(), &key)?
+        .zones()
+        .await
+        .map_err(|e| format!("primary: {e}"))?;
+    for (name, address) in peers {
+        let theirs = match peer::zones_at(s, &address).await {
+            Ok(z) => z,
+            Err(e) => {
+                f.crit(&name, format!("secondary unreachable: {e}"));
+                continue;
+            }
         };
-        let state = dns::sync_state(z.serial, other);
-        if state != dns::Sync::InSync {
-            f.warn(
-                &z.name,
-                format!("{state:?}: primary {} secondary {other}", z.serial),
-            );
+        for z in peer::peer_zones(s, &ours, &theirs)? {
+            let state = peer::zone_state(&z);
+            if state != peer::ZoneState::InSync {
+                f.warn(
+                    &name,
+                    format!(
+                        "zone {} {}: primary {:?} secondary {:?}",
+                        z.zone,
+                        state.word(),
+                        z.primary,
+                        z.secondary
+                    ),
+                );
+            }
+        }
+        // What: a zone the primary no longer serves.
+        // Why: a stale slave keeps answering old names.
+        // From: Issue #1683 | PR #2019
+        for z in &theirs {
+            if z.kind == "Slave" && peer::serial_of(&ours, &z.name).is_none() {
+                f.warn(&name, format!("extra zone {} not on the primary", z.name));
+            }
         }
     }
     Ok(())

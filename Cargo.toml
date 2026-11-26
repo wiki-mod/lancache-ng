@@ -13,6 +13,7 @@ members = [
     "services/cachehamster",
     "services/watchdog",
     "services/common",
+    "services/dns",
 ]
 
 # What: license, edition from SOT release; no version.

@@ -669,7 +669,8 @@
      From: Issue #1437 | PR #1858 */
   .beambar-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; vertical-align: middle; margin-right: 7px; }
   .beambar-dot.green { background: var(--tide); box-shadow: 0 0 8px 1px #34d0a680; }
-  .beambar-dot.amber, .beambar-dot.yellow { background: var(--beam); box-shadow: 0 0 8px 1px #f7b95580; }
+  .beambar-dot.yellow { background: var(--beam); box-shadow: 0 0 8px 1px #f7b95580; }
+  .beambar-dot.amber { background: #f08a3c; box-shadow: 0 0 8px 1px #f08a3c80; }
   .beambar-dot.red { background: var(--coral); box-shadow: 0 0 8px 1px #ff7a5c80; }
   .beambar-dot.gray { background: var(--mist-dim); }
   .beambar-services { display: flex; flex-wrap: wrap; row-gap: 6px; align-items: center; gap: 18px; font-size: 12.5px; color: var(--mist); white-space: nowrap; }
@@ -918,6 +919,18 @@
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
 
+    // What: POST with the CSRF header; data goes as JSON
+    // Why: every page action sends the same request
+    // From: Issue #1683 | PR #2019
+    function csrfPost(url, data) {
+      const init = { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } };
+      if (data !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(data);
+      }
+      return fetch(url, init);
+    }
+
     // What: shared watchdog poll for beambar + dashboard
     // Why: one fetch/interval, not one per template
     // From: Issue #1437
@@ -983,11 +996,7 @@
     async function setDockServiceState(service, state, button) {
       button.disabled = true;
       try {
-        const response = await fetch('{{ routes.desired_state | safe }}'.replace('{service}', service), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
-          body: JSON.stringify({ state: state }),
-        });
+        const response = await csrfPost('{{ routes.desired_state | safe }}'.replace('{service}', service), { state: state });
         // What: throws on a non-2xx desired-state response
         // Why: the catch below reports it as fetch error
         // From: Issue #1683 | PR #1912
@@ -1076,7 +1085,7 @@
       try {
         const url = '{{ routes.service_action | safe }}'
           .replace('{container}', container).replace('{program}', program).replace('{action}', action);
-        const response = await fetch(url, { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } });
+        const response = await csrfPost(url);
         if (!response.ok) { throw new Error(action + ' ' + program + ': HTTP ' + response.status); }
       } catch (err) {
         reportError(err);
@@ -1105,7 +1114,7 @@
         // What: bold status word after the service name
         // Why: the mockup shows name plus state
         // From: Issue #1683 | PR #1858
-        const word = { green: LC_T.svc_st_green, yellow: LC_T.svc_st_yellow, amber: LC_T.svc_st_yellow, red: LC_T.svc_st_red, gray: LC_T.svc_st_gray };
+        const word = { green: LC_T.svc_st_green, yellow: LC_T.svc_st_yellow, amber: LC_T.svc_st_amber, red: LC_T.svc_st_red, gray: LC_T.svc_st_gray };
         const state = document.createElement('b');
         // What: a user stop wins over the colour word.
         // Why: the watchdog leaves user-stopped containers.

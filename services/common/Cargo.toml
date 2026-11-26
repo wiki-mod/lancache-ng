@@ -18,6 +18,10 @@ name = "lancache_ng"
 path = "shared.rs"
 
 [dependencies]
+# What: base64 for the TSIG secret PowerDNS reads.
+# Why: the ui and the dns helper make it the same way.
+# From: Issue #1683
+base64 = { workspace = true }
 hex = { workspace = true }
 # What: ChaCha20-Poly1305 for sealed login tokens.
 # Why: one cipher owner; cachehamster used it already.
@@ -44,3 +48,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+# What: tokio for one blocking DNS probe off the runtime.
+# Why: the ui and the dns helper ask the primary alike.
+# From: Issue #1683
+tokio = { workspace = true }

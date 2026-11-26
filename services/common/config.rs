@@ -20,6 +20,11 @@ pub const DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 // From: Issue #1683 | PR #1980
 pub const SCHEMA_KEY: &str = "LANCACHE_RUNTIME_SCHEMA";
 
+// What: env name of the saved settings file.
+// Why: needed before any setting can be read.
+// From: Issue #1683 | PR #2019
+pub const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
+
 // What: separator of baked rows.
 // Why: the SOT joins rows with a pipe.
 // From: Issue #1683 | PR #1980
@@ -129,6 +134,16 @@ pub fn is_plain(text: &str, extra: &str) -> bool {
         && text
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+}
+
+// What: value with no quote, backslash or line break.
+// Why: one check for a value put into a quoted config.
+// From: Issue #1683 | PR #2019
+pub fn plain(v: &str) -> Result<&str, String> {
+    if v.contains(['"', '\\', '\n', '\r']) {
+        return Err(format!("value {v:?} has quote or line break"));
+    }
+    Ok(v)
 }
 
 // What: a bool from its usual words.
@@ -356,11 +371,8 @@ fn line_entry(line: &str) -> Option<(&str, &str)> {
 // Why: reading and writing see a new install alike.
 // From: Issue #1683 | PR #2017
 fn read_text(path: &Path) -> Result<String, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    let bytes = crate::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    String::from_utf8(bytes.unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: the raw KEY=VALUE lines of the stack .env.
@@ -518,6 +530,13 @@ pub struct Settings {
 }
 
 impl Settings {
+    // What: settings of this process and its saved file.
+    // Why: ui, watchdog and cachehamster start alike.
+    // From: Issue #1683 | PR #2019
+    pub fn from_process() -> Result<Self, String> {
+        Self::load(&process_env, saved_file().as_deref())
+    }
+
     // What: load schema, then file > env > default.
     // Why: the file is the live .env; env is from start.
     // From: Issue #1683 | PR #2017
@@ -717,6 +736,16 @@ impl Settings {
             .map(|(value, _)| value)
     }
 
+    // What: a copy with one checked value replaced.
+    // Why: the dns helper renders the live zone list.
+    // From: Issue #1683
+    pub fn with(&self, key: &str, raw: &str) -> Result<Self, String> {
+        let value = self.validate(key, raw)?;
+        let mut copy = self.clone();
+        copy.values.insert(key.to_string(), value);
+        Ok(copy)
+    }
+
     // What: FNV-1a id of all non-secret values.
     // Why: shows which config is live.
     // From: Issue #1683 | PR #1980
@@ -757,6 +786,13 @@ pub struct Change {
     pub key: String,
     pub owner: String,
     pub effect: Effect,
+}
+
+// What: path of the saved settings file, if one is set.
+// Why: the ui also writes this file on a save.
+// From: Issue #1683 | PR #2019
+pub fn saved_file() -> Option<PathBuf> {
+    process_env(SETTINGS_FILE_ENV).map(PathBuf::from)
 }
 
 // What: reader for the process environment.

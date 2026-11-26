@@ -15,8 +15,9 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::Engine as _;
 use lancache_ng::config::{self, Settings, process_env};
-use lancache_ng::dhcp::Mode as DhcpMode;
+use lancache_ng::dhcp::{Mode as DhcpMode, option_data};
 use lancache_ng::dns::Role;
+use lancache_ng::peer::{self, PeerZone, ZoneState};
 use lancache_ng::{access, apply, docker, fs, http, human, render, secret};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -26,11 +27,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tera::{Context, Tera};
-
-// What: env name of the saved settings file.
-// Why: needed before any setting can be read.
-// From: Issue #1683 | PR #1980
-const SETTINGS_FILE_ENV: &str = "LANCACHE_SETTINGS_FILE";
 
 // What: CLI word of the one-shot DHCP probe.
 // Why: the ui and setup.sh start the same command.
@@ -147,13 +143,6 @@ fn dns_pair(first: String, second: String) -> Vec<String> {
         .into_iter()
         .filter(|d| !d.is_empty())
         .collect()
-}
-
-// What: true for the value of a ticked switch.
-// Why: the pages send 1 or true for "on".
-// From: Issue #1683 | PR #2017
-fn switch_on(value: &str) -> bool {
-    matches!(value, "1" | "true")
 }
 
 // What: error page text with an HTTP status.
@@ -499,13 +488,7 @@ async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page
     let s = app.settings();
     let mut ctx = Context::new();
     ctx.insert("alarms", &read_json(&s.text("WATCHDOG_ALARM_FILE")?));
-    let (_, limit) = app.limits(&s)?;
-    let project = s.text("COMPOSE_PROJECT")?;
-    let containers = app
-        .docker
-        .project(&project, limit)
-        .await
-        .unwrap_or_default();
+    let containers = project_containers(&app, &s).await.unwrap_or_default();
     ctx.insert("containers", &containers);
     let (totals, recent) = proxy_log(&s).await?;
     ctx.insert("log_stats", &totals);
@@ -631,7 +614,7 @@ fn changes(old: &Settings, form: Fields) -> Fields {
 // From: Issue #1683 | PR #1858
 async fn commit(app: &App, form: Fields) -> Result<(), String> {
     let Some(path) = app.saved.clone() else {
-        return Err(format!("{SETTINGS_FILE_ENV} is not set"));
+        return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
     };
     let old = app.settings();
     let updates = changes(&old, form);
@@ -644,7 +627,9 @@ async fn commit(app: &App, form: Fields) -> Result<(), String> {
     // What: a value that cannot render is not kept.
     // Why: a bad value must not reach the files.
     // From: Issue #1683 | PR #1980
-    let check = secrets(&new).and_then(|sec| render::all(&new, &sec).map_err(|e| e.join("; ")));
+    let none = lancache_ng::recursor_conf::Chain::default();
+    let check = render::secrets(&new)
+        .and_then(|sec| render::all(&new, &sec, &none).map_err(|e| e.join("; ")));
     if let Err(e) = check {
         // What: a refused save is logged, not only shown.
         // Why: the error must leave a trace in the logs.
@@ -692,10 +677,12 @@ async fn save(
         &form,
         app.cache_used.load(Ordering::Relaxed),
     )?;
-    if let Some(d) = form.get("DHCP_DOMAIN")
-        && !lancache_ng::dns::is_dns_name(d, false, false)
-    {
-        return Err(bad_request(tr("err_no_domain").replace("{x}", d)));
+    // What: a new main domain also updates the extras.
+    // Why: an extra made main must leave the extra list.
+    // From: Issue #1683
+    let mut form = form;
+    if let Some(d) = form.get("DHCP_DOMAIN").cloned() {
+        form.extend(main_domain_fields(&app.settings(), &d).map_err(bad_request)?);
     }
     // What: each upstream entry is checked before save.
     // Why: threat model G3: no loop to this host.
@@ -723,7 +710,7 @@ async fn save(
     // What: the zones before the save; none if unreadable.
     // Why: a save may repair the settings; it must run.
     // From: Issue #1683 | PR #2017
-    let before = lancache_ng::dns::managed_zones(&app.settings())
+    let before = hosted_now(&app.settings())
         .inspect_err(|e| eprintln!("ui: zones before the save unknown: {e}"))
         .unwrap_or_default();
     let result = commit(&app, form).await;
@@ -737,11 +724,7 @@ async fn save(
 // Why: an old zone would keep answering its names.
 // From: Issue #1683 | PR #1980
 async fn drop_old_zones(s: &Settings, before: &[String]) {
-    let read = (
-        lancache_ng::dns::managed_zones(s),
-        Role::from_settings(s),
-        pdns_api(s),
-    );
+    let read = (hosted_now(s), Role::from_settings(s), pdns_api(s));
     let (now, role, api) = match read {
         (Ok(now), Ok(role), Ok(api)) => (now, role, api),
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
@@ -757,9 +740,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
         // Why: a record the user added is never lost.
         // From: Issue #1683 | PR #1980
         let own = match api.rrsets(zone).await {
-            Ok(sets) => sets
-                .iter()
-                .any(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS"))),
+            Ok(sets) => !own_rrsets(&sets).is_empty(),
             Err(_) => continue,
         };
         let done = if own {
@@ -772,6 +753,7 @@ async fn drop_old_zones(s: &Settings, before: &[String]) {
             Err(e) => eprintln!("ui: zone {zone} kept: {e}"),
         }
     }
+    peers_follow(s);
 }
 
 // What: newest lines of all programs, merged.
@@ -813,10 +795,11 @@ async fn logs(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // Why: the store may name folders the list lacks.
     // From: Issue #1683 | PR #1980
     let mut names = programs.clone();
-    if let Ok(dirs) = std::fs::read_dir(&root) {
-        for d in dirs.flatten().filter(|d| d.path().is_dir()) {
-            let n = d.file_name().to_string_lossy().into_owned();
-            config::add_once(&mut names, &n);
+    let dirs = lancache_ng::fs::entries_if_present(&root)
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    for d in dirs.iter().filter(|d| d.is_dir()) {
+        if let Some(n) = d.file_name() {
+            config::add_once(&mut names, &n.to_string_lossy());
         }
     }
     let hosts = names.clone();
@@ -864,21 +847,7 @@ async fn logs_save(
 // Why: records live only in PowerDNS.
 // From: Issue #1683 | PR #1980
 fn pdns_api(s: &Settings) -> Result<lancache_ng::pdns::Api, String> {
-    let key = secrets(s)?.pdns_api_key;
-    let url = s.text("PDNS_PRIMARY_API_URL")?;
-    Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
-}
-
-// What: one API client per recursor.
-// Why: flush and statistics reach every recursor.
-// From: Issue #1683 | PR #2017
-fn recursor_apis(s: &Settings) -> Result<Vec<lancache_ng::pdns::Api>, String> {
-    let key = secrets(s)?.recursor_api_key;
-    let client = http::client(s)?;
-    Ok(s.list("RECURSOR_API_URLS")
-        .iter()
-        .map(|url| lancache_ng::pdns::Api::new(client.clone(), url, &key))
-        .collect())
+    peer::own_api(s, http::client(s)?, &secret::get(s, "PDNS_API_KEY")?)
 }
 
 // What: reverse DNS name of an address.
@@ -908,11 +877,7 @@ fn reverse_name(ip: &str) -> Result<String, String> {
 // Why: the PowerDNS PATCH needs the zone.
 // From: Issue #1683 | PR #1980
 fn reverse_zone(s: &Settings, name: &str) -> Option<String> {
-    let zones = lancache_ng::dns::private_reverse_zones(s);
-    zones
-        .into_iter()
-        .filter(|z| name.ends_with(z.as_str()))
-        .max_by_key(String::len)
+    lancache_ng::dns::zone_of(name, &lancache_ng::dns::private_reverse_zones(s))
 }
 
 // What: reverse name of an address and its zone.
@@ -934,11 +899,66 @@ fn served_reverse_place(s: &Settings, ip: &str) -> Result<Option<(String, String
     Ok(served.then_some((rev, zone)))
 }
 
+// What: the LAN zone a form names; empty = main.
+// Why: records go only into a configured LAN domain.
+// From: Issue #1683
+fn chosen_lan_zone(s: &Settings, raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return lancache_ng::dns::lan_zone(s);
+    }
+    let zone = lancache_ng::dns::canonical_zone(raw.trim());
+    if lancache_ng::dns::lan_domains(s)?.contains(&zone) {
+        Ok(zone)
+    } else {
+        Err(tr("err_not_lan_domain").replace("{x}", raw.trim()))
+    }
+}
+
+// What: settings that make one domain the main one.
+// Why: a former extra leaves the list; swap keeps both.
+// From: Issue #1683
+fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
+    let lans = lancache_ng::dns::lan_domains(s)?;
+    let want = lancache_ng::dns::canonical_zone(main.trim());
+    let plain = |z: &String| z.trim_end_matches('.').to_string();
+    let old = lans.first().cloned().unwrap_or_default();
+    let mut extra: Vec<String> = lans
+        .iter()
+        .skip(1)
+        .filter(|z| **z != want)
+        .map(plain)
+        .collect();
+    // What: old main stays as extra only on a swap.
+    // Why: a new name renames the main domain as before.
+    // From: Issue #1683
+    if want != old && lans.iter().skip(1).any(|z| *z == want) {
+        extra.push(plain(&old));
+    }
+    // What: the new set passes the LAN domain rule.
+    // Why: one rule; else lan_domains fails everywhere.
+    // From: Issue #1683
+    lancache_ng::dns::validate_lan_domains(&plain(&want), &extra)?;
+    Ok(Fields::from([
+        ("DHCP_DOMAIN".to_string(), plain(&want)),
+        ("DNS_EXTRA_LAN_DOMAINS".to_string(), extra.join(" ")),
+    ]))
+}
+
+// What: rrsets of a zone besides SOA, NS and DS.
+// Why: only these are records a person added.
+// From: Issue #1683
+fn own_rrsets(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS" | "DS")))
+        .cloned()
+        .collect()
+}
+
 // What: zones that keep snapshots.
-// Why: LAN zone plus the private reverse zones.
+// Why: LAN zones plus the private reverse zones.
 // From: Issue #1683 | PR #1980
 fn snapshot_zones(s: &Settings) -> Result<Vec<String>, String> {
-    let mut zones = vec![lancache_ng::dns::lan_zone(s)?];
+    let mut zones = lancache_ng::dns::lan_domains(s)?;
     zones.extend(lancache_ng::dns::private_reverse_zones(s));
     Ok(zones)
 }
@@ -973,12 +993,8 @@ async fn snapshot(s: &Settings, api: &lancache_ng::pdns::Api, zone: &str) -> Res
 // Why: snapshot age needs a plain number.
 // From: Issue #1683 | PR #1980
 fn created_unix(path: &Path) -> Result<u64, String> {
-    let when = std::fs::metadata(path).and_then(|m| m.modified());
-    let when = when.map_err(|e| format!("{}: {e}", path.display()))?;
-    let age = when
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?;
-    Ok(age.as_secs())
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(lancache_ng::fs::modified_secs(&meta))
 }
 
 // What: the snapshots of a store as id and time rows.
@@ -1029,24 +1045,66 @@ async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
     let api = pdns_api(s)?;
     api.restore(zone, &rows).await?;
     snapshot(s, &api, zone).await?;
-    flush_zone(s, zone).await
+    peer::flush_zone(s, zone).await
 }
 
-// What: PTR rows of all private reverse zones.
-// Why: the DNS page lists them with the host.
+// What: PTR rows of each private reverse zone.
+// Why: the DNS page lists them per zone with the host.
 // From: Issue #1683 | PR #1980
 async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
     let mut out = Vec::new();
     for zone in lancache_ng::dns::private_reverse_zones(s) {
+        let mut rows = Vec::new();
         for r in api.rrsets(&zone).await.unwrap_or_default() {
             if r["type"] != "PTR" {
                 continue;
             }
             let host = r["records"][0]["content"].clone();
-            out.push(json!({"ip": r["name"], "ttl": r["ttl"], "hostname": host}));
+            rows.push(json!({"ip": r["name"], "ttl": r["ttl"], "hostname": host}));
         }
+        out.push(json!({"zone": zone, "records": rows}));
     }
     out
+}
+
+// What: A and AAAA addresses whose PTR is missing.
+// Why: one click adds it; DoMe 23.11.
+// From: Issue #1683 | PR #2019
+fn missing_ptrs(
+    s: &Settings,
+    records: &mut BTreeMap<String, Vec<Value>>,
+    ptr: &[Value],
+) -> Vec<Value> {
+    let have: Vec<&str> = ptr
+        .iter()
+        .filter_map(|g| g["records"].as_array())
+        .flatten()
+        .filter_map(|r| r["ip"].as_str())
+        .collect();
+    let mut all = Vec::new();
+    for rows in records.values_mut() {
+        for r in rows.iter_mut() {
+            if !matches!(r["type"].as_str(), Some("A" | "AAAA")) {
+                continue;
+            }
+            let ips: Vec<String> = r["records"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["content"].as_str())
+                .filter(|ip| {
+                    matches!(served_reverse_place(s, ip), Ok(Some((rev, _)))
+                        if !have.contains(&rev.as_str()))
+                })
+                .map(str::to_string)
+                .collect();
+            for ip in &ips {
+                all.push(json!({"ip": ip, "hostname": r["name"], "ttl": r["ttl"]}));
+            }
+            r["missing_ptr"] = json!(ips);
+        }
+    }
+    all
 }
 
 // What: DNS page.
@@ -1054,26 +1112,60 @@ async fn ptr_rows(s: &Settings, api: &lancache_ng::pdns::Api) -> Vec<Value> {
 // From: Issue #1683 | PR #1980
 async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
+    let lans = lancache_ng::dns::lan_domains(&s)?;
     let lan = lancache_ng::dns::lan_zone(&s)?;
     let mut ctx = Context::new();
     ctx.insert("dns_domains", &lancache_ng::cdn::parse_rows(&s)?);
     ctx.insert("lan_zone", lan.trim_end_matches('.'));
-    let (mut lan_rows, mut ptr) = (Vec::new(), Vec::new());
+    let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let mut ptr = Vec::new();
     match pdns_api(&s) {
-        // What: PTR rows only when the LAN zone answers.
+        // What: other zones only if the main one answers.
         // Why: an unreachable API would time out 20 times.
         // From: Issue #1683 | PR #1980
         Ok(api) => match api.rrsets(&lan).await {
             Ok(rows) => {
-                lan_rows = rows;
+                records.insert(lan.clone(), own_rrsets(&rows));
+                for zone in lans.iter().skip(1) {
+                    match api.rrsets(zone).await {
+                        Ok(rows) => {
+                            records.insert(zone.clone(), own_rrsets(&rows));
+                        }
+                        Err(e) => ctx.insert("domain_error_message", &e),
+                    }
+                }
                 ptr = ptr_rows(&s, &api).await;
             }
             Err(e) => ctx.insert("domain_error_message", &e),
         },
         Err(e) => ctx.insert("domain_error_message", &e),
     }
-    ctx.insert("lan_records", &lan_rows);
-    ctx.insert("ptr_records", &ptr);
+    let missing = missing_ptrs(&s, &mut records, &ptr);
+    ctx.insert("missing_ptrs", &missing);
+    let subnets = domain_subnets(&s).await;
+    // What: a domain under a real Internet ending.
+    // Why: in the LAN it hides its own Internet names.
+    // From: Issue #1683 | PR #2019
+    let psl = render::psl(&s).ok();
+    let rows: Vec<Value> = lans
+        .iter()
+        .enumerate()
+        .map(|(i, zone)| {
+            let own = records.get(zone).cloned().unwrap_or_default();
+            let public = psl
+                .as_ref()
+                .is_some_and(|p| p.is_tld(lancache_ng::dns::ending(zone)));
+            json!({
+                "name": zone.trim_end_matches('.'),
+                "main": i == 0,
+                "records": own,
+                "subnets": subnets.get(zone).cloned().unwrap_or_default(),
+                "public": public,
+            })
+        })
+        .collect();
+    ctx.insert("lan_domains", &rows);
+    ctx.insert("ptr_zones", &ptr);
     let groups: Vec<Value> = snapshot_list(&s)?
         .into_iter()
         .filter(|(_, rows)| !rows.is_empty())
@@ -1087,11 +1179,6 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // From: Issue #1683 | PR #1980
     ctx.insert("dhcp_mode", &s.text("DHCP_MODE")?);
     ctx.insert("txt_max_bytes", &s.uint("DNS_TXT_MAX_BYTES")?);
-    let reverse: Vec<String> = lancache_ng::dns::managed_zones(&s)?
-        .into_iter()
-        .filter(|z| lancache_ng::dns::is_reverse_name(z))
-        .collect();
-    ctx.insert("reverse_zones", &reverse);
     // What: NS state of each secondary: in, off or new.
     // Why: the row shows it and offers the matching button.
     // From: Issue #1683
@@ -1167,8 +1254,35 @@ async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         "ddns_unsigned_updates_allowed",
         &s.flag("DDNS_ALLOW_UNSIGNED")?,
     );
-    ctx.insert("ddns_tsig_key_configured", &tsig_secret(&s).is_ok());
+    ctx.insert("ddns_tsig_key_configured", &secret::tsig_secret(&s).is_ok());
     app.page("domains.html", ctx, &csrf)
+}
+
+// What: Kea subnets per LAN zone, by domain-name.
+// Why: the DNS page shows which subnet uses a domain.
+// From: Issue #1683
+async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if DhcpMode::from_settings(s).ok() != Some(DhcpMode::Kea) {
+        return out;
+    }
+    // What: no Kea answer leaves the column empty.
+    // Why: the DNS page must not fail when dhcp is down.
+    // From: Issue #1683
+    let Ok(api) = kea_api(s) else { return out };
+    let Ok(cfg) = api.config().await else {
+        return out;
+    };
+    for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
+        let domain = option_data(sn, lancache_ng::dhcp::DOMAIN_NAME.name);
+        if domain.is_empty() {
+            continue;
+        }
+        let zone = lancache_ng::dns::canonical_zone(&domain);
+        let net = sn["subnet"].as_str().unwrap_or_default().to_string();
+        out.entry(zone).or_default().push(net);
+    }
+    out
 }
 
 // What: list setting with one item in or out.
@@ -1195,52 +1309,97 @@ fn single_field(key: &str, value: impl ToString) -> Fields {
 async fn dns_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<DnsOp>>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
     let s = app.settings();
     let get = |k: &str| field(&form, k);
-    let on = switch_on(&get("enabled"));
+    let on = config::parse_bool(&get("enabled")).unwrap_or(false);
     let domain = get("domain").to_ascii_lowercase();
     let result = match op {
-        "UI_ROUTE_DNS_ADD" if lancache_ng::dns::cdn_entry(&domain).is_none() => {
+        DnsOp::DnsAdd if lancache_ng::dns::cdn_entry(&domain).is_none() => {
             Err(format!("{domain:?} is no valid domain entry"))
         }
-        "UI_ROUTE_DNS_ADD" => {
-            commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await
-        }
-        "UI_ROUTE_DNS_REMOVE" => {
+        DnsOp::DnsAdd => commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)).await,
+        DnsOp::DnsRemove => {
             commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, false)).await
         }
-        "UI_ROUTE_DNS_TOGGLE" => {
+        DnsOp::DnsToggle => {
             commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)).await
         }
-        "UI_ROUTE_AAAA_FILTER" => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
-        "UI_ROUTE_QUERY_LOG" => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
-        "UI_ROUTE_DDNS_UNSIGNED" => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
-        "UI_ROUTE_SECONDARY_NS_SWITCH" => {
-            commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await
+        DnsOp::AaaaFilter => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
+        DnsOp::QueryLog => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
+        DnsOp::DdnsUnsigned => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
+        DnsOp::NsSwitch => commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await,
+        DnsOp::NsAuto => commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await,
+        DnsOp::LanAdd | DnsOp::LanRemove => record(&s, matches!(op, DnsOp::LanAdd), &get).await,
+        DnsOp::LanDomainAdd | DnsOp::LanDomainRemove | DnsOp::LanDomainMain => {
+            lan_domain_action(&app, &s, op.key(), &domain).await
         }
-        "UI_ROUTE_SECONDARY_NS_AUTO" => {
-            commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await
-        }
-        "UI_ROUTE_LAN_ADD" | "UI_ROUTE_LAN_REMOVE" => {
-            record(&s, op == "UI_ROUTE_LAN_ADD", &get).await
-        }
-        "UI_ROUTE_PTR_ADD" | "UI_ROUTE_PTR_REMOVE" => ptr(&s, op == "UI_ROUTE_PTR_ADD", &get).await,
-        "UI_ROUTE_ZONE_ROLLBACK" => rollback(&s, &get("zone"), &get("snapshot_id")).await,
-        "UI_ROUTE_TSIG_ROTATE" => rotate_tsig(&app).await,
-        _ => Err(tr("err_unknown_dns_action").replace("{op}", op)),
+        DnsOp::PtrAdd | DnsOp::PtrRemove => ptr(&s, matches!(op, DnsOp::PtrAdd), &get).await,
+        DnsOp::ZoneRollback => rollback(&s, &get("zone"), &get("snapshot_id")).await,
+        DnsOp::TsigRotate => rotate_tsig(&app).await,
     };
     finish(result, &s.text("UI_PAGE_DOMAINS")?)
+}
+
+// What: add, remove or promote one LAN domain.
+// Why: each LAN domain is one zone in PowerDNS.
+// From: Issue #1683
+async fn lan_domain_action(app: &App, s: &Settings, op: &str, raw: &str) -> Result<(), String> {
+    let zone = lancache_ng::dns::canonical_zone(raw.trim());
+    let name = zone.trim_end_matches('.').to_string();
+    let lans = lancache_ng::dns::lan_domains(s)?;
+    let before = hosted_now(s)?;
+    let change = match op {
+        "UI_ROUTE_LAN_DOMAIN_ADD" => {
+            let mut extra: Vec<String> = lans.iter().skip(1).cloned().collect();
+            extra.push(name.clone());
+            let main = lans.first().cloned().unwrap_or_default();
+            lancache_ng::dns::validate_lan_domains(&main, &extra)?;
+            list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, true)
+        }
+        "UI_ROUTE_LAN_DOMAIN_REMOVE" => {
+            if lans.first() == Some(&zone) {
+                return Err(tr("err_main_domain_remove").replace("{x}", &name));
+            }
+            if !lans.contains(&zone) {
+                return Err(tr("err_not_lan_domain").replace("{x}", &name));
+            }
+            // What: a domain with own records stays.
+            // Why: removing it would drop names from DNS.
+            // From: Issue #1683
+            let own = own_rrsets(&pdns_api(s)?.rrsets(&zone).await?).len();
+            if own > 0 {
+                return Err(tr("err_domain_has_records")
+                    .replace("{x}", &name)
+                    .replace("{n}", &own.to_string()));
+            }
+            list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, false)
+        }
+        _ => {
+            if !lans.contains(&zone) {
+                return Err(tr("err_not_lan_domain").replace("{x}", &name));
+            }
+            main_domain_fields(s, &name)?
+        }
+    };
+    commit(app, change).await?;
+    drop_old_zones(&app.settings(), &before).await;
+    Ok(())
 }
 
 // What: full name inside the LAN zone.
 // Why: a short name gets the zone appended.
 // From: Issue #1683 | PR #1980
 fn in_zone(name: &str, zone: &str) -> String {
-    if name.ends_with('.') || name.ends_with(zone.trim_end_matches('.')) {
+    // What: only a whole-label suffix counts as inside.
+    // Why: "xhome.lan" is not in zone "home.lan".
+    // From: Issue #1683
+    let bare = zone.trim_end_matches('.');
+    let inside = lancache_ng::dns::is_within(name, bare);
+    if name.ends_with('.') || inside {
         name.to_string()
     } else {
         format!("{name}.{zone}")
@@ -1251,13 +1410,7 @@ fn in_zone(name: &str, zone: &str) -> String {
 // Why: TXT needs quotes; target names end in a dot.
 // From: Issue #1683 | PR #1980
 fn canonical(kind: &str, c: &str) -> String {
-    let dot = |n: &str| {
-        if n.ends_with('.') {
-            n.to_string()
-        } else {
-            format!("{n}.")
-        }
-    };
+    let dot = lancache_ng::pdns::zone_id;
     match kind {
         "TXT" if !c.starts_with('"') => format!("\"{}\"", c.replace('"', "\\\"")),
         "CNAME" => dot(c),
@@ -1265,6 +1418,10 @@ fn canonical(kind: &str, c: &str) -> String {
             Some((head, target)) => format!("{head} {}", dot(target)),
             None => c.to_string(),
         },
+        // What: a DS digest in small hex letters.
+        // Why: pdns and its key list may differ in case.
+        // From: Issue #1683 | PR #2019
+        "DS" => c.to_ascii_lowercase(),
         _ => c.to_string(),
     }
 }
@@ -1277,7 +1434,7 @@ async fn record(
     add: bool,
     get: &(dyn Fn(&str) -> String + Sync),
 ) -> Result<(), String> {
-    let zone = lancache_ng::dns::lan_zone(s)?;
+    let zone = chosen_lan_zone(s, &get("zone"))?;
     let kind = get("record_type");
     if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
         return Err(tr("err_record_type").replace("{kind}", &kind));
@@ -1293,31 +1450,92 @@ async fn record(
             .filter(|c| !c.is_empty())
             .map(|c| canonical(&kind, c))
             .collect();
-        let max = s.uint("DNS_RECORD_TTL_MAX")?;
-        ttl = get("ttl").parse::<u32>().unwrap_or(0);
-        if ttl == 0 || u64::from(ttl) > max {
-            return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
-        }
+        ttl = form_ttl(s, get)?;
     }
     let api = pdns_api(s)?;
+    let host = lancache_ng::pdns::zone_id(&name);
+    // What: the place of each wanted PTR, checked first.
+    // Why: no A is saved when its PTR cannot follow.
+    // From: Issue #1683 | PR #2019
+    let mut places = Vec::new();
+    if add && kind == "A" && get("ptr") == "1" {
+        for ip in &contents {
+            let Some((rev, rz)) = served_reverse_place(s, ip)? else {
+                return Err(tr("err_ptr_no_zone").replace("{ip}", ip));
+            };
+            let have = rrset_contents(&api, &rz, &rev, "PTR").await?;
+            if let Some(other) = have.iter().find(|h| **h != host) {
+                return Err(tr("err_ptr_taken")
+                    .replace("{ip}", ip)
+                    .replace("{name}", other.trim_end_matches('.')));
+            }
+            places.push((rev, rz));
+        }
+    }
+    // What: the addresses the name loses with this change.
+    // Why: their PTR to this name must not stay behind.
+    // From: Issue #1683 | PR #2019
+    let mut gone = Vec::new();
+    if kind == "A" {
+        gone = rrset_contents(&api, &zone, &name, "A").await?;
+        gone.retain(|ip| !contents.contains(ip));
+    }
     api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
-    flush_zone(s, &zone).await?;
-    // What: PTR for each A address when ticked.
-    // Why: a LAN entry may want its reverse entry.
-    // From: Issue #1683 | PR #1980
-    if add && kind == "A" && get("ptr") == "1" {
-        let host = vec![lancache_ng::pdns::zone_id(&name)];
-        for ip in &contents {
-            let Ok(Some((rev, rz))) = reverse_place(s, ip) else {
-                continue;
-            };
-            api.set_rrset(&rz, &rev, "PTR", ttl, &host).await?;
+    peer::flush_zone(s, &zone).await?;
+    for (rev, rz) in &places {
+        api.set_rrset(rz, rev, "PTR", ttl, std::slice::from_ref(&host))
+            .await?;
+        snapshot(s, &api, rz).await?;
+        peer::flush_zone(s, rz).await?;
+    }
+    for ip in &gone {
+        let Some((rev, rz)) = served_reverse_place(s, ip)? else {
+            continue;
+        };
+        // What: drop the PTR only when it names this host.
+        // Why: a PTR to another name is not ours to drop.
+        // From: Issue #1683 | PR #2019
+        if rrset_contents(&api, &rz, &rev, "PTR").await? == [host.clone()] {
+            api.set_rrset(&rz, &rev, "PTR", 0, &[]).await?;
             snapshot(s, &api, &rz).await?;
-            flush_zone(s, &rz).await?;
+            peer::flush_zone(s, &rz).await?;
         }
     }
     Ok(())
+}
+
+// What: the contents of one record set; none: empty.
+// Why: PTR checks ask what a name holds right now.
+// From: Issue #1683 | PR #2019
+async fn rrset_contents(
+    api: &lancache_ng::pdns::Api,
+    zone: &str,
+    name: &str,
+    kind: &str,
+) -> Result<Vec<String>, String> {
+    let id = lancache_ng::pdns::zone_id(name);
+    Ok(api
+        .rrsets(zone)
+        .await?
+        .iter()
+        .filter(|r| r["name"] == id.as_str() && r["type"] == kind)
+        .filter_map(|r| r["records"].as_array())
+        .flatten()
+        .filter_map(|c| c["content"].as_str().map(str::to_string))
+        .collect())
+}
+
+// What: the TTL a record form sends, within the limit.
+// Why: the LAN and the PTR form take the same field.
+// From: Issue #1683 | PR #2019
+fn form_ttl(s: &Settings, get: &(dyn Fn(&str) -> String + Sync)) -> Result<u32, String> {
+    let max = s.uint("DNS_RECORD_TTL_MAX")?;
+    let ttl = get("ttl").parse::<u32>().unwrap_or(0);
+    if ttl == 0 || u64::from(ttl) > max {
+        return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
+    }
+    Ok(ttl)
 }
 
 // What: add or remove one PTR record.
@@ -1333,29 +1551,23 @@ async fn ptr(s: &Settings, add: bool, get: &(dyn Fn(&str) -> String + Sync)) -> 
     let Some(zone) = reverse_zone(s, &name) else {
         return Err(format!("{name} is in no private reverse zone"));
     };
-    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
+    let mut ttl = 0;
     let mut contents = Vec::new();
     if add {
-        let host = get("hostname");
-        contents.push(if host.ends_with('.') {
-            host
-        } else {
-            format!("{host}.")
-        });
+        ttl = form_ttl(s, get)?;
+        contents.push(lancache_ng::pdns::zone_id(&get("hostname")));
     }
     let api = pdns_api(s)?;
     api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
-    flush_zone(s, &zone).await
+    peer::flush_zone(s, &zone).await
 }
 
 // What: token secondaries register with.
 // Why: kept like any secret; rotate renews it.
 // From: Issue #1683 | PR #1980
 fn registration_token(s: &Settings) -> Result<String, String> {
-    let dir = secret::dir(s)?;
-    let name = "SECONDARY_REGISTRATION_TOKEN";
-    secret::resolve(&process_env, &dir, name, fs::Owner::default()).map_err(|e| e.to_string())
+    secret::get(s, "SECONDARY_REGISTRATION_TOKEN")
 }
 
 // What: saves secondaries as name@address rows.
@@ -1390,7 +1602,6 @@ fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
 // Why: setup.sh secondary writes it to its env.
 // From: Issue #1683 | PR #1980
 fn peer_kit(s: &Settings) -> Result<Value, String> {
-    let sec = secrets(s)?;
     let primary = s.text("IP_HTTP")?;
     Ok(json!({
         "primary": primary,
@@ -1398,9 +1609,9 @@ fn peer_kit(s: &Settings) -> Result<Value, String> {
         // Why: the secondary pulls each one by AXFR.
         // From: Issue #1683
         "zones": lancache_ng::dns::managed_zones(s)?,
-        "pdns_api_key": sec.pdns_api_key,
-        "tsig_name": sec.tsig_name,
-        "tsig_secret": sec.tsig_secret,
+        "pdns_api_key": secret::get(s, "PDNS_API_KEY")?,
+        "tsig_name": s.text("DDNS_TSIG_NAME")?,
+        "tsig_secret": secret::tsig_secret(s)?,
         "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
         "dns_local_reverse_zones": s.text_or_empty("DNS_LOCAL_REVERSE_ZONES"),
         "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
@@ -1470,7 +1681,7 @@ async fn secondary_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<SecondaryOp>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Page {
@@ -1478,10 +1689,10 @@ async fn secondary_action(
     let s = app.settings();
     let mut list = lancache_ng::pdns_conf::secondaries(&s);
     let Some(at) = list.iter().position(|(n, _)| *n == name) else {
-        return Err(Fail(StatusCode::NOT_FOUND, "no such secondary".into()));
+        return Err(Fail(StatusCode::NOT_FOUND, tr("err_no_secondary")));
     };
     match op {
-        "UI_ROUTE_SECONDARY" => {
+        SecondaryOp::Remove => {
             let (_, address) = list.remove(at);
             // What: the name leaves both NS lists too.
             // Why: a new secondary of that name starts new.
@@ -1494,9 +1705,9 @@ async fn secondary_action(
             rotate_tsig(&app).await?;
             Ok(Redirect::to(&s.text("UI_PAGE_DOMAINS")?).into_response())
         }
-        "UI_ROUTE_SECONDARY_NS_ADD" => {
+        SecondaryOp::NsAdd => {
             if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
-                return Err(bad_request("secondaries as NS are off"));
+                return Err(bad_request(tr("err_secondary_ns_off")));
             }
             answers_aa(&s, &list[at].1, &lancache_ng::dns::lan_zone(&s)?)
                 .await
@@ -1506,20 +1717,18 @@ async fn secondary_action(
                 .map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "UI_ROUTE_SECONDARY_NS_REMOVE" => {
+        SecondaryOp::NsRemove => {
             commit(&app, ns_change(&s, &name, Some(false)))
                 .await
                 .map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "UI_ROUTE_SECONDARY_ROTATE" => {
-            Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response())
-        }
-        "UI_ROUTE_SECONDARY_ADDRESS" => {
+        SecondaryOp::Rotate => Ok(axum::Json(json!({"token": renew_token(&s)?})).into_response()),
+        SecondaryOp::Address => {
             let axum::Json(a) = axum::Json::<Address>::from_bytes(&body)
-                .map_err(|_| bad_request("body must be {\"address\": ...}"))?;
+                .map_err(|_| bad_request(tr("err_address_body")))?;
             if !lancache_ng::dns::is_ip(&a.address) {
-                return Err(bad_request("no IP address"));
+                return Err(bad_request(tr("err_no_ip")));
             }
             // What: a new address drops the old records.
             // Why: same address: no save, no ensure runs.
@@ -1533,10 +1742,9 @@ async fn secondary_action(
             store_secondaries(&app, &list).await.map_err(bad_request)?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
-        "UI_ROUTE_SECONDARY_HEALTH" => {
+        SecondaryOp::Health => {
             Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response())
         }
-        _ => Err(Fail(StatusCode::NOT_FOUND, "unknown action".into())),
     }
 }
 
@@ -1554,56 +1762,25 @@ fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fields {
     form
 }
 
-// What: SOA serial of one zone in a zone list.
-// Why: serials show whether a secondary is in sync.
-// From: Issue #1683 | PR #1980
-fn serial_of(zones: &[lancache_ng::pdns::Zone], zone: &str) -> Option<u32> {
-    zones.iter().find(|z| z.name == zone).map(|z| z.serial)
-}
-
 // What: serial of each managed zone on both peers.
 // Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
 // From: Issue #1683 | PR #1858
 async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
     let ours = pdns_api(s)?.zones().await?;
-    let theirs = remote_zones(s, address).await?;
-    peer_zones(s, &ours, &theirs)
+    let theirs = peer::zones_at(s, address).await?;
+    peer::peer_zones(s, &ours, &theirs)
 }
 
-// What: both serials of every managed zone.
-// Why: the table and the check compare the same rows.
-// From: Issue #1683 | PR #2017
-fn peer_zones(
-    s: &Settings,
-    ours: &[lancache_ng::pdns::Zone],
-    theirs: &[lancache_ng::pdns::Zone],
-) -> Result<Vec<PeerZone>, String> {
-    Ok(lancache_ng::dns::managed_zones(s)?
-        .into_iter()
-        .map(|zone| PeerZone {
-            primary: serial_of(ours, &zone),
-            secondary: serial_of(theirs, &zone),
-            zone,
-        })
-        .collect())
-}
-
-// What: zone list of one secondary pdns API.
-// Why: health check and zone overview read the same.
-// From: Issue #1683
-async fn remote_zones(s: &Settings, address: &str) -> Result<Vec<lancache_ng::pdns::Zone>, String> {
-    remote_api(s, address)?.zones().await
-}
-
-// What: pdns-API of one secondary.
-// Why: zone list and AXFR request use the same.
+// What: pdns API of one peer by its address.
+// Why: zone list, AXFR request and sync use it.
 // From: Issue #1683
 fn remote_api(s: &Settings, address: &str) -> Result<lancache_ng::pdns::Api, String> {
-    let port = s.uint("PDNS_AUTH_API_PORT")?;
-    let host = lancache_ng::dns::host_port(address, port);
-    let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
-    let key = secrets(s)?.pdns_api_key;
-    Ok(lancache_ng::pdns::Api::new(http::client(s)?, &url, &key))
+    peer::api_at(
+        s,
+        http::client(s)?,
+        address,
+        &secret::get(s, "PDNS_API_KEY")?,
+    )
 }
 
 // What: failed checks of one secondary in a row.
@@ -1708,6 +1885,41 @@ async fn watch_round(
     commit(app, form).await
 }
 
+// What: one secondary gets our zone list.
+// Why: added or removed domains reach it alone.
+// From: Issue #1683
+async fn peer_follows(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    address: &str,
+) -> Result<(), String> {
+    let masters = vec![lancache_ng::dns::host_port(
+        &s.text("IP_HTTP")?,
+        s.uint("PDNS_AUTH_PORT")?,
+    )];
+    let who = format!("ui: secondary {address}");
+    let key = s.text("DDNS_TSIG_NAME")?;
+    peer::match_zones(api, &hosted_now(s)?, &masters, &key, true, &who).await
+}
+
+// What: every secondary follows, in the background.
+// Why: a zone change must not wait for the slow check.
+// From: Issue #1683
+fn peers_follow(s: &Settings) {
+    let s = s.clone();
+    tokio::spawn(async move {
+        for (name, address) in lancache_ng::pdns_conf::secondaries(&s) {
+            let done = match remote_api(&s, &address) {
+                Ok(api) => peer_follows(&s, &api, &address).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = done {
+                eprintln!("ui: secondary {name}: zones not matched: {e}");
+            }
+        }
+    });
+}
+
 // What: serials via pdns-API, lag pulled; aa result.
 // Why: an NS must answer aa; AXFR fixes a lost NOTIFY.
 // From: Issue #1683
@@ -1718,9 +1930,10 @@ async fn check_peer(
 ) -> Result<Result<(), String>, String> {
     let aa = answers_aa(s, address, &lancache_ng::dns::lan_zone(s)?).await;
     let api = remote_api(s, address)?;
+    peer_follows(s, &api, address).await?;
     let theirs = api.zones().await?;
-    for z in peer_zones(s, ours, &theirs)? {
-        let state = zone_state(&z);
+    for z in peer::peer_zones(s, ours, &theirs)? {
+        let state = peer::zone_state(&z);
         let word = state.word();
         // What: ahead: our serial goes past theirs first.
         // Why: a restore sets ours back; AXFR skips lower.
@@ -1752,10 +1965,10 @@ async fn check_peer(
 // From: Issue #1683
 async fn zone_overview(State(app): Shared) -> Page {
     let s = app.settings();
-    let mut columns = vec![json!({"name": "Primary", "error": Value::Null})];
+    let mut columns = vec![json!({"name": tr("zone_col_primary"), "error": Value::Null})];
     let mut lists = vec![pdns_api(&s)?.zones().await?];
     for (name, address) in lancache_ng::pdns_conf::secondaries(&s) {
-        match remote_zones(&s, &address).await {
+        match peer::zones_at(&s, &address).await {
             Ok(z) => {
                 columns.push(json!({"name": name, "error": Value::Null}));
                 lists.push(z);
@@ -1769,82 +1982,30 @@ async fn zone_overview(State(app): Shared) -> Page {
     let rows: Vec<Value> = lancache_ng::dns::managed_zones(&s)?
         .into_iter()
         .map(|zone| {
-            let serials: Vec<Option<u32>> = lists.iter().map(|l| serial_of(l, &zone)).collect();
-            json!({"zone": zone, "serials": serials})
+            let serials: Vec<Option<u32>> =
+                lists.iter().map(|l| peer::serial_of(l, &zone)).collect();
+            // What: state word of each secondary's cell.
+            // Why: table and status line share zone_state.
+            // From: Issue #1683 | PR #2019
+            let states: Vec<Option<&str>> = serials
+                .iter()
+                .zip(&columns)
+                .skip(1)
+                .map(|(theirs, column)| {
+                    column["error"].is_null().then(|| {
+                        let row = PeerZone {
+                            zone: zone.clone(),
+                            primary: serials[0],
+                            secondary: *theirs,
+                        };
+                        peer::zone_state(&row).word()
+                    })
+                })
+                .collect();
+            json!({"zone": zone, "serials": serials, "states": states})
         })
         .collect();
     Ok(axum::Json(json!({"columns": columns, "rows": rows})).into_response())
-}
-
-// What: one managed zone with both serials.
-// Why: the health check reports every zone.
-// From: Issue #1683
-struct PeerZone {
-    zone: String,
-    primary: Option<u32>,
-    secondary: Option<u32>,
-}
-
-// What: state of one zone on a secondary, mild to bad.
-// Why: the order picks the worst; callers name a state.
-// From: Issue #1683 | PR #2017
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum ZoneState {
-    InSync,
-    Ahead,
-    Unknown,
-    Behind,
-    Missing,
-    Error,
-}
-
-impl ZoneState {
-    // What: the word of a state in answers and log lines.
-    // Why: the page maps this word to label and colour.
-    // From: Issue #1683 | PR #2017
-    fn word(self) -> &'static str {
-        match self {
-            ZoneState::InSync => "in_sync",
-            ZoneState::Ahead => "ahead",
-            ZoneState::Unknown => "unknown",
-            ZoneState::Behind => "behind",
-            ZoneState::Missing => "missing",
-            ZoneState::Error => "error",
-        }
-    }
-}
-
-// What: state of one zone from its two serials.
-// Why: the peer status is the worst zone state.
-// From: Issue #1683
-fn zone_state(z: &PeerZone) -> ZoneState {
-    use lancache_ng::dns::Sync;
-    // What: let-else instead of None in a tuple pattern.
-    // Why: CodeQL read that None as an unused variable.
-    // From: Issue #1683
-    let Some(p) = z.primary else {
-        return ZoneState::Error;
-    };
-    let Some(r) = z.secondary else {
-        return ZoneState::Missing;
-    };
-    match lancache_ng::dns::sync_state(p, r) {
-        Sync::InSync => ZoneState::InSync,
-        Sync::Ahead => ZoneState::Ahead,
-        Sync::Unknown => ZoneState::Unknown,
-        Sync::Behind => ZoneState::Behind,
-    }
-}
-
-// What: the worst state of the zones; none: in sync.
-// Why: one lagging zone decides the peer status.
-// From: Issue #1683 | PR #2017
-fn worst_state(zones: &[PeerZone]) -> ZoneState {
-    zones
-        .iter()
-        .map(zone_state)
-        .max()
-        .unwrap_or(ZoneState::InSync)
 }
 
 // What: worst state over all zones, each zone in detail.
@@ -1855,10 +2016,10 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
         Ok(z) => z,
         Err(e) => return json!({"status": "unreachable", "detail": e}),
     };
-    let worst = worst_state(&zones);
+    let worst = peer::worst_state(&zones);
     let mut lines = Vec::new();
     for z in &zones {
-        let state = zone_state(z).word();
+        let state = peer::zone_state(z).word();
         let show = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
         lines.push(format!(
             "{}: {} (primary {}, secondary {})",
@@ -1875,7 +2036,7 @@ async fn secondary_health(s: &Settings, address: &str) -> Value {
 // Why: UI, DDNS, AXFR and rollback all bump it.
 // From: Issue #1683 | PR #1980
 async fn flush_on_transfer(app: Arc<App>) {
-    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    let mut seen = peer::Flushed::default();
     // What: an error only after the grace time.
     // Why: a planned dns restart must log nothing.
     // From: Issue #1683 | PR #1980
@@ -1908,29 +2069,27 @@ async fn flush_on_transfer(app: Arc<App>) {
     }
 }
 
-// What: clears one zone in every recursor cache.
-// Why: an edit shows at once, not after the poll.
-// From: Issue #1683 | PR #1980
-async fn flush_zone(s: &Settings, zone: &str) -> Result<(), String> {
-    for r in recursor_apis(s)? {
-        r.flush(zone, true).await?;
-    }
-    Ok(())
-}
-
 // What: clears recursor cache for changed zones.
 // Why: recursors would serve old answers until TTL.
 // From: Issue #1683 | PR #1980
-async fn flush_round(s: &Settings, seen: &mut BTreeMap<String, u32>) -> Result<(), String> {
-    for zone in pdns_api(s)?.zones().await? {
-        // What: note a serial only after its flush worked.
-        // Why: a flush during a dns restart must retry.
-        // From: Issue #1683 | PR #1980
-        let before = seen.get(&zone.name).copied();
-        if before.is_some_and(|b| b != zone.serial) {
-            flush_zone(s, &zone.name).await?;
+async fn flush_round(s: &Settings, seen: &mut peer::Flushed) -> Result<(), String> {
+    let api = pdns_api(s)?;
+    let peers = !lancache_ng::pdns_conf::secondaries(s).is_empty();
+    let zones: BTreeMap<String, u32> = api
+        .zones()
+        .await?
+        .into_iter()
+        .map(|z| (z.name, z.serial))
+        .collect();
+    for (zone, serial) in seen.due(&zones) {
+        peer::flush_zone(s, &zone).await?;
+        // What: NOTIFY to the secondaries right away.
+        // Why: live: pdns alone waited up to 60 s.
+        // From: Issue #1683 | PR #2019
+        if peers {
+            api.notify(&zone).await?;
         }
-        seen.insert(zone.name.clone(), zone.serial);
+        seen.done(&zone, serial);
     }
     Ok(())
 }
@@ -1944,24 +2103,13 @@ fn kea_api(s: &Settings) -> Result<lancache_ng::kea::Api, String> {
         s.text("DHCP_API_HOST")?,
         s.uint("KEA_CTRL_PORT")?
     );
-    let token = secrets(s)?.kea_ctrl_token;
+    let token = secret::get(s, "KEA_CTRL_TOKEN")?;
     Ok(lancache_ng::kea::Api::new(
         http::client(s)?,
         &url,
         &s.text("KEA_CTRL_USER")?,
         &token,
     ))
-}
-
-// What: value of one Kea option in a subnet.
-// Why: forms show options by name, Kea stores a list.
-// From: Issue #1683 | PR #1980
-fn option_data(sn: &Value, name: &str) -> String {
-    let rows = sn["option-data"].as_array().cloned().unwrap_or_default();
-    let hit = rows.iter().find(|o| o["name"] == name);
-    hit.and_then(|o| o["data"].as_str())
-        .unwrap_or_default()
-        .to_string()
 }
 
 // What: one Kea subnet as flat page fields.
@@ -2057,6 +2205,15 @@ async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     ctx.insert("dhcp_dns_secondary", dns.get(1).map_or("", String::as_str));
     ctx.insert("default_lease_time", &opt("DHCP_LEASE_TIME"));
     ctx.insert("dhcp_domain", &opt("DHCP_DOMAIN"));
+    // What: LAN domains for the subnet domain dropdown.
+    // Why: a subnet may only use a domain DNS serves.
+    // From: Issue #1683
+    let lan_names: Vec<String> = lancache_ng::dns::lan_domains(&s)?
+        .iter()
+        .map(|z| z.trim_end_matches('.').to_string())
+        .collect();
+    ctx.insert("lan_domain_names", &lan_names);
+    ctx.insert("main_subnet_id", &s.uint("DHCP_SUBNET_ID")?);
     ctx.insert("dhcp_ntp_servers", &opt("DHCP_NTP_SERVERS"));
     ctx.insert("dhcp_relay_local_addr", &opt("DHCP_RELAY_LOCAL_ADDR"));
     ctx.insert("dhcp_proxy_subnet_start", &opt("DHCP_SUBNET_START"));
@@ -2125,10 +2282,15 @@ async fn main_subnet(
         ("DHCP_RANGE_START", "pool_start"),
         ("DHCP_RANGE_END", "pool_end"),
         ("DHCP_GATEWAY", "gateway"),
-        ("DHCP_DOMAIN", "domain"),
         ("DHCP_NTP_SERVERS", "ntp_servers"),
     ] {
         f.insert(key.into(), get(field));
+    }
+    // What: main subnet domain sets the main LAN domain.
+    // Why: picking an extra swaps it with the old main.
+    // From: Issue #1683
+    if !get("domain").is_empty() {
+        f.extend(main_domain_fields(s, &get("domain"))?);
     }
     if !get("lease_time").is_empty() {
         f.insert("DHCP_LEASE_TIME".into(), get("lease_time"));
@@ -2166,20 +2328,11 @@ async fn kea_edit(
 // From: Issue #1683 | PR #1980
 fn subnet_from(get: &(dyn Fn(&str) -> String + Sync), id: u64, old: Option<&Value>) -> Value {
     let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
-    use lancache_ng::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
-    let mut opts = vec![
-        json!({"name": ROUTERS.name, "data": get("gateway")}),
-        json!({"name": DNS_SERVERS.name, "data": dns.join(", ")}),
-    ];
-    for (name, field) in [
-        (DOMAIN_NAME.name, "domain"),
-        (NTP_SERVERS.name, "ntp_servers"),
-    ] {
-        let value = get(field);
-        if !value.is_empty() {
-            opts.push(json!({"name": name, "data": value}));
-        }
-    }
+    let hosts: Vec<String> = config::list_items(&get("ntp_servers"))
+        .map(str::to_string)
+        .collect();
+    let ntp = lancache_ng::dhcp::ipv4_of(&hosts, "ntp_servers");
+    let mut opts = lancache_ng::kea_conf::named_rows(&get("gateway"), &dns, &get("domain"), &ntp);
     if let Some(old) = old {
         opts.extend(lancache_ng::kea_conf::coded_options(old));
     }
@@ -2239,11 +2392,19 @@ async fn kea_action(
             .parse::<u64>()
             .map_err(|_| format!("{k} must be a number"))
     };
+    // What: a subnet domain must be a LAN domain.
+    // Why: DDNS and DNS answer only for those zones.
+    // From: Issue #1683
+    if matches!(op, "UI_ROUTE_SUBNET_ADD" | "UI_ROUTE_SUBNET_UPDATE") && !get("domain").is_empty() {
+        chosen_lan_zone(s, &get("domain"))?;
+    }
     match op {
         "UI_ROUTE_SUBNET_ADD" => {
             kea_edit(s, |l| {
                 let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
-                l.push(subnet_from(get, next, None));
+                let mut sn = subnet_from(get, next, None);
+                lancache_ng::kea_conf::subnet_ddns_suffix(s, &mut sn)?;
+                l.push(sn);
                 Ok(())
             })
             .await
@@ -2253,7 +2414,7 @@ async fn kea_action(
             kea_edit(s, |l| {
                 let sn = subnet_mut(l, id)?;
                 *sn = subnet_from(get, id, Some(&sn.clone()));
-                Ok(())
+                lancache_ng::kea_conf::subnet_ddns_suffix(s, sn)
             })
             .await
         }
@@ -2315,18 +2476,18 @@ async fn kea_action(
 async fn dhcp_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<DhcpOp>>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
     let s = app.settings();
     let get = |k: &str| field(&form, k);
-    let on = switch_on(&get("enabled"));
+    let on = config::parse_bool(&get("enabled")).unwrap_or(false);
     // What: relay without the real server: plain hint.
     // Why: a bare key name tells the user nothing.
     // From: Issue #1683 | PR #1991
     let asked = DhcpMode::from_word(&get("dhcp_mode")).ok();
-    let relay = op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::DnsmasqRelay);
+    let relay = matches!(op, DhcpOp::Mode) && asked == Some(DhcpMode::DnsmasqRelay);
     if relay && s.text_or_empty("UPSTREAM_DHCP_IP").is_empty() {
         return Err(bad_request(tr("err_relay_needs_upstream")));
     }
@@ -2334,20 +2495,20 @@ async fn dhcp_action(
     // Why: without a card Kea answers nobody.
     // From: Issue #1683
     let cards = get("dhcp_proxy_interface");
-    if op == "UI_ROUTE_DHCP_MODE" && asked == Some(DhcpMode::Kea) && cards.is_empty() {
+    if matches!(op, DhcpOp::Mode) && asked == Some(DhcpMode::Kea) && cards.is_empty() {
         return Err(bad_request(tr("err_kea_needs_interface")));
     }
     let result = match op {
-        "UI_ROUTE_DHCP_MODE" => {
+        DhcpOp::Mode => {
             let mut f = single_field("DHCP_MODE", get("dhcp_mode"));
             f.insert("DHCP_PROXY_INTERFACE".into(), cards);
             commit(&app, f).await
         }
-        "UI_ROUTE_DHCP_DDNS" => commit(&app, single_field("DHCP_DDNS", on)).await,
-        "UI_ROUTE_DHCP_PROXY" | "UI_ROUTE_DHCP_RELAY" => {
-            commit(&app, dnsmasq_fields(&form, op == "UI_ROUTE_DHCP_PROXY")).await
+        DhcpOp::Ddns => commit(&app, single_field("DHCP_DDNS", on)).await,
+        DhcpOp::Proxy | DhcpOp::Relay => {
+            commit(&app, dnsmasq_fields(&form, matches!(op, DhcpOp::Proxy))).await
         }
-        _ => main_subnet(&app, &s, op, &get).await,
+        other => main_subnet(&app, &s, other.key(), &get).await,
     };
     finish(result, &s.text("UI_PAGE_DHCP")?)
 }
@@ -2416,7 +2577,7 @@ async fn stats(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     // What: no dhcp tab while DHCP_MODE is off.
     // Why: the tab would show a stopped container.
     // From: Issue #1683
-    let off = dhcp_off_service(&s)?.unwrap_or_default();
+    let off = lancache_ng::dhcp::off_service(&s)?.unwrap_or_default();
     for c in s.list("STATS_CONTAINERS") {
         if c == off {
             continue;
@@ -2572,7 +2733,7 @@ async fn service_values(app: &App, s: &Settings, want: &[String]) -> BTreeMap<St
         }
     }
     if has("recursor")
-        && let Ok(apis) = recursor_apis(s)
+        && let Ok(apis) = peer::recursor_apis(s)
     {
         for r in apis {
             if let Ok(rows) = r.statistics().await {
@@ -2701,49 +2862,35 @@ async fn sampler(app: Arc<App>) {
         for e in sample_services(&app, &s).await {
             eprintln!("ui: stats: {e}");
         }
-        if let Err(e) = dhcp_stays_off(&app, &s).await {
-            eprintln!("ui: dhcp: {e}");
+        match dhcp_stays_off(&app, &s).await {
+            Ok(Some(done)) => eprintln!("ui: dhcp: {done}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("ui: dhcp: {e}"),
         }
         tokio::time::sleep(Duration::from_secs(step)).await;
     }
 }
 
-// What: the dhcp service name while the mode is off.
-// Why: pages hide it; apply and the watch keep it off.
-// From: Issue #1683 | PR #2017
-fn dhcp_off_service(s: &Settings) -> Result<Option<String>, String> {
-    if DhcpMode::from_settings(s)? != DhcpMode::Off {
-        return Ok(None);
-    }
-    s.text("DHCP_SERVICE").map(Some)
-}
-
 // What: in mode off a running dhcp is stopped again.
 // Why: compose up may start it after the ui.
 // From: Issue #1683 | PR #1980
-async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
-    let Some(service) = dhcp_off_service(s)? else {
-        return Ok(());
+async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<Option<String>, String> {
+    let Some(service) = lancache_ng::dhcp::off_service(s)? else {
+        return Ok(None);
     };
     let (grace, limit) = app.limits(s)?;
     let list = project_containers(app, s).await?;
-    // What: only the stack dhcp, not a "compose run" one.
-    // Why: CI kea_rollback runs own Kea; it was stopped.
-    // From: Issue #1683
     let running = list.iter().find(|c| {
-        docker::service_of(c) == Some(service.as_str())
-            && c["Labels"][docker::ONEOFF_LABEL].as_str() != Some("True")
-            && c["State"].as_str() == Some("running")
+        docker::service_of(c) == Some(service.as_str()) && c["State"].as_str() == Some("running")
     });
     let Some(name) = running.and_then(docker::name_of) else {
-        return Ok(());
+        return Ok(None);
     };
     let r = app
         .docker
         .act(name, docker::Action::Stop, grace, limit)
         .await;
-    eprintln!("ui: dhcp: mode off, stop {name} {r:?}");
-    Ok(())
+    Ok(Some(format!("mode off, stop {name} {r:?}")))
 }
 
 // What: bytes the cache folder holds on disk.
@@ -2751,24 +2898,11 @@ async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<(), String> {
 // From: Issue #1683 | PR #1980
 fn dir_bytes(root: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    let mut total = 0u64;
-    let mut todo = vec![root.to_path_buf()];
-    while let Some(dir) = todo.pop() {
-        let Ok(list) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in list.flatten() {
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                todo.push(entry.path());
-            } else {
-                total = total.saturating_add(meta.blocks().saturating_mul(512));
-            }
-        }
-    }
-    total
+    lancache_ng::fs::files_under(root)
+        .into_iter()
+        .fold(0u64, |total, (_, meta)| {
+            total.saturating_add(meta.blocks().saturating_mul(512))
+        })
 }
 
 // What: count the cache folder now and then.
@@ -2806,9 +2940,7 @@ async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, 
 // Why: every lookup of a service starts from this list.
 // From: Issue #1683 | PR #2017
 async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, String> {
-    let (_, limit) = app.limits(s)?;
-    let list = app.docker.project(&s.text("COMPOSE_PROJECT")?, limit).await;
-    list.map_err(|e| e.to_string())
+    app.docker.stack(s).await
 }
 
 // What: run a command in a service container.
@@ -2935,7 +3067,7 @@ fn job_time(when: &str, at: &str) -> Result<String, Fail> {
 async fn hamster_action(
     State(app): Shared,
     Extension(csrf): Extension<Csrf>,
-    Extension(Op(op)): Extension<Op>,
+    Extension(Op(op)): Extension<Op<HamsterOp>>,
     Form(form): Form<Fields>,
 ) -> Page {
     csrf.check(&form)?;
@@ -2949,19 +3081,18 @@ async fn hamster_action(
     // What: a job needs addresses or an app ID.
     // Why: the text in the page language.
     // From: Issue #871 | PR #1980
-    if op == "UI_ROUTE_HAMSTER_ADD" && what.trim().is_empty() {
+    if matches!(op, HamsterOp::Add) && what.trim().is_empty() {
         return Err(bad_request(tr("err_hamster_empty")));
     }
     // What: the cachehamster command of each action.
     // Why: the daemon protocol names commands, not paths.
     // From: Issue #871
     let args: Vec<&str> = match op {
-        "UI_ROUTE_HAMSTER_ADD" => vec!["add", &name, &when, &what],
-        "UI_ROUTE_HAMSTER_START" => vec!["start", &id],
-        "UI_ROUTE_HAMSTER_CANCEL" => vec!["cancel", &id],
-        "UI_ROUTE_HAMSTER_REMOVE" => vec!["remove", &id],
-        "UI_ROUTE_HAMSTER_LOGOUT" => vec!["logout"],
-        _ => return Err(Fail(StatusCode::NOT_FOUND, "no such action".into())),
+        HamsterOp::Add => vec!["add", &name, &when, &what],
+        HamsterOp::Start => vec!["start", &id],
+        HamsterOp::Cancel => vec!["cancel", &id],
+        HamsterOp::Remove => vec!["remove", &id],
+        HamsterOp::Logout => vec!["logout"],
     };
     let back = app.settings().text("UI_PAGE_CACHEHAMSTER")?;
     finish(hamster(&app, &args).await.map(drop), &back)
@@ -3010,27 +3141,35 @@ async fn hamster_api(
     Ok(axum::Json(v).into_response())
 }
 
-// What: write rendered files; list the changed.
-// Why: an unchanged file never wakes its owner.
-// From: Issue #1683 | PR #1980
-fn write_files(s: &Settings, files: &[render::File]) -> Result<Vec<config::Change>, String> {
-    let mode = s.mode("UI_CONFIG_FILE_MODE")?;
-    let mut out = Vec::new();
-    for f in files {
-        // What: a first write wakes no owner.
-        // Why: owners read it at start; a HUP then kills.
-        // From: Issue #1683 | PR #1980
-        let wake = f.path.exists();
-        let changed = fs::write_if_changed(&f.path, f.body.as_bytes(), mode, fs::Owner::default());
-        if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
-            out.push(config::Change {
-                key: f.path.display().to_string(),
-                owner: f.owner.to_string(),
-                effect: config::Effect::Reload,
-            });
+// What: drop proxy render files no longer written.
+// Why: an old https.conf keeps the SSL server alive.
+// From: Issue #1683 | PR #2019
+fn prune_rendered(s: &Settings, files: &[render::File]) -> Result<Vec<PathBuf>, String> {
+    let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
+    let mut removed = Vec::new();
+    for sub in ["conf.d", "stream.d"] {
+        let dir = conf.join(sub);
+        let kept: std::collections::BTreeSet<&std::path::Path> = files
+            .iter()
+            .map(|f| f.path.as_path())
+            .filter(|p| p.parent() == Some(dir.as_path()))
+            .collect();
+        // What: skip a dir this render did not fill.
+        // Why: an empty set must not wipe the dir.
+        // From: Issue #1683 | PR #2019
+        if kept.is_empty() {
+            continue;
+        }
+        let entries = lancache_ng::fs::entries_if_present(&dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        for path in entries {
+            if path.is_file() && !kept.contains(path.as_path()) {
+                std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                removed.push(path);
+            }
         }
     }
-    Ok(out)
+    Ok(removed)
 }
 
 // What: container name per plan owner; others drop out.
@@ -3054,6 +3193,73 @@ async fn plan_containers<V>(
     (names, skipped)
 }
 
+// What: render with the live chain, then write.
+// Why: apply and start share one way to the files.
+// From: Issue #1683 | PR #2019
+async fn render_and_write(
+    s: &Settings,
+) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
+    let sec = render::secrets(s)?;
+    let chain = dnssec_chain(s).await;
+    let files = render::all(s, &sec, &chain).map_err(|e| e.join("; "))?;
+    let written = render::write_files(s, &files)?;
+    Ok((files, written))
+}
+
+// What: the live chain; on error NTA everywhere.
+// Why: no proof must never mean SERVFAIL.
+// From: Issue #1683 | PR #2019
+async fn dnssec_chain(s: &Settings) -> lancache_ng::recursor_conf::Chain {
+    match read_chain(s).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ui: DNSSEC anchors off: {e}");
+            lancache_ng::recursor_conf::Chain::default()
+        }
+    }
+}
+
+// What: anchors of top zones; zones chained to them.
+// Why: a zone loses its NTA only on a proven chain.
+// From: Issue #1683 | PR #2019
+async fn read_chain(s: &Settings) -> Result<lancache_ng::recursor_conf::Chain, String> {
+    let mut chain = lancache_ng::recursor_conf::Chain::default();
+    if Role::from_settings(s)? != Role::Primary {
+        return Ok(chain);
+    }
+    let tops = own_tops(s)?;
+    if tops.is_empty() {
+        return Ok(chain);
+    }
+    let api = pdns_api(s)?;
+    for top in &tops {
+        let ds = api.ds(top).await.unwrap_or_default();
+        if !ds.is_empty() {
+            chain.secured.push(top.clone());
+        }
+        chain.anchors.push((top.clone(), ds));
+    }
+    let norm = |rows: Vec<String>| {
+        let mut v: Vec<String> = rows.iter().map(|r| canonical("DS", r)).collect();
+        v.sort();
+        v
+    };
+    for (zone, parent) in own_links(s, &tops)? {
+        let Some(parent) = parent else {
+            continue;
+        };
+        if !chain.secured.contains(&parent) {
+            continue;
+        }
+        let want = norm(api.ds(&zone).await.unwrap_or_default());
+        let have = norm(rrset_contents(&api, &parent, &zone, "DS").await?);
+        if !want.is_empty() && want == have {
+            chain.secured.push(zone);
+        }
+    }
+    Ok(chain)
+}
+
 // What: render, write and wake the owners.
 // Why: only owners with changes are touched.
 // From: Issue #1683 | PR #1980
@@ -3063,12 +3269,24 @@ async fn apply_all(
     new: &Settings,
     zones: bool,
 ) -> Result<Vec<String>, String> {
-    let sec = secrets(new)?;
-    let files = render::all(new, &sec).map_err(|e| e.join("; "))?;
+    let (files, written) = render_and_write(new).await?;
     let mut changes = old.diff(new);
-    let written = write_files(new, &files)?;
     app.rendered.store(true, Ordering::Relaxed);
     changes.extend(written.iter().cloned());
+    // What: drop proxy render files no longer written.
+    // Why: a left-over https.conf keeps the SSL server up.
+    // From: Issue #1683 | PR #2019
+    let removed = prune_rendered(new, &files)?;
+    if !removed.is_empty() {
+        for path in &removed {
+            eprintln!("ui: removed stale {}", path.display());
+        }
+        changes.push(config::Change {
+            key: "proxy-prune".into(),
+            owner: new.text("PROXY_SERVICE")?,
+            effect: config::Effect::Reload,
+        });
+    }
     // What: PowerDNS steps report, not abort.
     // Why: pdns starts only after the restart below.
     // From: Issue #1683 | PR #1980
@@ -3108,22 +3326,26 @@ async fn apply_all(
     if zones && let Err(e) = ensure_zones(new).await {
         report.push(e);
     }
+    // What: render again once the zones stand.
+    // Why: a new zone has its DS only after ensure.
+    // From: Issue #1683 | PR #2019
+    if zones {
+        match render_and_write(new).await {
+            Ok((_, again)) => changes.extend(again),
+            Err(e) => report.push(e),
+        }
+    }
     let mut plan = apply::plan(&changes);
     let (grace, limit) = app.limits(new)?;
     // What: mode off stops dhcp; a missing one is fine.
     // Why: compose up may have started it again.
     // From: Issue #1683 | PR #1980
     let dhcp = new.text("DHCP_SERVICE")?;
-    if dhcp_off_service(new)?.is_some() {
+    if lancache_ng::dhcp::off_service(new)?.is_some() {
         plan.remove(&dhcp);
-        match container_of(app, new, &dhcp).await {
-            Ok(name) => {
-                let r = app
-                    .docker
-                    .act(&name, docker::Action::Stop, grace, limit)
-                    .await;
-                report.push(format!("{dhcp}: mode off, stop {r:?}"));
-            }
+        match dhcp_stays_off(app, new).await {
+            Ok(Some(done)) => report.push(format!("{dhcp}: {done}")),
+            Ok(None) => {}
             Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
         }
     }
@@ -3218,7 +3440,7 @@ async fn apply_all(
             report.push(format!("certs: {n} issued"));
             let mut plan = apply::plan(&[config::Change {
                 key: "certs".into(),
-                owner: "proxy".into(),
+                owner: new.text("PROXY_SERVICE")?,
                 effect: config::Effect::Reload,
             }]);
             let (names, _) = plan_containers(app, new, &mut plan).await;
@@ -3249,11 +3471,11 @@ async fn wait_healthy(
     for name in names {
         loop {
             let state = app.docker.inspect(name, limit).await.ok();
-            let field = |p: &str| state.as_ref().and_then(|v| v.pointer(p)).cloned();
-            let running = field("/State/Running").and_then(|v| v.as_bool());
-            let health = field("/State/Health/Status");
-            let health = health.as_ref().and_then(Value::as_str);
-            if running == Some(true) && health.is_none_or(|h| h == "healthy") {
+            let health = state.as_ref().map(docker::Health::from_inspect);
+            if matches!(
+                health,
+                Some(docker::Health::Healthy | docker::Health::Degraded)
+            ) {
                 break;
             }
             if std::time::Instant::now() >= end {
@@ -3292,102 +3514,11 @@ async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// What: TSIG key in PowerDNS; returns its name.
-// Why: zones are created with the key, so it comes first.
-// From: Issue #1683
-async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
-    let sec = secrets(s)?;
-    let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
-    pdns_api(s)?
-        .set_tsigkey(&sec.tsig_name, &algorithm, &sec.tsig_secret)
-        .await?;
-    Ok(sec.tsig_name)
-}
-
-// What: bind the TSIG key to every existing zone.
-// Why: zones of older versions were created without it.
-// From: Issue #1683 | PR #1858
-async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let secondary = Role::from_settings(s)? == Role::Secondary;
-    let key = vec![key.to_string()];
-    for z in api.zones().await? {
-        if secondary {
-            api.set_secondary_tsig(&z.name, &key[0]).await?;
-        } else {
-            api.set_metadata(&z.name, "TSIG-ALLOW-AXFR", &key).await?;
-        }
-    }
-    Ok(())
-}
-
-// What: create missing zones on a secondary.
-// Why: the zone list comes from registration.
-// From: Issue #1683 | PR #1858
-async fn ensure_secondary_zones(s: &Settings, key: &str) -> Result<(), String> {
-    let api = pdns_api(s)?;
-    let have = zone_names(&api).await?;
-    let zones = s.list("DNS_SECONDARY_ZONES");
-    let port = primary_xfr_port(s, zones.first()).await?;
-    let masters = vec![lancache_ng::dns::host_port(
-        &s.text("DNS_XFR_PRIMARY")?,
-        port,
-    )];
-    for zone in zones {
-        let id = lancache_ng::pdns::zone_id(&zone);
-        if have.contains(&id) {
-            api.set_masters(&id, &masters).await?;
-        } else {
-            api.create_secondary(&id, &masters, key).await?;
-        }
-    }
-    Ok(())
-}
-
-// What: port 53 if the primary answers aa there.
-// Why: an older primary has its recursor on the DNS port.
-// From: Issue #1683
-async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
-    let fallback = s.uint("PDNS_AUTH_PORT")?;
-    let Some(zone) = zone else {
-        return Ok(fallback);
-    };
-    let primary = s.text("DNS_XFR_PRIMARY")?;
-    let probe = soa_on_dns_port(s, &primary, zone).await;
-    // What: no aa or no answer: stay on PDNS_AUTH_PORT.
-    // Why: a failed probe must not stop the zones step.
-    // From: Issue #1683
-    let chosen = match &probe {
-        Ok(soa) if soa.serves_zone() => s.uint("DNS_PORT")?,
-        _ => fallback,
-    };
-    eprintln!("ui: primary {primary}: {probe:?}; XFR port {chosen}");
-    Ok(chosen)
-}
-
-// What: non-RD SOA query to DNS_PORT of one address.
-// Why: XFR port choice and the NS check ask the same.
-// From: Issue #1683
-async fn soa_on_dns_port(
-    s: &Settings,
-    address: &str,
-    zone: &str,
-) -> Result<lancache_ng::dns::Soa, String> {
-    let ip = lancache_ng::dns::parse_ip(address)?;
-    let port = s.num::<u16>("DNS_PORT")?;
-    let addr = std::net::SocketAddr::new(ip, port);
-    let wait = Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
-    let zone = zone.to_string();
-    tokio::task::spawn_blocking(move || lancache_ng::dns::soa_probe(addr, &zone, wait))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
 // What: Ok when the address answers zone with aa.
 // Why: only an authoritative secondary may be an NS.
 // From: Issue #1683
 async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), String> {
-    let soa = soa_on_dns_port(s, address, zone).await?;
+    let soa = peer::soa_on_dns_port(s, address, zone).await?;
     if soa.serves_zone() {
         return Ok(());
     }
@@ -3407,10 +3538,12 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
     let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
         Vec::new()
     } else {
-        vec![secrets(s)?.tsig_name]
+        vec![s.text("DDNS_TSIG_NAME")?]
     };
-    for zone in lancache_ng::dns::managed_zones(s)? {
-        let id = lancache_ng::pdns::zone_id(&zone);
+    let tops = own_tops(s)?;
+    let hosted = hosted_zones(s, &tops)?;
+    for zone in &hosted {
+        let id = lancache_ng::pdns::zone_id(zone);
         if !have.contains(&id) {
             api.create_primary(&id, &edit[0], key).await?;
         }
@@ -3420,7 +3553,164 @@ async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
         api.set_metadata(&id, "TSIG-ALLOW-DNSUPDATE", &signed)
             .await?;
     }
-    ensure_soa_nameserver(s, &api).await
+    for lan in lancache_ng::dns::lan_domains(s)? {
+        merge_legacy_zone(s, &api, &have, &lan).await?;
+    }
+    ensure_own_endings(s, &api, &tops).await?;
+    ensure_soa_nameserver(s, &api, &hosted).await
+}
+
+// What: top zones of own endings; no PSL, none.
+// Why: an ending we cannot check may be public.
+// From: Issue #1683 | PR #2019
+fn own_tops(s: &Settings) -> Result<Vec<String>, String> {
+    match render::psl(s) {
+        Ok(psl) => lancache_ng::dns::top_zones(s, &psl),
+        Err(e) => {
+            eprintln!("ui: no own top zones: {e}");
+            Ok(Vec::new())
+        }
+    }
+}
+
+// What: the hosted zones with the tops read now.
+// Why: drop_old_zones compares before and after.
+// From: Issue #1683 | PR #2019
+fn hosted_now(s: &Settings) -> Result<Vec<String>, String> {
+    hosted_zones(s, &own_tops(s)?)
+}
+
+// What: zones the primary keeps: managed plus tops.
+// Why: one list creates zones, NS and SOA names.
+// From: Issue #1683 | PR #2019
+fn hosted_zones(s: &Settings, tops: &[String]) -> Result<Vec<String>, String> {
+    let mut zones = lancache_ng::dns::managed_zones(s)?;
+    for top in tops {
+        config::add_once(&mut zones, top);
+    }
+    Ok(zones)
+}
+
+// What: LAN zones of own endings and their parent.
+// Why: signing and the resolver chain walk one list.
+// From: Issue #1683 | PR #2019
+fn own_links(s: &Settings, tops: &[String]) -> Result<Vec<(String, Option<String>)>, String> {
+    use lancache_ng::dns::{is_within, parent_zone};
+    let mut signed: Vec<String> = lancache_ng::dns::lan_domains(s)?
+        .into_iter()
+        .filter(|z| tops.iter().any(|t| is_within(z, t)))
+        .collect();
+    // What: parents before their children.
+    // Why: a chain holds only if every link above holds.
+    // From: Issue #1683 | PR #2019
+    signed.sort_by_key(|z| z.matches('.').count());
+    let mut parents = tops.to_vec();
+    parents.extend(signed.iter().cloned());
+    Ok(signed
+        .into_iter()
+        .map(|z| {
+            let p = parent_zone(&z, &parents);
+            (z, p)
+        })
+        .collect())
+}
+
+// What: sign own endings; parents hold NS and DS.
+// Why: .lan and .local validate only along a chain.
+// From: Issue #1683 | PR #2019
+async fn ensure_own_endings(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    tops: &[String],
+) -> Result<(), String> {
+    let ns = ns_names(s, &soa_names(s)?.0)?;
+    let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
+    for top in tops {
+        api.secure(top).await?;
+    }
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for (zone, parent) in own_links(s, tops)? {
+        let zone = &zone;
+        api.secure(zone).await?;
+        let Some(parent) = parent else {
+            continue;
+        };
+        ensure_rrset(api, &parent, zone, "NS", ttl, &ns).await?;
+        // What: no DS when it cannot be read.
+        // Why: no DS is unchecked; a wrong DS is SERVFAIL.
+        // From: Issue #1683 | PR #2019
+        let ds = api.ds(zone).await.unwrap_or_else(|e| {
+            eprintln!("ui: no DS for {zone}: {e}");
+            Vec::new()
+        });
+        ensure_rrset(api, &parent, zone, "DS", ttl, &ds).await?;
+        wanted.push((parent, zone.clone()));
+    }
+    // What: drop delegations of gone zones in top zones.
+    // Why: a top zone is ours; a LAN zone keeps all rows.
+    // From: Issue #1683 | PR #2019
+    for top in tops {
+        for r in api.rrsets(top).await? {
+            let (Some(name), Some(kind)) = (r["name"].as_str(), r["type"].as_str()) else {
+                continue;
+            };
+            let child = (top.clone(), name.to_string());
+            if name != top && matches!(kind, "NS" | "DS") && !wanted.contains(&child) {
+                api.set_rrset(top, name, kind, ttl, &[]).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// What: moves local.<domain> records into <domain>.
+// Why: zones before multi-domain had this extra zone.
+// From: Issue #1683
+async fn merge_legacy_zone(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    have: &[String],
+    lan: &str,
+) -> Result<(), String> {
+    let legacy = lancache_ng::dns::legacy_local_zone(lan);
+    let id = lancache_ng::pdns::zone_id(&legacy);
+    // What: a LAN domain named local.<x> is kept.
+    // Why: then it is a configured zone, not legacy.
+    // From: Issue #1683
+    if !have.contains(&id) || lancache_ng::dns::lan_domains(s)?.contains(&legacy) {
+        return Ok(());
+    }
+    let moved = own_rrsets(&api.rrsets(&legacy).await?);
+    let key = |r: &Value| (r["name"].to_string(), r["type"].to_string());
+    let parent = own_rrsets(&api.rrsets(lan).await?);
+    // What: a clash keeps both zones and logs it.
+    // Why: a record must never be overwritten silently.
+    // From: Issue #1683
+    if let Some(r) = moved
+        .iter()
+        .find(|r| parent.iter().any(|p| key(p) == key(r)))
+    {
+        eprintln!(
+            "ui: zone {legacy} kept: {} {} also in {lan}",
+            r["name"], r["type"]
+        );
+        return Ok(());
+    }
+    if !moved.is_empty() {
+        snapshot(s, api, &legacy).await?;
+        snapshot(s, api, lan).await?;
+        let mut saved = api.rrsets(lan).await?;
+        saved.extend(moved.iter().cloned());
+        api.restore(lan, &saved).await?;
+        snapshot(s, api, lan).await?;
+    }
+    api.delete_zone(&legacy).await?;
+    peer::flush_zone(s, lan).await?;
+    eprintln!(
+        "ui: zone {legacy} merged into {lan} ({} rrsets)",
+        moved.len()
+    );
+    Ok(())
 }
 
 // What: HTTPS IP when HTTPS runs on its own LAN IP.
@@ -3440,15 +3730,19 @@ fn primary_https_ip(s: &Settings) -> Result<String, String> {
 // What: NS and A record for the SOA's nameserver.
 // Why: the SOA named ns1, but no record held that name.
 // From: Issue #1683
-async fn ensure_soa_nameserver(s: &Settings, api: &lancache_ng::pdns::Api) -> Result<(), String> {
-    let soa = s.text("PDNS_DEFAULT_SOA")?;
-    let mname = lancache_ng::dns::canonical_zone(soa.split_whitespace().next().unwrap_or_default());
+async fn ensure_soa_nameserver(
+    s: &Settings,
+    api: &lancache_ng::pdns::Api,
+    hosted: &[String],
+) -> Result<(), String> {
+    let names = soa_names(s)?;
+    let mname = names.0.clone();
     let lan = lancache_ng::dns::lan_zone(s)?;
     let ttl = s.num::<u32>("DNS_RECORD_TTL")?;
     let ns = ns_names(s, &mname)?;
-    for zone in lancache_ng::dns::managed_zones(s)? {
-        ensure_rrset(api, &zone, &zone, "NS", ttl, &ns).await?;
-        ensure_soa_names(api, &zone, &soa).await?;
+    for zone in hosted {
+        ensure_rrset(api, zone, zone, "NS", ttl, &ns).await?;
+        ensure_soa_names(api, zone, &names).await?;
     }
     // What: A or AAAA and PTR of each secondary.
     // Why: an NS name needs an address; logs show names.
@@ -3529,13 +3823,9 @@ async fn drop_peer_records(s: &Settings, name: &str, address: &str) -> Result<()
     // What: delete the PTR only when it names this host.
     // Why: an own PTR of the admin must stay.
     // From: Issue #1683
-    let ours = api.rrsets(&zone).await?.iter().any(|r| {
-        r["name"] == rev.as_str()
-            && r["type"] == "PTR"
-            && r["records"]
-                .as_array()
-                .is_some_and(|a| a.iter().any(|c| c["content"] == host.as_str()))
-    });
+    let ours = rrset_contents(&api, &zone, &rev, "PTR")
+        .await?
+        .contains(&host);
     if ours {
         api.set_rrset(&zone, &rev, "PTR", 0, &[]).await?;
     }
@@ -3578,26 +3868,35 @@ async fn zone_names(api: &lancache_ng::pdns::Api) -> Result<Vec<String>, String>
     Ok(api.zones().await?.into_iter().map(|z| z.name).collect())
 }
 
+// What: mname and rname of PDNS_DEFAULT_SOA.
+// Why: NS rows and SOA fields read one parse.
+// From: Issue #1683 | PR #2019
+fn soa_names(s: &Settings) -> Result<(String, String), String> {
+    let soa = s.text("PDNS_DEFAULT_SOA")?;
+    let mut names = soa.split_whitespace().map(lancache_ng::dns::canonical_zone);
+    let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
+        return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
+    };
+    Ok((mname, rname))
+}
+
 // What: SOA mname and rname from PDNS_DEFAULT_SOA.
 // Why: a zone made before a domain change kept the old ns1.
 // From: Issue #1683 | PR #2017
 async fn ensure_soa_names(
     api: &lancache_ng::pdns::Api,
     zone: &str,
-    soa: &str,
+    names: &(String, String),
 ) -> Result<(), String> {
-    let mut names = soa.split_whitespace().map(lancache_ng::dns::canonical_zone);
-    let (Some(mname), Some(rname)) = (names.next(), names.next()) else {
-        return Err(format!("PDNS_DEFAULT_SOA {soa:?} names no mname and rname"));
-    };
+    let (mname, rname) = names;
     let Some((ttl, mut f)) = soa_fields(api, zone).await? else {
         return Ok(());
     };
-    if f[0] == mname && f[1] == rname {
+    if &f[0] == mname && &f[1] == rname {
         return Ok(());
     }
-    f[0] = mname;
-    f[1] = rname;
+    f[0] = mname.clone();
+    f[1] = rname.clone();
     write_soa(api, zone, ttl, &f).await
 }
 
@@ -3652,17 +3951,25 @@ async fn ensure_rrset(
     want: &[String],
 ) -> Result<(), String> {
     let id = lancache_ng::pdns::zone_id(name);
-    let same = api.rrsets(zone).await?.iter().any(|r| {
-        let have: Vec<&str> = r["records"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|c| c["content"].as_str()).collect())
-            .unwrap_or_default();
-        r["name"] == id.as_str()
-            && r["type"] == kind
-            && r["ttl"] == ttl
-            && have.len() == want.len()
-            && want.iter().all(|w| have.contains(&w.as_str()))
-    });
+    let rows = api.rrsets(zone).await?;
+    let found = rows
+        .iter()
+        .find(|r| r["name"] == id.as_str() && r["type"] == kind);
+    let same = match found {
+        // What: an absent rrset that should be absent.
+        // Why: a DELETE of nothing still raises the serial.
+        // From: Issue #1683 | PR #2019
+        None => want.is_empty(),
+        Some(r) => {
+            let have: Vec<&str> = r["records"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c["content"].as_str()).collect())
+                .unwrap_or_default();
+            r["ttl"] == ttl
+                && have.len() == want.len()
+                && want.iter().all(|w| have.contains(&w.as_str()))
+        }
+    };
     if same {
         return Ok(());
     }
@@ -3673,17 +3980,22 @@ async fn ensure_rrset(
 // Why: the key is known, so no zone exists without it.
 // From: Issue #1683
 async fn ensure_zones(s: &Settings) -> Result<(), String> {
-    let key = ensure_tsigkey(s).await.map_err(|e| format!("tsig: {e}"))?;
+    let key = peer::ensure_tsigkey(s)
+        .await
+        .map_err(|e| format!("tsig: {e}"))?;
     if Role::from_settings(s)? == Role::Secondary {
-        ensure_secondary_zones(s, &key)
+        peer::ensure_secondary_zones(s, &key)
             .await
             .map_err(|e| format!("secondary zones: {e}"))?;
     } else {
         ensure_primary_zones(s, &key)
             .await
             .map_err(|e| format!("primary zones: {e}"))?;
+        peers_follow(s);
     }
-    ensure_tsig(s, &key).await.map_err(|e| format!("tsig: {e}"))
+    peer::ensure_tsig(s, &key)
+        .await
+        .map_err(|e| format!("tsig: {e}"))
 }
 
 // What: retry zones and TSIG until pdns answers.
@@ -3702,6 +4014,17 @@ async fn zones_at_start(app: Arc<App>) {
         match ensure_zones(&s).await {
             Ok(()) => {
                 eprintln!("ui: start: zones ready");
+                // What: the anchors once pdns answers.
+                // Why: the start render ran before dns.
+                // From: Issue #1683 | PR #2019
+                match render_and_write(&s).await {
+                    Ok((_, written)) => {
+                        for line in reload_changed(&app, &s, &written).await {
+                            eprintln!("ui: start: {line}");
+                        }
+                    }
+                    Err(e) => eprintln!("ui: start: anchors: {e}"),
+                }
                 return;
             }
             // What: log only after the grace time.
@@ -3716,39 +4039,26 @@ async fn zones_at_start(app: Arc<App>) {
     }
 }
 
-// What: path of the DDNS TSIG secret file.
-// Why: Kea DDNS and PowerDNS share this key.
-// From: Issue #1683 | PR #1980
-fn tsig_file(s: &Settings) -> Result<PathBuf, String> {
-    Ok(secret::file_of(&secret::dir(s)?, "DDNS_TSIG_KEY"))
-}
-
-// What: fresh 32-byte TSIG secret, base64.
-// Why: PowerDNS and Kea both read base64.
-// From: Issue #1683 | PR #1980
-fn new_tsig() -> String {
-    let hex = secret::random_hex(32);
-    let bytes: Vec<u8> = hex
-        .as_bytes()
-        .chunks(2)
-        .filter_map(|p| std::str::from_utf8(p).ok())
-        .filter_map(|p| u8::from_str_radix(p, 16).ok())
-        .collect();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-// What: TSIG secret; a rotated file wins.
-// Why: a ui rotation beats the setup.sh value.
-// From: Issue #1683 | PR #1980
-fn tsig_secret(s: &Settings) -> Result<String, String> {
-    let file = tsig_file(s)?;
-    if !file.exists()
-        && let Some(v) = config::env_set(&process_env, "DDNS_TSIG_KEY")
-    {
-        return Ok(v);
+// What: reload the dns recursors when a config changed.
+// Why: a reload picks up a new zone without a restart.
+// From: Issue #1683
+async fn reload_changed(app: &App, s: &Settings, changed: &[config::Change]) -> Vec<String> {
+    let mut report = Vec::new();
+    let mut plan = apply::plan(changed);
+    if plan.is_empty() {
+        return report;
     }
-    secret::load_or_create(&file, new_tsig, fs::Owner::default())
-        .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))
+    let Ok((grace, limit)) = app.limits(s) else {
+        return vec!["limits unreadable".into()];
+    };
+    let (names, skipped) = plan_containers(app, s, &mut plan).await;
+    report.extend(skipped);
+    let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
+    let rx = s.list("RELOAD_EXEC");
+    for (owner, r) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await {
+        report.push(format!("{owner}: {r:?}"));
+    }
+    report
 }
 
 // What: replace the TSIG secret and apply.
@@ -3756,32 +4066,14 @@ fn tsig_secret(s: &Settings) -> Result<String, String> {
 // From: Issue #1683 | PR #1980
 async fn rotate_tsig(app: &App) -> Result<(), String> {
     let s = app.settings();
-    let file = tsig_file(&s)?;
+    let file = secret::tsig_file(&s)?;
     fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    secret::load_or_create(&file, new_tsig, fs::Owner::default())
+    secret::load_or_create(&file, secret::new_tsig, fs::Owner::default())
         .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
     for line in apply_all(app, &s, &s, true).await? {
         eprintln!("ui: tsig rotate: {line}");
     }
     Ok(())
-}
-
-// What: secrets the configs embed.
-// Why: made once; restarts never change them.
-// From: Issue #1683 | PR #1858
-fn secrets(s: &Settings) -> Result<render::Secrets, String> {
-    let dir = secret::dir(s)?;
-    let get = |k: &str| {
-        secret::resolve(&process_env, &dir, k, fs::Owner::default())
-            .map_err(|e| format!("{k}: {e}"))
-    };
-    Ok(render::Secrets {
-        pdns_api_key: get("PDNS_API_KEY")?,
-        recursor_api_key: get("RECURSOR_API_KEY")?,
-        tsig_name: s.text("DDNS_TSIG_NAME")?,
-        tsig_secret: tsig_secret(s)?,
-        kea_ctrl_token: get("KEA_CTRL_TOKEN")?,
-    })
 }
 
 // What: bytes of a whole GiB number.
@@ -3841,20 +4133,6 @@ fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
     Ok(())
 }
 
-// What: traffic-light colour of a container.
-// Why: the beambar shows green, yellow, red, gray.
-// From: Issue #1683 | PR #1980
-fn colour(c: &Value) -> &'static str {
-    let status = c["Status"].as_str().unwrap_or_default();
-    match c["State"].as_str().unwrap_or_default() {
-        "running" if status.contains("(unhealthy)") => "red",
-        "running" if status.contains("(health: starting)") => "yellow",
-        "running" => "green",
-        "exited" | "created" => "gray",
-        _ => "red",
-    }
-}
-
 // What: container states for the beambar.
 // Why: Docker is the source; no status files.
 // From: Issue #1683 | PR #1980
@@ -3864,16 +4142,9 @@ async fn status(State(app): Shared) -> Response {
     // What: the dhcp container while DHCP_MODE is off.
     // Why: the bar must not offer Start for it.
     // From: Issue #1683 | PR #1980
-    let read = (
-        app.limits(&s),
-        s.text("COMPOSE_PROJECT"),
-        dhcp_off_service(&s),
-    );
-    let list = match &read {
-        (Ok((_, limit)), Ok(project), Ok(_)) => app.docker.project(project, *limit).await.ok(),
-        _ => None,
-    };
-    let (Some(list), (Ok((_, limit)), _, Ok(off))) = (list, read) else {
+    let read = (app.limits(&s), lancache_ng::dhcp::off_service(&s));
+    let list = project_containers(&app, &s).await.ok();
+    let (Some(list), (Ok((_, limit)), Ok(off))) = (list, read) else {
         return axum::Json(json!({"state": "unavailable"})).into_response();
     };
     let off = off.unwrap_or_default();
@@ -3882,28 +4153,22 @@ async fn status(State(app): Shared) -> Response {
         let name = docker::service_of(c).unwrap_or_default();
         let by_user = stopped.iter().any(|x| x == name);
         let mode_off = !off.is_empty() && name == off;
-        // What: a stop nobody asked for is red, not gray.
-        // Why: the entry must turn unhealthy.
+        // What: colour and reason from the full state.
+        // Why: one rule with the watchdog (work item 30).
         // From: Issue #1683
-        let colour = match colour(c) {
-            "gray" if !by_user && !mode_off => "red",
-            other => other,
+        let inspect = match c["Id"].as_str() {
+            Some(id) => app.docker.inspect(id, limit).await.unwrap_or_default(),
+            None => Value::Null,
         };
+        let health = docker::Health::from_inspect(&inspect);
+        let colour = health.colour(!by_user && !mode_off);
         // What: last health check output when not green.
         // Why: a failure count alone names no reason.
         // From: Issue #1683 | PR #1980
-        let mut reason = String::new();
-        if let ("red" | "yellow", Some(id)) = (colour, c["Id"].as_str())
-            && let Ok(v) = app.docker.inspect(id, limit).await
-        {
-            reason = v["State"]["Health"]["Log"]
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(|e| e["Output"].as_str())
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-        }
+        let reason = match colour {
+            "red" | "yellow" | "amber" => docker::last_check(&inspect).trim().to_string(),
+            _ => String::new(),
+        };
         rows.push(
             json!({"name": name, "status": colour, "health": c["Status"],
                "reason": reason, "mode_off": mode_off,
@@ -4009,23 +4274,47 @@ fn stored_phc(value: &str) -> String {
 // From: Issue #1683 | PR #2017
 fn env_hash(pw: &str) -> Result<String, String> {
     let hash: Result<PasswordHash, _> = Argon2::default().hash_password(pw.as_bytes());
-    hash.map(|h| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.to_string()))
+    hash.map(|h| env_form(&h.to_string()))
         .map_err(|e| e.to_string())
+}
+
+// What: a PHC string in its .env form, base64url.
+// Why: the stack .env bars "$", which every PHC has.
+// From: Issue #1683
+fn env_form(phc: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc)
+}
+
+// What: one line from stdin without its line end.
+// Why: both setup.sh commands read their input so.
+// From: Issue #1683
+fn stdin_line() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 
 // What: base64url PHC hash of a password from stdin.
 // Why: setup.sh writes it into the stack .env.
 // From: Issue #1683 | PR #2017
 fn hash_password() -> Result<(), String> {
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let pw = line.trim_end_matches(['\r', '\n']);
+    let pw = stdin_line()?;
     if pw.is_empty() {
         return Err("the password on stdin is empty".into());
     }
-    println!("{}", env_hash(pw)?);
+    println!("{}", env_hash(&pw)?);
+    Ok(())
+}
+
+// What: .env form of a PHC hash from stdin.
+// Why: setup.sh moves an old hash without openssl.
+// From: Issue #1683
+fn encode_password_hash() -> Result<(), String> {
+    let phc = stdin_line()?;
+    PasswordHash::new(&phc).map_err(|e| format!("no PHC hash on stdin: {e}"))?;
+    println!("{}", env_form(&phc));
     Ok(())
 }
 
@@ -4114,61 +4403,77 @@ async fn lang(State(app): Shared, req: Request, next: Next) -> Response {
     LANG.scope(code, next.run(req)).await
 }
 
-// What: SOT keys of the actions each handler serves.
-// Why: the handler matches the key; the SOT owns the path.
-// From: Issue #1683
-const DNS_OPS: [&str; 14] = [
-    "UI_ROUTE_DNS_ADD",
-    "UI_ROUTE_DNS_REMOVE",
-    "UI_ROUTE_DNS_TOGGLE",
-    "UI_ROUTE_AAAA_FILTER",
-    "UI_ROUTE_QUERY_LOG",
-    "UI_ROUTE_DDNS_UNSIGNED",
-    "UI_ROUTE_SECONDARY_NS_SWITCH",
-    "UI_ROUTE_SECONDARY_NS_AUTO",
-    "UI_ROUTE_LAN_ADD",
-    "UI_ROUTE_LAN_REMOVE",
-    "UI_ROUTE_PTR_ADD",
-    "UI_ROUTE_PTR_REMOVE",
-    "UI_ROUTE_ZONE_ROLLBACK",
-    "UI_ROUTE_TSIG_ROTATE",
-];
-const DHCP_OPS: [&str; 13] = [
-    "UI_ROUTE_DHCP_MODE",
-    "UI_ROUTE_DHCP_DDNS",
-    "UI_ROUTE_DHCP_PROXY",
-    "UI_ROUTE_DHCP_RELAY",
-    "UI_ROUTE_SUBNET_ADD",
-    "UI_ROUTE_SUBNET_UPDATE",
-    "UI_ROUTE_SUBNET_REMOVE",
-    "UI_ROUTE_SUBNET_OPTION_ADD",
-    "UI_ROUTE_SUBNET_OPTION_REMOVE",
-    "UI_ROUTE_STATIC_ADD",
-    "UI_ROUTE_STATIC_REMOVE",
-    "UI_ROUTE_LEASE_RELEASE",
-    "UI_ROUTE_KEA_ROLLBACK",
-];
-const HAMSTER_OPS: [&str; 5] = [
-    "UI_ROUTE_HAMSTER_ADD",
-    "UI_ROUTE_HAMSTER_START",
-    "UI_ROUTE_HAMSTER_CANCEL",
-    "UI_ROUTE_HAMSTER_REMOVE",
-    "UI_ROUTE_HAMSTER_LOGOUT",
-];
-const SECONDARY_OPS: [&str; 6] = [
-    "UI_ROUTE_SECONDARY",
-    "UI_ROUTE_SECONDARY_ROTATE",
-    "UI_ROUTE_SECONDARY_HEALTH",
-    "UI_ROUTE_SECONDARY_ADDRESS",
-    "UI_ROUTE_SECONDARY_NS_ADD",
-    "UI_ROUTE_SECONDARY_NS_REMOVE",
-];
-
-// What: SOT key of the action a route serves.
-// Why: one handler serves several SOT paths.
-// From: Issue #1683
+// What: the SOT route key an action enum carries.
+// Why: router and handler read one list; no drift.
+// From: Issue #1683 | PR #2019
 #[derive(Clone, Copy)]
-struct Op(&'static str);
+struct Op<T>(T);
+
+macro_rules! route_ops {
+    ($name:ident { $($var:ident => $key:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy)]
+        enum $name { $($var),+ }
+        impl $name {
+            const ALL: &'static [$name] = &[$($name::$var),+];
+            fn key(self) -> &'static str {
+                match self { $($name::$var => $key),+ }
+            }
+        }
+    };
+}
+
+route_ops!(DnsOp {
+    DnsAdd => "UI_ROUTE_DNS_ADD",
+    DnsRemove => "UI_ROUTE_DNS_REMOVE",
+    DnsToggle => "UI_ROUTE_DNS_TOGGLE",
+    AaaaFilter => "UI_ROUTE_AAAA_FILTER",
+    QueryLog => "UI_ROUTE_QUERY_LOG",
+    DdnsUnsigned => "UI_ROUTE_DDNS_UNSIGNED",
+    NsSwitch => "UI_ROUTE_SECONDARY_NS_SWITCH",
+    NsAuto => "UI_ROUTE_SECONDARY_NS_AUTO",
+    LanAdd => "UI_ROUTE_LAN_ADD",
+    LanRemove => "UI_ROUTE_LAN_REMOVE",
+    LanDomainAdd => "UI_ROUTE_LAN_DOMAIN_ADD",
+    LanDomainRemove => "UI_ROUTE_LAN_DOMAIN_REMOVE",
+    LanDomainMain => "UI_ROUTE_LAN_DOMAIN_MAIN",
+    PtrAdd => "UI_ROUTE_PTR_ADD",
+    PtrRemove => "UI_ROUTE_PTR_REMOVE",
+    ZoneRollback => "UI_ROUTE_ZONE_ROLLBACK",
+    TsigRotate => "UI_ROUTE_TSIG_ROTATE",
+});
+
+route_ops!(DhcpOp {
+    Mode => "UI_ROUTE_DHCP_MODE",
+    Ddns => "UI_ROUTE_DHCP_DDNS",
+    Proxy => "UI_ROUTE_DHCP_PROXY",
+    Relay => "UI_ROUTE_DHCP_RELAY",
+    SubnetAdd => "UI_ROUTE_SUBNET_ADD",
+    SubnetUpdate => "UI_ROUTE_SUBNET_UPDATE",
+    SubnetRemove => "UI_ROUTE_SUBNET_REMOVE",
+    SubnetOptionAdd => "UI_ROUTE_SUBNET_OPTION_ADD",
+    SubnetOptionRemove => "UI_ROUTE_SUBNET_OPTION_REMOVE",
+    StaticAdd => "UI_ROUTE_STATIC_ADD",
+    StaticRemove => "UI_ROUTE_STATIC_REMOVE",
+    LeaseRelease => "UI_ROUTE_LEASE_RELEASE",
+    KeaRollback => "UI_ROUTE_KEA_ROLLBACK",
+});
+
+route_ops!(HamsterOp {
+    Add => "UI_ROUTE_HAMSTER_ADD",
+    Start => "UI_ROUTE_HAMSTER_START",
+    Cancel => "UI_ROUTE_HAMSTER_CANCEL",
+    Remove => "UI_ROUTE_HAMSTER_REMOVE",
+    Logout => "UI_ROUTE_HAMSTER_LOGOUT",
+});
+
+route_ops!(SecondaryOp {
+    Remove => "UI_ROUTE_SECONDARY",
+    Rotate => "UI_ROUTE_SECONDARY_ROTATE",
+    Health => "UI_ROUTE_SECONDARY_HEALTH",
+    Address => "UI_ROUTE_SECONDARY_ADDRESS",
+    NsAdd => "UI_ROUTE_SECONDARY_NS_ADD",
+    NsRemove => "UI_ROUTE_SECONDARY_NS_REMOVE",
+});
 
 // What: command line uses besides the server.
 // Why: setup.sh and the healthcheck need them.
@@ -4183,11 +4488,9 @@ async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
             _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
-        Some("render-dns") => Some(render_dns(s)),
         // What: secondary zones and TSIG via the pdns API.
         // Why: a secondary has no ui server to do it.
         // From: Issue #1683
-        Some("secondary-zones") => Some(ensure_zones(s).await),
         Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
         _ => None,
     }
@@ -4201,20 +4504,6 @@ fn dhcp_probe_cli(s: &Settings) -> Result<(), String> {
     println!(
         "{}",
         serde_json::to_string(&report).map_err(|e| e.to_string())?
-    );
-    Ok(())
-}
-
-// What: write the dns configs once, then exit.
-// Why: a secondary has no ui server to render them.
-// From: Issue #1683 | PR #1980
-fn render_dns(s: &Settings) -> Result<(), String> {
-    let sec = secrets(s)?;
-    let files = render::dns_only(s, &sec).map_err(|e| e.join("; "))?;
-    let changed = write_files(s, &files)?;
-    println!(
-        "{}",
-        json!({"written": files.len(), "changed": changed.len()})
     );
     Ok(())
 }
@@ -4265,17 +4554,20 @@ fn router(app: Arc<App>) -> Result<Router, String> {
     // What: one route per action, tagged with its SOT key.
     // Why: handlers match the key, never a path text.
     // From: Issue #1683
-    for key in DNS_OPS {
-        pages = pages.route(&p(key)?, post(dns_action).layer(Extension(Op(key))));
+    for &op in DnsOp::ALL {
+        pages = pages.route(&p(op.key())?, post(dns_action).layer(Extension(Op(op))));
     }
-    for key in DHCP_OPS {
-        pages = pages.route(&p(key)?, post(dhcp_action).layer(Extension(Op(key))));
+    for &op in DhcpOp::ALL {
+        pages = pages.route(&p(op.key())?, post(dhcp_action).layer(Extension(Op(op))));
     }
-    for key in HAMSTER_OPS {
-        pages = pages.route(&p(key)?, post(hamster_action).layer(Extension(Op(key))));
+    for &op in HamsterOp::ALL {
+        pages = pages.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
     }
-    for key in SECONDARY_OPS {
-        pages = pages.route(&p(key)?, post(secondary_action).layer(Extension(Op(key))));
+    for &op in SecondaryOp::ALL {
+        pages = pages.route(
+            &p(op.key())?,
+            post(secondary_action).layer(Extension(Op(op))),
+        );
     }
     let pages = pages.layer(axum::middleware::from_fn_with_state(app.clone(), auth));
     Ok(Router::new()
@@ -4342,11 +4634,13 @@ async fn secure(State(app): Shared, req: Request, next: Next) -> Response {
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("hash-password") {
-        return hash_password();
+    match args.first().map(String::as_str) {
+        Some("hash-password") => return hash_password(),
+        Some("encode-password-hash") => return encode_password_hash(),
+        _ => {}
     }
-    let saved = process_env(SETTINGS_FILE_ENV).map(PathBuf::from);
-    let s = Settings::load(&process_env, saved.as_deref())?;
+    let saved = config::saved_file();
+    let s = Settings::from_process()?;
     if let Some(done) = command(&s, &args).await {
         return done;
     }
@@ -4401,44 +4695,7 @@ async fn main() -> Result<(), String> {
 // From: Issue #1683
 #[cfg(test)]
 mod tests {
-    use super::{PeerZone, duration_text, worst_state, zone_state};
-
-    // What: a zone row with the two given serials.
-    // Why: the tests differ only in the serials.
-    // From: Issue #1683 | PR #2017
-    fn zone(primary: Option<u32>, secondary: Option<u32>) -> PeerZone {
-        PeerZone {
-            zone: "lan.".to_string(),
-            primary,
-            secondary,
-        }
-    }
-
-    // What: every pair of serials gets its state word.
-    // Why: the page and the check read these words.
-    // From: Issue #1683
-    #[test]
-    fn zone_state_names_each_case() {
-        assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
-        assert_eq!(zone_state(&zone(Some(3), Some(4))).word(), "ahead");
-        assert_eq!(zone_state(&zone(Some(4), Some(3))).word(), "behind");
-        assert_eq!(zone_state(&zone(Some(3), None)).word(), "missing");
-        assert_eq!(zone_state(&zone(None, Some(3))).word(), "error");
-    }
-
-    // What: the worst zone state is the peer status.
-    // Why: in sync only when every managed zone matches.
-    // From: Issue #1683
-    #[test]
-    fn one_lagging_zone_decides_the_status() {
-        let zones = [
-            zone(Some(3), Some(3)),
-            zone(Some(5), Some(4)),
-            zone(Some(1), Some(1)),
-        ];
-        assert_eq!(worst_state(&zones).word(), "behind");
-        assert_eq!(worst_state(&[]).word(), "in_sync");
-    }
+    use super::duration_text;
 
     // What: check times as h, min or s.
     // Why: the page shows the SOT seconds readably.

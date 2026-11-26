@@ -74,9 +74,14 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
 - **Cache routing.** `recursor_conf::rpz` builds the RPZ zone that answers every
   cache domain; `recursor_conf::lua` loads it and sets no-DNSSEC-check entries
   for local and listed private zones.
+- **LAN domains.** `dns::lan_domains` owns the list: `DHCP_DOMAIN` first, then
+  `DNS_EXTRA_LAN_DOMAINS`; `dns::managed_zones` makes one zone per LAN domain.
+  The Admin UI adds, removes and promotes domains (routes
+  `/domains/lan-domain-*`) and edits the records of each.
 - **Recursors.** `dns-http` and `dns-https` run with the configs
-  `recursor_conf::yaml` renders; LAN zones go to the authoritative server;
-  `ROOT_ZONE_MIRROR` keeps a root zone copy.
+  `recursor_conf::yaml` renders; LAN zones go to the authoritative server.
+  No root zone copy is loaded: the `ROOT_ZONE_MIRROR` keys have no reader since
+  the rewrite of 2026-11-01 (release checklist 11.4).
 - **Upstream forwarding.** `DNS_UPSTREAM_SERVERS`, `DNS_UPSTREAM_ZONES` and
   `DNS_UPSTREAM_UNSIGNED_ZONES` render forward entries; a local zone never goes
   out and the stack's own address is refused (`recursor_conf`).
@@ -102,6 +107,15 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
 - **Secondaries.** The Admin UI registers, removes, rotates the token of,
   checks and re-addresses secondaries (`register`, `secondary_action`) and
   rotates the TSIG key (`rotate_tsig`).
+- **Secondary domain sync.** The primary's Admin UI makes each registered
+  secondary hold exactly its zones (`match_zones` via `peer_follows`): right
+  after its own zones change and in every secondary check, over the secondary's
+  pdns API, creating zones with TSIG and deleting the ones it no longer serves.
+  On the secondary the dns helper `lancache-dns` (services/dns, a process in
+  the dns image) writes the dns configs from the zones its pdns holds, adds
+  the TSIG key and the setup zones once without deleting, reloads both
+  recursors and flushes a zone whose serial moved; it replaces the former
+  one-shots `render-dns` and `secondary-zones`.
 
 ## DHCP
 
@@ -117,7 +131,9 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
   `kea::Api` sends `config-get`, `config-set`, `config-write`, `lease4-get-all`
   and `lease4-del`.
 - **DDNS.** `kea_conf::ddns` renders forward and reverse updates to the local
-  PowerDNS, signed with TSIG (`DDNS_TSIG_KEY`, `DDNS_TSIG_ALGORITHM`).
+  PowerDNS, signed with TSIG (`DDNS_TSIG_KEY`, `DDNS_TSIG_ALGORITHM`); one
+  forward domain per LAN domain. `kea_conf::subnet_ddns_suffix` gives a subnet
+  whose domain is an extra LAN domain its own `ddns-qualifying-suffix`.
 - **Admin UI.** Subnets (add, update, remove), options (add, remove, custom
   `CODE:VALUE` lines through `dhcp::custom_options`), static reservations,
   lease list and release, DDNS switch, NTP option (`dhcp::ntp_addrs`) and lease
@@ -173,7 +189,7 @@ Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
   `access::stats` shows proxy requests, hits and bytes.
 - **Logs.** `/logs` shows the stored logs and `/logs/save` switches logging per
   service.
-- **CLI.** `lancache-ui healthcheck`, `render-dns`, `zone-snapshots`,
+- **CLI.** `lancache-ui healthcheck`, `zone-snapshots`,
   `zone-rollback` and `dhcp-probe` (one DHCP probe as JSON, run on the host
   network).
 

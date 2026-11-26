@@ -595,6 +595,40 @@ Further requirements:
   | bad unsigned zone | `DNS_UPSTREAM_UNSIGNED_ZONES=.` | the entry is rejected, as in none |
   | dead resolver | `configure-upstream-dns` with an address that runs no DNS | `setup.sh` reports the failed check and restores the three earlier values |
 
+- Root zone copy (`ROOT_ZONE_MIRROR`, `ROOT_ZONE_MIRROR_URL`,
+  `ROOT_ZONE_MIRROR_REFRESH`, `ROOT_ZONE_MIRROR_RETRY`): every recursor loads
+  the root zone into its cache from `ROOT_ZONE_MIRROR_URL` (`zoneToCache`) unless
+  `.` goes to an upstream resolver:
+
+  | Case | Input | Pass |
+  | --- | --- | --- |
+  | loaded | start the stack | each recursor (HTTP, HTTPS, primary, secondary) logs a successful root zone load with valid DNSSEC and ZONEMD |
+  | effect | the same name lookups with and without the copy | fewer queries to root servers and the response times for names under uncached TLDs are recorded |
+  | LAN names | `dig +adflag` for names under own endings while the copy is active | NOERROR, never NXDOMAIN from the root zone's denial |
+  | upstream | upstream resolver for zone `.` | no copy is loaded; names go to the upstream |
+
+- LAN domains (`DHCP_DOMAIN`, `DNS_EXTRA_LAN_DOMAINS`), Admin UI DNS page,
+  Primary DNS tab:
+
+  | Case | Input | Pass |
+  | --- | --- | --- |
+  | add | add `lab.lan`, add record `pve1` A `192.0.2.11` in it | `dig @<address> pve1.lab.lan` answers `192.0.2.11`; the zone `lab.lan.` exists in PowerDNS (`GET /api/v1/servers/localhost/zones`) |
+  | upstream refused | `configure-upstream-dns` with zone `lab.lan` | the zone is rejected as answered by LanCache-NG |
+  | remove locked | remove `lab.lan` while `pve1` exists | the Admin UI refuses with the record count; the zone stays |
+  | remove | remove `pve1`, then `lab.lan` | the zone is gone from PowerDNS; `dig pve1.lab.lan` no longer answers locally |
+  | swap | make `lab.lan` the main domain | `DHCP_DOMAIN=lab.lan`, the old main is in `DNS_EXTRA_LAN_DOMAINS`, both zones keep their records |
+  | DDNS | Kea subnet with domain `lab.lan`, DDNS on, a client takes a lease | the client name appears in `lab.lan`, not in the main domain |
+  | legacy zone | start the ui on a PowerDNS database that holds `local.<domain>` with one record | the record is in `<domain>` under the same name, `local.<domain>` is deleted, both snapshots exist; a second start changes nothing |
+  | PTR | add an A record with "PTR" ticked, then delete the A record | the PTR appears in its reverse zone and disappears with the A record; a PTR that names another host stays; an address outside every reverse zone shows a message; a second name on the same address does not silently replace the PTR |
+  | PTR afterwards | add three A records without "PTR", then add one PTR with the button in the LAN record table and the others with "add all" on the PTR tab | `dig -x` answers the name for all three |
+  | own ending | add `buero.local` (an ending the Public Suffix List does not know) | the zones `local.` and `buero.local.` exist and are signed; `local.` holds NS and the current DS of `buero.local.`; `dig +dnssec @<address> buero.local SOA` answers with the AD flag; a missing name in it answers NXDOMAIN with the AD flag |
+  | Internet ending | add `intern.de` | no zone `de.` is created; the LAN domain list tags `intern.de` as an Internet ending; its names answer without the AD flag |
+  | special name | add `x.localhost` or `router.invalid` | the Admin UI refuses with a message; no zone is created |
+  | last below an ending | remove the last LAN domain below `.test` | its zone and the zone `test.` are removed; the other top zones and their anchors stay |
+  | dns down at start | stop the `dns` container, restart the `ui`, then start `dns` | while `dns` is down the recursor config holds an NTA for every own zone and ending; after `dns` is up again the anchors return without a further change and names under own endings answer with the AD flag |
+
+  The secondary side of these cases is in section 10.5.
+
 ### 10.3 DHCP in all three modes
 
 The `dhcp` container runs Kea or dnsmasq, one mode at a time (`DHCP_MODE`), on
@@ -637,18 +671,29 @@ Hurdles:
 | The upstream resolver answers | after a download run the proxy log has no resolver failure; the default list is IPv4 only (`NGINX_UPSTREAM_RESOLVER`, `ipv6=off`) | a resolver address the host cannot reach turns every uncached lookup into a timeout |
 | The Admin UI shows the cache size | after the cached download the Dashboard cache storage is greater than 0 GB | `0.0 GB` with a non-empty cache |
 
-### 10.5 Zone transfer (secondary lifecycle)
+### 10.5 Secondary DNS
 
 CI covers the Admin UI to PowerDNS API write path and the register answer.
-With real secondaries on a real stack:
+With a real primary and at least one real secondary on another host
+(`setup.sh secondary`), on a real LAN:
 
-- **Transfer**: a secondary pulls the zone by TSIG-signed AXFR after NOTIFY; an
-  unsigned AXFR is refused.
-- **Removal**: a removed secondary no longer appears on the dashboard; the
-  others keep working.
-- **Record removal**: a record deleted through the Admin UI stops resolving in
-  both DNS modes; on the AXFR secondary the authoritative zone converges first,
-  then the recursor answer expires within its cached TTL.
+| Case | Input | Pass |
+| --- | --- | --- |
+| set up | `setup.sh secondary` against the primary | the secondary registers, holds every zone of the primary as a slave zone with `AXFR-MASTER-TSIG`, and both of its recursors answer every LAN name |
+| transfer | NOTIFY from the primary; an AXFR without TSIG | the TSIG-signed AXFR runs; the unsigned AXFR is refused |
+| records | add, change and delete an A, AAAA, CNAME, MX, TXT and PTR record on the primary | the secondary's PowerDNS shows the new state within seconds; its recursors in both DNS modes answer it at the latest when the cached answer expires: after the record TTL (`DNS_RECORD_TTL`, raised to at least `RECURSOR_MINIMUM_TTL_OVERRIDE`), for a name that did not exist before after `RECURSOR_MAX_NEGATIVE_TTL` |
+| zone set | add and remove a LAN domain and a reverse zone on the primary | the secondary holds exactly the primary's zones; its recursors answer the new names and no longer the removed ones |
+| secondary down | stop the secondary, change zones and records on the primary, start it | zones, records and recursor answers match the primary again |
+| primary down | stop the primary, restart the secondary | the secondary keeps answering every LAN name and deletes no zone |
+| both modes | a secondary with and without `IP_HTTPS` | a zone change does not restart the dns container (`StartedAt`, `RestartCount`); with `IP_HTTPS` both recursors answer new names |
+| TSIG rotation | rotate the TSIG key in the Admin UI and run the secondary step that the README section "Secondary DNS" names | transfers to every secondary continue |
+| address change | change a secondary's address in the Admin UI | its health is checked at the new address |
+| removal | remove a secondary in the Admin UI | it no longer appears on the dashboard; the others keep working |
+| monitoring | two secondaries on other hosts; delete one zone on the first, stop the second, keep a zone on the first that the primary removed | the Admin UI secondary health and the watchdog alarm name the first secondary with the missing and the extra zone, report the second as unreachable, and keep checking the first |
+| same-host guard | `setup.sh secondary --name lancache-ng` on a primary host | the command stops; the primary keeps running unchanged |
+| update | `setup.sh update` of a secondary installed from the previous release | the zones are kept; a second run changes nothing |
+| update from 0.3.x | a secondary of v0.3.x (bound to its primary over NATS) after the primary was updated | `setup.sh` leads the operator through the migration; the secondary ends with every zone of the primary |
+| own endings | a LAN domain below an own ending (section 10.2, row "own ending") | both recursors of the secondary answer its names with the AD flag, without an NTA for the ending |
 
 ### 10.6 Admin UI
 
@@ -856,7 +901,7 @@ Covered only by Part B (section 10):
 - wire-level DHCP in all three modes, the lease effect of an Admin UI
   reservation and the dnsmasq sub-mode switch (10.3);
 - the DNS half of the wildcard scope rule and the upstream DNS change (10.2);
-- secondary zone transfer and removal (10.5);
+- the secondary DNS cases (10.5);
 - the dashboard health card, cache resize, Admin UI self-restart and container
   start and stop (10.6);
 - watchdog hang detection and restart (10.7);
@@ -888,6 +933,26 @@ Not verified against the code or a live stack:
 - the `setup.sh update` flow of sections 10.11 and 10.12;
 - the pass criteria of sections 10.5, 10.8 and 10.9.
 
+Known not met by `current_dev`; the cases stay in the scenarios as the target,
+and each entry leaves this list with the commit that fixes it (tracked in
+PR #2019):
+
+- 10.5 zone set and the zone part of secondary down: the primary sets each
+  secondary's zones at once (b0828d40) and the dns helper lancache-dns makes the
+  secondary's recursors follow (work item 37); open until verified from a built
+  dns image on the release candidate;
+- 10.5 monitoring: the secondary does not publish its PowerDNS API port, so the
+  Admin UI health check of a secondary on another host cannot reach it (PR #2017
+  publishes the port);
+- 10.5 same-host guard: `setup.sh secondary` takes the compose project name
+  from `--name` and does not check it; with `--name lancache-ng` it replaces the
+  primary's `dns` container and uses its volumes;
+- 10.5 update and update from 0.3.x: the README names no way to update a
+  secondary (`setup.sh secondary --rotate` re-registers it), and a secondary
+  of v0.3.x that is bound over NATS has no migration path;
+- 10.5 own endings: a secondary renders its recursor config without the
+  primary's anchors and keeps the NTA, and it does not hold the top zones.
+
 ### 11.5 Failure classes from the release run
 
 The scenario (Part B or 12.1) is the recurrence check. One row per
@@ -907,6 +972,16 @@ failure class.
 | dnsmasq sub-mode switch restarts the dhcp container | 10.3 | `4aafe168` |
 | file check set without PR labels: changelog rule always fails | 12.1 | `cc5748c8` |
 | PR into master reads build-tools `latest`: plan fails | 12.1 | `da958b3d` |
+| proxy fails with HTTPS off: unknown `$lancache_client_allowed` variable | 10.1 | `cbe44ace` |
+| a PTR is not kept in step with its A record | 10.2 | `ae4c8a75` |
+| recursors load no root zone copy | 10.2 | `76beade8` |
+| local reverse zones decided by the dead `DNS_SERVE_RFC1918` key | 10.2 | `f179e215` |
+| a record reaches a secondary only after the pdns xfr cycle, not within seconds | 10.5 | `b339f172` |
+| the zone table and the status line disagree on a secondary ahead | 10.6 | `0c5fed00` |
+| the watchdog checks one unset URL, not the registered secondaries | 10.5 | `12e27473` |
+| `https.conf` and the dispatch file linger after HTTPS is turned off | 10.4 | `5a4b7397` |
+| a reverse name matched a private reverse zone by text end (`110.x` into `10.in-addr.arpa.`) | 10.2 | `61955810` |
+| a missing PTR of an existing A record could only be typed in by hand | 10.2 | `a9c195e3` |
 
 ---
 
@@ -931,11 +1006,13 @@ ticked.
 ### 12.2 Part B pass (live stack on a real LAN)
 
 - [ ] 10.1 Bring-up: `Stack started`, five healthy containers.
-- [ ] 10.2 DNS in both modes, wildcard scope, upstream DNS cases.
+- [ ] 10.2 DNS in both modes, wildcard scope, upstream DNS cases, LAN domains
+  and PTR.
 - [ ] 10.3 DHCP in all three modes and the probe.
 - [ ] 10.4 Cache: HIT in HTTP and MITM HTTPS, query-string key, the four
   hurdles.
-- [ ] 10.5 Zone transfer: signed transfer, unsigned refusal, removal.
+- [ ] 10.5 Secondary DNS: every case, including secondary down, primary down,
+  the same-host guard and the update of a secondary.
 - [ ] 10.6 Admin UI: reachability, health card, cache resize, self-restart,
   container stop and start.
 - [ ] 10.7 Watchdog: restart after `RESTART_AFTER` failing rounds, hang check.

@@ -419,7 +419,7 @@ The Admin UI is the only user of the store:
 | Subject | Store | Retention | Rollback |
 | --- | --- | --- | --- |
 | Kea DHCP configuration | `KEA_CONFIG_SNAPSHOT_DIR` (`KEA_CONFIG_SNAPSHOT_FILE`) | `KEA_SNAPSHOT_KEEP` (SOT 20) | Admin UI DHCP page (`POST /dhcp/kea-rollback`); `setup.sh reset-to-last-known-good-config kea` |
-| Records of the lan zone (`DHCP_DOMAIN`) and the private reverse zones | `DNS_SNAPSHOT_DIR/<zone>` | `DNS_SNAPSHOT_KEEP` (SOT 20) | Admin UI domains page (`POST /domains/zone-rollback`); `setup.sh reset-to-last-known-good-config dns` |
+| Records of every LAN domain zone (`DHCP_DOMAIN`, `DNS_EXTRA_LAN_DOMAINS`) and the private reverse zones | `DNS_SNAPSHOT_DIR/<zone>` | `DNS_SNAPSHOT_KEEP` (SOT 20) | Admin UI domains page (`POST /domains/zone-rollback`); `setup.sh reset-to-last-known-good-config dns` |
 
 Other zones, such as the RPZ, are not snapshotted. TSIG keys and zone metadata
 are not part of a zone snapshot.
@@ -466,13 +466,17 @@ not reachable:
 
 ### 6.5 Settings without a consumer
 
-The SOT and `deploy/prod/docker-compose.yml` define the snapshot directories
-`PROXY_CONFIG_SNAPSHOT_DIR`, `DHCP_CONFIG_SNAPSHOT_DIR` and
-`DNS_CONFIG_SNAPSHOT_DIR` with their volumes (`proxy-config-snapshots`,
-`dhcp-config-snapshots`, `dns-config-snapshots`), and `setup.sh` writes
-`KEEP_KNOWN_GOOD_CONFIGS` (default 3). No code in `services/` reads these
-values: no automatic fall-back of nginx, dnsmasq or PowerDNS to an older
-configuration exists in this tree.
+The SOT defines the snapshot directory `DNS_CONFIG_SNAPSHOT_DIR` in the volume
+`dns-config-snapshots`. No code in `services/` reads it: no automatic fall-back
+of nginx, dnsmasq or PowerDNS to an older configuration exists in this tree.
+The volume itself is in use: a secondary keeps its secrets in it
+(`SECONDARY_SHARED_SECRET_DIR`).
+
+Installs of earlier versions also hold the volumes `proxy-config-snapshots`
+and `dhcp-config-snapshots` and may hold `KEEP_KNOWN_GOOD_CONFIGS` in `.env`.
+Nothing reads them. `setup.sh` leaves them as they are; a backup still
+includes the two volumes. Remove them with `docker volume rm` when they are
+no longer needed.
 
 ---
 
