@@ -260,7 +260,7 @@ impl App {
         ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES"));
         ctx.insert("programs", &s.list("UI_SERVICES"));
         ctx.insert("ui_service", &s.text_or_empty("UI_SERVICE"));
-        ctx.insert("watchdog_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
+        ctx.insert("status_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
         ctx.insert("warnings", &s.warnings);
         // What: texts of the request language.
         // Why: templates hold keys; scripts get the same.
@@ -2826,7 +2826,7 @@ pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
         .route(&p("UI_PAGE_STATS")?, get(stats))
         .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
-        .route(&p("UI_ROUTE_WATCHDOG_STATUS")?, get(status))
+        .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
         .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
         .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
         .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))

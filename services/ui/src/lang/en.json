@@ -417,7 +417,7 @@
   "value": "Value",
   "waiting_clients": "Waiting clients",
   "waiting_for_the_scan": "Waiting for the scan.",
-  "watchdog_status_not_available": "Watchdog status not available",
+  "container_status_not_available": "Container status not available",
   "what": "What",
   "what_s_moved_through_the_cache": "What's moved through the cache, and what still needs your attention.",
   "when": "When",

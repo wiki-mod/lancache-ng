@@ -934,7 +934,7 @@
     // What: shared container status poll for all dots
     // Why: one fetch/interval, not one per template
     // From: Issue #1437
-    window.LancacheWatchdog = (function () {
+    window.LancacheStatus = (function () {
       const DOT_COLOR_CLASSES = ['green', 'amber', 'yellow', 'red', 'gray'];
       // What: the status as dot class; unknown becomes gray
       // Why: a server value never adds an unknown class
@@ -968,12 +968,12 @@
       async function refresh() {
         let data;
         try {
-          const response = await fetch('{{ routes.watchdog_status | safe }}');
+          const response = await fetch('{{ routes.container_status | safe }}');
           // What: throws on a non-2xx status response
           // Why: the catch below reports it as fetch error
           // From: Issue #1683 | PR #1912
           if (!response.ok) {
-            throw new Error('watchdog status: HTTP ' + response.status);
+            throw new Error('container status: HTTP ' + response.status);
           }
           data = await response.json();
         } catch (err) {
@@ -1003,7 +1003,7 @@
         if (!response.ok) {
           throw new Error('desired state: HTTP ' + response.status);
         }
-        window.LancacheWatchdog.refresh();
+        window.LancacheStatus.refresh();
       } catch (err) {
         // What: reports the error, re-enables button
         // Why: a network hiccup must not strand the button
@@ -1107,7 +1107,7 @@
         wrap.className = 'beam-station';
         wrap.title = svc.health || '';
         const dot = document.createElement('span');
-        window.LancacheWatchdog.paintDot(dot, svc.status);
+        window.LancacheStatus.paintDot(dot, svc.status);
         wrap.appendChild(dot);
         const nameNode = document.createTextNode(svc.name + ' ');
         wrap.appendChild(nameNode);
@@ -1279,7 +1279,7 @@
       function render(data) {
         container.textContent = '';
         if (data.state === 'unavailable') {
-          container.textContent = LC_T.watchdog_status_not_available;
+          container.textContent = LC_T.container_status_not_available;
           return;
         }
         (data.services || []).forEach(function (svc) {
@@ -1291,14 +1291,14 @@
           container.appendChild(staleNote);
         }
       }
-      window.LancacheWatchdog.onUpdate(render);
+      window.LancacheStatus.onUpdate(render);
     })();
 
     // What: loads container status now and per interval
     // Why: beambar and dashboard dots read the same data
     // From: Issue #1683 | PR #1912
-    window.LancacheWatchdog.refresh();
-    setInterval(window.LancacheWatchdog.refresh, window.LancacheUi.ms({{ watchdog_refresh_seconds }}));
+    window.LancacheStatus.refresh();
+    setInterval(window.LancacheStatus.refresh, window.LancacheUi.ms({{ status_refresh_seconds }}));
 
     // What: each [data-epoch] value as de-DE date and time
     // Why: one owner for every page; 0 or junk stays raw
