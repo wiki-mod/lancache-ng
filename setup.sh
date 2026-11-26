@@ -2921,7 +2921,7 @@ restore_quickstart_mounts() {
 migrate_quickstart_install() (
     local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" new_env old_env record key value volume dir copy f
     local old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
-    local https_ip fresh kept kept_list restored
+    local https_ip https_on fresh kept kept_list restored
     local -a copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
     list_items_into path_key_list "$path_keys"
@@ -2930,13 +2930,15 @@ migrate_quickstart_install() (
     old_env="$old_dir/.env"
     record="$old_dir/.quickstart-migration"
     [[ -f "$old_env" ]] || die "Cannot migrate $old_dir: $old_env is missing."
-    # What: a one-IP quickstart stops before any change
-    # Why: prod always binds a second LAN IP (IP_HTTPS)
+    # What: HTTPS mode without its second IP stops first
+    # Why: HTTPS is optional; HTTP mode needs one IP only
     # From: Issue #1683 | PR #1858
     https_ip=$(env_key_or_old_name "$old_env" read IP_HTTPS) \
         || die "Cannot read IP_HTTPS from $old_env (exit $?)."
-    [[ -n "$https_ip" ]] \
-        || die "The install at $old_dir has no second LAN IP (IP_HTTPS or IP_SSL in $old_env). LanCache-NG now needs one for HTTPS DNS and proxy: add a free LAN IP to this host, set IP_HTTPS=<that IP> in $old_env, then rerun setup.sh update. Nothing was changed."
+    https_on=$(env_key_or_old_name "$old_env" read HTTPS_ENABLED) \
+        || die "Cannot read HTTPS_ENABLED from $old_env (exit $?)."
+    [[ "$https_on" != 1 || -n "$https_ip" ]] \
+        || die "HTTPS mode is on in $old_env, but it names no second LAN IP (IP_HTTPS or IP_SSL). Add a free LAN IP to this host and set IP_HTTPS=<that IP>, or turn HTTPS mode off, then rerun setup.sh update. Nothing was changed."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
     restore_quickstart_mounts "$old_dir" "$old_env" "$record"
     # What: convergence paused for the whole migration
@@ -5120,13 +5122,15 @@ migrate_env_for_update() (
         remove_env_key "$retired" "$env_file"
     done
     require_env_value_for_update IP_HTTP "$env_file"
-    # What: the second LAN IP must be set before any write
-    # Why: prod always runs dns-https on it (AG-SETUP-001)
+    # What: the second LAN IP only with HTTPS mode on
+    # Why: HTTPS is optional; HTTP mode runs on one IP
     # From: Issue #1683 | PR #1858
-    require_env_value_for_update IP_HTTPS "$env_file"
     ip_http=$(get_env_var IP_HTTP "$env_file") || exit $?
-    ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
-    require_separate_lan_ips "$ip_http" "$ip_https"
+    if [[ "$(get_env_var HTTPS_ENABLED "$env_file")" = 1 ]]; then
+        require_env_value_for_update IP_HTTPS "$env_file"
+        ip_https=$(get_env_var IP_HTTPS "$env_file") || exit $?
+        require_separate_lan_ips "$ip_http" "$ip_https"
+    fi
 
     # What: resolves and checks the image tag first
     # Why: a platform failure leaves other keys untouched
@@ -8983,20 +8987,29 @@ cmd_update_ip() {
 
     ask_checked new_ip_http "New HTTP mode IP" "$current_ip_http" is_valid_ipv4 "Invalid IPv4 address"
 
-    printf "\n"
-    ask_checked new_ip_https "New HTTPS mode IP" "$current_ip_https" is_valid_ipv4 "Invalid IPv4 address"
-
-    require_separate_lan_ips "$new_ip_http" "$new_ip_https"
-    # What: port 53 free on both new IPs; the old ones kept
-    # Why: dns binds 53 on both; a busy one fails at start
+    # What: the HTTPS IP only while HTTPS mode is on
+    # Why: HTTPS is optional; HTTP mode keeps it empty
+    # From: Issue #1683 | PR #1858
+    local https_on
+    https_on=$(get_env_var HTTPS_ENABLED "$deploy_env") || exit $?
+    new_ip_https=""
+    if [[ "$https_on" = 1 ]]; then
+        printf "\n"
+        ask_checked new_ip_https "New HTTPS mode IP" "$current_ip_https" is_valid_ipv4 "Invalid IPv4 address"
+        require_separate_lan_ips "$new_ip_http" "$new_ip_https"
+    fi
+    # What: port 53 free on each new IP; the old ones kept
+    # Why: dns binds 53 there; a busy one fails at start
     # From: Issue #1683 | PR #2017
     local dns_port
     dns_port=$(prod_env_default DNS_PORT) || exit $?
     choose_bind_ip new_ip_http "$dns_port" "$current_ip_http" \
         || die "Port ${dns_port} is busy on ${new_ip_http} (see above); nothing was changed."
-    choose_bind_ip new_ip_https "$dns_port" "$current_ip_https" \
-        || die "Port ${dns_port} is busy on ${new_ip_https} (see above); nothing was changed."
-    require_separate_lan_ips "$new_ip_http" "$new_ip_https"
+    if [[ "$https_on" = 1 ]]; then
+        choose_bind_ip new_ip_https "$dns_port" "$current_ip_https" \
+            || die "Port ${dns_port} is busy on ${new_ip_https} (see above); nothing was changed."
+        require_separate_lan_ips "$new_ip_http" "$new_ip_https"
+    fi
 
     printf "\n"
     printf '  %sNew configuration:%s\n' "${BOLD}" "${RESET}"
@@ -9010,7 +9023,7 @@ cmd_update_ip() {
     # Why: compose binds it; a missing one fails the start
     # From: Issue #1683 | PR #2017
     ensure_host_ipv4 "$new_ip_http" "$current_ip_http"
-    ensure_host_ipv4 "$new_ip_https" "$current_ip_http"
+    [[ "$https_on" != 1 ]] || ensure_host_ipv4 "$new_ip_https" "$current_ip_http"
 
     local snapshot
     local -a changes=("IP_HTTP=$new_ip_http" "IP_HTTPS=$new_ip_https")
@@ -10070,15 +10083,21 @@ IP_HTTPS=""
 ask_checked IP_HTTP "Server IP (HTTP mode)" "$detected_ip" is_valid_ipv4 "Invalid IPv4 address"
 
 printf "\n"
-printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' "${BOLD}" "${RESET}"
-# What: the second LAN address is always asked and checked
-# Why: AG-SETUP-001; prod runs dns-https on IP_HTTPS always
+printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
+printf "  Needs a second LAN IP and a CA certificate on clients.\n\n"
+https_yn=$(yn_default HTTPS_ENABLED) || exit $?
+HTTPS_ENABLED=0
+confirm_flag HTTPS_ENABLED "Enable HTTPS mode?" "$https_yn"
+# What: the second LAN IP only with HTTPS mode
+# Why: HTTPS is optional; HTTP mode needs one IP (README)
 # From: Issue #1683 | PR #1912
-suggested_https=$(next_ipv4 "$IP_HTTP")
-ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
-require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
-# What: port 53 free on both IPs; the stack's own kept
-# Why: dns binds port 53 on both; a busy one fails at start
+if [[ "$HTTPS_ENABLED" = 1 ]]; then
+    suggested_https=$(next_ipv4 "$IP_HTTP")
+    ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
+    require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
+fi
+# What: port 53 free on each used IP; the stack's own kept
+# Why: dns binds port 53 there; a busy one fails at start
 # From: Issue #1683 | PR #2017
 if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     keep_ip_http="" keep_ip_https=""
@@ -10089,18 +10108,13 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     dns_port=$(prod_env_default DNS_PORT) || exit $?
     choose_bind_ip IP_HTTP "$dns_port" "$keep_ip_http" \
         || die "Port ${dns_port} is busy on ${IP_HTTP} (see above); nothing was changed."
-    choose_bind_ip IP_HTTPS "$dns_port" "$keep_ip_https" \
-        || die "Port ${dns_port} is busy on ${IP_HTTPS} (see above); nothing was changed."
-    require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
+    if [[ "$HTTPS_ENABLED" = 1 ]]; then
+        choose_bind_ip IP_HTTPS "$dns_port" "$keep_ip_https" \
+            || die "Port ${dns_port} is busy on ${IP_HTTPS} (see above); nothing was changed."
+        require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
+    fi
 fi
-
-printf "\n"
-printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
-printf "  Requires a CA certificate on clients.\n\n"
-https_yn=$(yn_default HTTPS_ENABLED) || exit $?
-HTTPS_ENABLED=0
-confirm_flag HTTPS_ENABLED "Enable HTTPS mode?" "$https_yn"
-print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabled) (second IP $IP_HTTPS)"
+print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo "enabled (second IP $IP_HTTPS)" || echo disabled)"
 
 # What: the directory for all persistent state
 # Why: cache, DNS, DHCP and NTP data live below it
@@ -10469,7 +10483,7 @@ done
 # What: a missing second IP is offered after all answers
 # Why: no host change before every question is answered
 # From: Issue #1683 | PR #2017
-ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
+[[ "$HTTPS_ENABLED" != 1 ]] || ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
 
 # What: writes .env in one atomic step
 # Why: a half-written .env must never exist
@@ -10534,7 +10548,7 @@ render_initial_env() {
 IP_HTTP=${IP_HTTP}
 
 # What: second LAN IP for the HTTPS DNS and proxy
-# Why: always required (AG-SETUP-001)
+# Why: only with HTTPS mode; empty in HTTP mode
 # From: Issue #1683 | PR #1858
 IP_HTTPS=${IP_HTTPS}
 
