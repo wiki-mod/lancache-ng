@@ -462,12 +462,19 @@ fn healthcheck() -> Result<(), String> {
 // Why: settings are reread; a bad round never exits.
 // From: Issue #1683 | PR #1858
 pub async fn run(args: &[String]) -> Result<(), String> {
-    if args.first().map(String::as_str) == Some("healthcheck") {
-        if let Err(e) = healthcheck() {
-            eprintln!("watchdog healthcheck: {e}");
-            std::process::exit(1);
+    match args.first().map(String::as_str) {
+        None => {}
+        Some("healthcheck") => {
+            if let Err(e) = healthcheck() {
+                eprintln!("watchdog healthcheck: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
         }
-        return Ok(());
+        // What: an unknown word fails with the list.
+        // Why: it must not start a second check loop.
+        // From: Issue #1683 | PR #2020
+        Some(_) => return Err("commands: healthcheck (none: check loop)".into()),
     }
     use tokio::signal::unix::{SignalKind, signal};
     let mut settings = Settings::from_process()?;

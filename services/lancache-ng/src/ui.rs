@@ -2788,9 +2788,27 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
         // Why: setup.sh and the DHCP page run it.
         // From: Issue #1683 | PR #1985
         Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
-        _ => None,
+        None => None,
+        // What: an unknown word fails with the list.
+        // Why: it must not start a second web server.
+        // From: Issue #1683 | PR #2020
+        Some(_) => Some(Err(format!("commands: {}", COMMANDS.join(" ")))),
     }
 }
+
+// What: every command of the ui role; none = the server.
+// Why: the help names the same set as the match.
+// From: Issue #1683 | PR #2020
+const COMMANDS: [&str; 8] = [
+    "hash-password",
+    "encode-password-hash",
+    "zone-snapshots",
+    "registration-token",
+    "zone-rollback",
+    "healthcheck",
+    DHCP_PROBE_CMD,
+    "(none: web server)",
+];
 
 // What: asks the own health route on loopback.
 // Why: the container health check runs this.
