@@ -8603,7 +8603,7 @@ kea_snapshot_host_dir() {
 reset_kea_to_last_known_good_config() {
     local install_dir="$1" snapshot_id="$2" assume_yes="${3:-0}"
     local env_file state_dir kea_dir snapshot_root
-    local kea_ctrl_host kea_ctrl_user kea_ctrl_token kea_ctrl_url kea_ctrl_port loopback_ip
+    local kea_ctrl_host kea_ctrl_user kea_ctrl_token kea_ctrl_url kea_ctrl_port loopback_ip any_ip
     local -a snapshot_ids=()
     local sid config_json
 
@@ -8614,19 +8614,19 @@ reset_kea_to_last_known_good_config() {
     [[ -n "$kea_ctrl_token" ]] \
         || die "KEA_CTRL_TOKEN is empty or missing in $env_file -- cannot authenticate to Kea's Control Agent."
 
-    kea_ctrl_host=$(get_env_var KEA_CTRL_HOST "$env_file") || exit $?
+    # What: the address and port Kea's agent really uses
+    # Why: .env may change both; else the SOT default holds
+    # From: Issue #1683 | PR #1858
+    kea_ctrl_host=$(env_or_sot_default KEA_CTRL_ADDRESS "$env_file") || exit $?
+    kea_ctrl_port=$(env_or_sot_default KEA_CTRL_PORT "$env_file") || exit $?
+    uint_in_range "$kea_ctrl_port" 1 65535 || die "KEA_CTRL_PORT is not a port number: $kea_ctrl_port"
     loopback_ip=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
-    kea_ctrl_host="${kea_ctrl_host:-$loopback_ip}"
-    # What: maps a 0.0.0.0 Control Agent host to loopback
+    any_ip=$(prod_env_default ANY_BIND_IP) || exit $?
+    # What: an any-address agent is called on loopback
     # Why: dhcp uses host networking; 0.0.0.0 is no target
     # From: Issue #1683 | PR #1858
-    [[ "$kea_ctrl_host" = "0.0.0.0" ]] && kea_ctrl_host="$loopback_ip"
-    # What: Control Agent user and port from the SOT
-    # Why: the SOT owns both; dhcp, ui and this read them
-    # From: Issue #1683 | PR #1912
+    [[ "$kea_ctrl_host" != "$any_ip" ]] || kea_ctrl_host="$loopback_ip"
     kea_ctrl_user=$(prod_env_default KEA_CTRL_USER) || exit $?
-    kea_ctrl_port=$(prod_env_default KEA_CTRL_PORT) || exit $?
-    uint_in_range "$kea_ctrl_port" 1 65535 || die "The SOT KEA_CTRL_PORT is not a port number."
     kea_ctrl_url="http://${kea_ctrl_host}:${kea_ctrl_port}/"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
