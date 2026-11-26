@@ -935,9 +935,9 @@ runtime:
     # Why: RFC 1918 and ULA ranges; no list in code.
     # From: Issue #1683 | PR #1980
     - DNS_PRIVATE_REVERSE_ZONES=10.in-addr.arpa. 168.192.in-addr.arpa. 16.172.in-addr.arpa. 17.172.in-addr.arpa. 18.172.in-addr.arpa. 19.172.in-addr.arpa. 20.172.in-addr.arpa. 21.172.in-addr.arpa. 22.172.in-addr.arpa. 23.172.in-addr.arpa. 24.172.in-addr.arpa. 25.172.in-addr.arpa. 26.172.in-addr.arpa. 27.172.in-addr.arpa. 28.172.in-addr.arpa. 29.172.in-addr.arpa. 30.172.in-addr.arpa. 31.172.in-addr.arpa. c.f.ip6.arpa. d.f.ip6.arpa.
-    # What: the project address the ui links to.
+    # What: project address setup.sh clones from.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
-    # From: Issue #1683 | PR #1912
+    # From: Issue #1683 | PR #2020
     - LANCACHE_REPO_URL=https://github.com/wiki-mod/lancache-ng
     # What: Kea data dir, lease file and socket dir.
     # Why: compose mounts them; the Kea render uses them.
@@ -1578,10 +1578,19 @@ runtime:
     # Why: both sub-modes run the same dnsmasq daemon.
     # From: Issue #1683
     - DNSMASQ_RESTART_EXEC=dhcp:@SERVICE_CONTROL_PROGRAM@+dnsmasq+restart
+    # What: rendered nginx config dir of the proxy.
+    # Why: the ui writes there; the proxy image links it.
+    # From: Issue #1683 | PR #2020
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
+    # What: rendered dnsmasq and Kea agent and DDNS files.
+    # Why: the ui writes them; the dhcp image reads them.
+    # From: Issue #1683 | PR #2020
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
     - KEA_DDNS_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp-ddns.conf
+    # What: rendered pdns, dnsdist and recursor files.
+    # Why: the ui writes them; the dns image reads them.
+    # From: Issue #1683 | PR #2020
     - PDNS_CONF_FILE=@CONFIG_DIR@/dns/pdns.conf
     - DNSDIST_CONF_FILE=@CONFIG_DIR@/dns/dnsdist.conf
     - RECURSOR_HTTP_CONF_FILE=@CONFIG_DIR@/dns/recursor-http.yml
@@ -1611,10 +1620,22 @@ runtime:
     - RECURSOR_HTTPS_LISTEN=@LOOPBACK_BIND_IP@
     - RECURSOR_HTTPS_PORT=5302
     - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
+    # What: rendered snmpd and syslog-ng configs.
+    # Why: the ui writes them; the services read them.
+    # From: Issue #1683 | PR #2020
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
+    # What: API URLs of both recursors.
+    # Why: the ui flushes and asks the recursors there.
+    # From: Issue #1683 | PR #2020
     - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@@PDNS_API_PATH@ http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@@PDNS_API_PATH@
+    # What: project address the ui links to.
+    # Why: the page foot links it; LANCACHE_REPO_URL too.
+    # From: Issue #1683 | PR #2020
     - REPO_URL=https://github.com/wiki-mod/lancache-ng
+    # What: dir of the secret files the programs read.
+    # Why: one owner of the secret file place.
+    # From: Issue #1683 | PR #2020
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
     # What: git ref per channel for the secondary setup.sh.
     # Why: script and SOT must come from the same ref.
@@ -1623,6 +1644,9 @@ runtime:
     - SETUP_GIT_REF_NIGHTLY=current_dev
     - SETUP_SCRIPT_URL=@RAW_CONTENT_URL@/wiki-mod/lancache-ng/@SETUP_GIT_REF@/setup.sh
     - SETUP_SCRIPT_URL_NIGHTLY=@RAW_CONTENT_URL@/wiki-mod/lancache-ng/@SETUP_GIT_REF_NIGHTLY@/setup.sh
+    # What: snmpd agent, access, limits and traps.
+    # Why: the snmpd render writes them.
+    # From: Issue #1683 | PR #2020
     - SNMP_AGENTX=0
     - SNMP_AGENTX_SOCKET=/var/agentx/master
     - SNMP_ALLOW_FROM=default
@@ -1635,6 +1659,9 @@ runtime:
     - SNMP_LOGMATCH_INTERVAL=60
     - SNMP_TRAPS=0
     - SNMP_TRAP_SINK=
+    # What: stats graphs, sources, store dir and sizes.
+    # Why: the stats collector and the charts read them.
+    # From: Issue #1683 | PR #2020
     - STATS_CONTAINER_GRAPHS=cpu_percent:used=cpu_ns=DERIVE=0.0000001 memory:used=mem_bytes=GAUGE network:in=net_rx=COUNTER+out=net_tx=COUNTER disk_io:read=blk_read=COUNTER+write=blk_write=COUNTER
     - STATS_CONTAINERS=@PROXY_SERVICE@ @DNS_SERVICE@ @DHCP_SERVICE@ @UI_SERVICE@ @CACHEHAMSTER_SERVICE@
     - STATS_DARK_COLOURS=BACK#0b1220 CANVAS#0b1220 FONT#e6edf3 AXIS#8b949e GRID#30363d MGRID#30363d
@@ -1643,8 +1670,14 @@ runtime:
     - STATS_HEARTBEAT_STEPS=2
     - "STATS_FONTS=DEFAULT:11: TITLE:13: AXIS:10: LEGEND:11:"
     - STATS_HEIGHT=200
+    # What: host network counter file and its source.
+    # Why: compose mounts it; the stats show host traffic.
+    # From: Issue #1683 | PR #2020
     - HOST_NET_DEV_FILE=/host/net_dev
     - HOST_NET_DEV_SOURCE=/proc/1/net/dev
+    # What: more stats: skipped links, colours, RRAs, step.
+    # Why: the stats collector and the charts read them.
+    # From: Issue #1683 | PR #2020
     - STATS_HOST_IF_SKIP=lo veth docker br-
     - "STATS_LINE_COLOURS=#2f81f7 #3fb950 #d29922 #f85149"
     - STATS_RANGES=1h 1d 1w 1m 1y
@@ -1652,8 +1685,17 @@ runtime:
     - STATS_SERVICE_GRAPHS=machine.network:in=host:rx=DERIVE+out=host:tx=DERIVE proxy.requests:per_s=nginx:requests=DERIVE proxy.connections:active=nginx:active=GAUGE+waiting=nginx:waiting=GAUGE @DNS_SERVICE@.queries:recursor=recursor:questions=DERIVE+upstream=recursor:all-outqueries=DERIVE+auth=auth:udp-queries=DERIVE @DNS_SERVICE@.cache:hits=recursor:cache-hits=DERIVE+misses=recursor:cache-misses=DERIVE @DHCP_SERVICE@.packets:received=kea:pkt4-received=DERIVE+acks=kea:pkt4-ack-sent=DERIVE+naks=kea:pkt4-nak-sent=DERIVE @CACHEHAMSTER_SERVICE@.time:offset_ms=chrony:offset=GAUGE=1000+stratum=chrony:stratum=GAUGE
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
     - STATS_STEP=60
+    # What: gap between two cache usage scans.
+    # Why: the dashboard counts the cache use by it.
+    # From: Issue #1683 | PR #2020
     - CACHE_USAGE_SCAN_SECONDS=300
+    # What: chart width in pixels.
+    # Why: the stats charts render at this width.
+    # From: Issue #1683 | PR #2020
     - STATS_WIDTH=540
+    # What: Steam API, CDN host and login client identity.
+    # Why: cachehamster logs in to Steam with them.
+    # From: Issue #1683 | PR #2020
     - STEAM_API_URL=https://api.steampowered.com
     - STEAM_BRANCH=public
     - STEAM_CDN_HOST=lancache.steamcontent.com
@@ -1668,47 +1710,98 @@ runtime:
     # Why: a token that ends during a call fails it.
     # From: Issue #871 | PR #2017
     - STEAM_TOKEN_MARGIN_SECONDS=60
+    # What: Steam manifest API, OS, protocol and QR size.
+    # Why: cachehamster reads them for login and download.
+    # From: Issue #1683 | PR #2020
     - STEAM_MANIFEST_API_VERSION=5
     - STEAM_OS=windows
     - STEAM_PROTOCOL_VERSION=65580
     - STEAM_QR_SIZE=220
+    # What: syslog buffer, forward, form, mute, primary.
+    # Why: the syslog render writes them.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_BUFFER_DIR=@SYSLOG_LOG_ROOT@/buffer
     - SYSLOG_FORWARD=
     - 'SYSLOG_LINE_TEMPLATE=${ISODATE} ${HOST} ${PROGRAM}: ${MSG}\n'
     - SYSLOG_MUTED=
     - SYSLOG_PRIMARY=
+    # What: programs the logs page lists.
+    # Why: the ui reads the log folder of each.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_PROGRAMS=@CONTAINER_NAME_PROXY@ @CONTAINER_NAME_DNS@ @CONTAINER_NAME_DHCP@ @CONTAINER_NAME_UI@ @CONTAINER_NAME_SERVICES@
+    # What: services with a start and stop button.
+    # Why: the ui checks it before it starts or stops.
+    # From: Issue #1683 | PR #2020
     - UI_CONTROLLABLE_SERVICES=proxy dns dhcp services
+    # What: DHCP modes the ui offers.
+    # Why: the DHCP page lists them.
+    # From: Issue #1683 | PR #2020
     - DHCP_MODES=off kea dnsmasq-proxy dnsmasq-relay
+    # What: ui default language and listen address.
+    # Why: the ui starts with them.
+    # From: Issue #1683 | PR #2020
     - UI_LANG_DEFAULT=de
     - UI_LISTEN=0.0.0.0
+    # What: logs page line count and read chunk size.
+    # Why: the logs page reads that much of a file.
+    # From: Issue #1683 | PR #2020
     - UI_LOG_LINES=500
     - UI_LOG_TAIL_CHUNK=65536
+    # What: ui password hash and minimum password length.
+    # Why: login checks the hash; a new password, length.
+    # From: Issue #1683 | PR #2020
     - UI_AUTH_PASSWORD_HASH=
     - UI_PASSWORD_MIN_LENGTH=12
     # What: largest request body the Admin UI accepts.
     # Why: a body is held in memory before it is read.
     # From: Issue #1683 | PR #2017
     - UI_REQUEST_BODY_MAX_BYTES=2097152
+    # What: ui port and its public URL.
+    # Why: the install command shows this address.
+    # From: Issue #1683 | PR #2020
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
+    # What: recent requests the dashboard shows.
+    # Why: the dashboard keeps this many rows.
+    # From: Issue #1683 | PR #2020
     - UI_RECENT_REQUESTS=50
+    # What: programs per container in the menus.
+    # Why: reload and restart act on one program.
+    # From: Issue #1683 | PR #2020
     - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:dnsdist dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
+    # What: status poll interval of the pages, seconds.
+    # Why: the dots and the dashboard refresh by it.
+    # From: Issue #1683 | PR #2020
     - UI_STATUS_REFRESH=10
+    # What: login user name of the ui.
+    # Why: basic auth compares the user with it.
+    # From: Issue #1683 | PR #2020
     - UI_AUTH_USER=admin
+    # What: upstream DHCP server of the relay mode.
+    # Why: the dnsmasq relay forwards to it.
+    # From: Issue #1683 | PR #2020
     - UPSTREAM_DHCP_IP=
+    # What: watchdog alarm file and its mode.
+    # Why: the watchdog writes alarms; the ui shows them.
+    # From: Issue #1683 | PR #2020
     - WATCHDOG_ALARM_FILE=@STATUS_DIR@/alarms.json
     - WATCHDOG_ALARM_FILE_MODE=0644
+    # What: restart limit, its window and the stop grace.
+    # Why: the watchdog stops healing a looping container.
+    # From: Issue #1683 | PR #2020
     - WATCHDOG_RESTART_LIMIT=3
     - WATCHDOG_RESTART_WINDOW=900
     - WATCHDOG_STOP_GRACE=10
+    # What: cert files, cert warn time and disk limits.
+    # Why: the watchdog warns before they run out.
+    # From: Issue #1683 | PR #2020
     - WATCHDOG_CERT_FILES=@NGINX_DIR@/@NGINX_SUBDIR_CA@/ca.crt
     - WATCHDOG_CERT_WARN_SECS=2592000
     - WATCHDOG_DISK_MIN_FREE_PERCENT=10
     - WATCHDOG_DISK_PATHS=@CACHE_DIR@ @SYSLOG_LOG_ROOT@
-    # What: host conntrack counters and the warn level.
-    # Why: a full table drops new connections.
-    # From: Issue #1683 | PR #1985
+    # What: host conntrack counter file and its source.
+    # Why: compose mounts it; the watchdog reads it.
+    # From: Issue #1683 | PR #2020
     - HOST_NET_STAT_SOURCE=/proc/1/net/stat
     - HOST_NET_STAT_DIR=/host/net_stat
     # What: host machine-id sources; first found wins.
@@ -1720,8 +1813,14 @@ runtime:
     # Why: an unreadable or empty file is skipped.
     # From: Issue #871
     - CACHEHAMSTER_BIND_FILES=@HOST_MACHINE_ID_FILE@ /sys/class/dmi/id/product_uuid /sys/class/dmi/id/board_serial
+    # What: conntrack table size file and the warn level.
+    # Why: a full table drops new connections.
+    # From: Issue #1683 | PR #2020
     - CONNTRACK_MAX_FILE=/proc/sys/net/netfilter/nf_conntrack_max
     - WATCHDOG_CONNTRACK_WARN_PCT=80
+    # What: ui stop grace and the mode of rendered files.
+    # Why: the ui stops containers and writes files so.
+    # From: Issue #1683 | PR #2020
     - UI_STOP_GRACE=10
     - UI_CONFIG_FILE_MODE=0644
     # What: ui wait for a restarted container to be healthy.
@@ -1729,9 +1828,18 @@ runtime:
     # From: Issue #1683 | PR #1980
     - APPLY_HEALTH_WAIT_SECONDS=120
     - APPLY_HEALTH_POLL_SECONDS=1
+    # What: compose service name of the ui.
+    # Why: the ui and setup.sh find the container by it.
+    # From: Issue #1683 | PR #2020
     - UI_SERVICE=ui
+    # What: cache flush check gap and grace, seconds.
+    # Why: the ui flushes the recursors after zone changes.
+    # From: Issue #1683 | PR #2020
     - UI_FLUSH_CHECK_SECONDS=5
     - UI_FLUSH_GRACE_SECONDS=60
+    # What: longest name a secondary may have.
+    # Why: setup.sh and the ui check names by it.
+    # From: Issue #1683 | PR #2020
     - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
   # Why: config.rs checks every value against it.
