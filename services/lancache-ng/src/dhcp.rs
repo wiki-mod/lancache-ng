@@ -16,9 +16,9 @@
 // Any modification, rewording, shortening, relocation, or removal
 // of this notice is explicitly DISACK.
 
-// What: DHCP role logic moved out of the ui module.
-// Why: one home for Kea subnets, options and the probe.
-// From: Issue #1683
+// What: DHCP page logic: Kea subnets, options, probe.
+// Why: one home for the DHCP actions of the ui.
+// From: Issue #1683 | PR #2020
 use crate::config::{self, Settings};
 use crate::dns::*;
 use crate::shared::dhcp::{Mode as DhcpMode, option_data};
@@ -29,6 +29,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+// What: does our NTP server answer.
+// Why: General page shows the live state.
+// From: Issue #1683 | PR #1980
 pub(crate) async fn ntp_answers(s: &Settings) -> Result<bool, String> {
     if !s.flag("NTP_ENABLED")? {
         return Ok(false);
@@ -368,8 +371,7 @@ pub(crate) async fn kea_action(
         }
         "UI_ROUTE_LEASE_RELEASE" => kea_api(s)?.release(&get("ip")).await,
         "UI_ROUTE_KEA_ROLLBACK" => {
-            let body = kea_store(s)?.read(&get("snapshot_id"))?;
-            let cfg: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+            let cfg: Value = kea_store(s)?.read(&get("snapshot_id"))?;
             kea_api(s)?.set_config(cfg).await
         }
         _ => Err(tr("err_unknown_dhcp_action").replace("{op}", op)),

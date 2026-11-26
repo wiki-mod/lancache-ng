@@ -456,8 +456,7 @@ fn healthcheck() -> Result<(), String> {
     let s = load()?;
     let limit = s.uint("CHECK_INTERVAL")? * s.uint("RESTART_AFTER")?.max(1);
     let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
-    let raw = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+    let v: Value = fs::read_json(&path)?.ok_or_else(|| format!("{}: missing", path.display()))?;
     let written = v["written"].as_u64().ok_or("written missing")?;
     let age = clock::unix_secs().saturating_sub(written);
     if age > limit {

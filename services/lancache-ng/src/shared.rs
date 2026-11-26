@@ -16,9 +16,9 @@
 // Any modification, rewording, shortening, relocation, or removal
 // of this notice is explicitly DISACK.
 
-// What: code all five images share.
-// Why: one owner per behaviour; crates stay thin.
-// From: Issue #1683 | PR #1858
+// What: building blocks the lancache-ng roles share.
+// Why: one owner per behaviour for every role.
+// From: Issue #1683 | PR #2020
 
 // What: wall-clock time since the Unix epoch.
 // Why: file names, ids and logs need a plain number.
@@ -193,6 +193,16 @@ pub mod fs {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    // What: a JSON file as T, or None if it is absent.
+    // Why: one reader; bad JSON is an error, not empty.
+    // From: Issue #1683 | PR #2020
+    pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+        let raw = read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        raw.map(|b| serde_json::from_slice(&b))
+            .transpose()
+            .map_err(|e| format!("{}: {e}", path.display()))
     }
 
     // What: paths in a folder; an absent one is empty.
@@ -2391,14 +2401,14 @@ pub mod snapshot {
             Ok(ids)
         }
 
-        // What: body of one snapshot.
+        // What: one snapshot, parsed as JSON.
         // Why: rollback restores exactly this.
-        // From: Issue #1683 | PR #1980
-        pub fn read(&self, id: &str) -> Result<Vec<u8>, String> {
+        // From: Issue #1683 | PR #2020
+        pub fn read<T: serde::de::DeserializeOwned>(&self, id: &str) -> Result<T, String> {
             if !is_id(id) {
                 return Err(format!("bad snapshot id {id:?}"));
             }
-            std::fs::read(self.path(id)).map_err(|e| format!("snapshot {id}: {e}"))
+            fs::read_json(&self.path(id))?.ok_or_else(|| format!("snapshot {id}: not found"))
         }
 
         // What: drop all but the newest keep.
@@ -3306,6 +3316,9 @@ pub mod peer {
         Ok(crate::shared::pdns::Api::new(client, &url, key))
     }
 
+    // What: state of one zone and the worst-of rule.
+    // Why: in sync only when every managed zone matches.
+    // From: Issue #1683
     #[cfg(test)]
     mod tests {
         use super::{PeerZone, worst_state, zone_state};
@@ -3321,6 +3334,9 @@ pub mod peer {
             }
         }
 
+        // What: each serial pair maps to its state word.
+        // Why: page and alarms show these words.
+        // From: Issue #1683
         #[test]
         fn zone_state_names_each_case() {
             assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
@@ -3330,6 +3346,9 @@ pub mod peer {
             assert_eq!(zone_state(&zone(None, Some(3))).word(), "error");
         }
 
+        // What: one lagging zone makes the peer behind.
+        // Why: a peer is in sync only if every zone is.
+        // From: Issue #1683
         #[test]
         fn one_lagging_zone_decides_the_status() {
             let zones = vec![zone(Some(3), Some(3)), zone(Some(5), Some(4))];
@@ -5114,16 +5133,20 @@ pub mod render {
         match dhcp::Mode::from_settings(s) {
             Ok(dhcp::Mode::Off) => {}
             Ok(dhcp::Mode::Kea) => {
+                // What: a bad Kea file stops this file.
+                // Why: a new file drops kept subnets.
+                // From: Issue #1683 | PR #2020
                 let kept = s
                     .text("KEA_DHCP4_CONF_FILE")
-                    .ok()
-                    .and_then(|p| std::fs::read(p).ok())
-                    .and_then(|b| serde_json::from_slice(&b).ok());
-                o.put_json(
-                    "DHCP_SERVICE",
-                    "KEA_DHCP4_CONF_FILE",
-                    kea_conf::dhcp4(s, kept.as_ref()),
-                );
+                    .and_then(|p| crate::shared::fs::read_json(Path::new(&p)));
+                match kept {
+                    Ok(kept) => o.put_json(
+                        "DHCP_SERVICE",
+                        "KEA_DHCP4_CONF_FILE",
+                        kea_conf::dhcp4(s, kept.as_ref()),
+                    ),
+                    Err(e) => o.errs.push(e),
+                }
                 o.put_json(
                     "DHCP_SERVICE",
                     "KEA_CTRL_CONF_FILE",

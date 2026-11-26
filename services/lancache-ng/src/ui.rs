@@ -16,14 +16,13 @@
 // Any modification, rewording, shortening, relocation, or removal
 // of this notice is explicitly DISACK.
 
-use crate::dhcp::*;
-use crate::dns::*;
-
 // What: admin ui: settings, pages and actions.
 // Why: owns settings; renders and applies configs.
 // From: Issue #1683 | PR #1858
 
 use crate::config::{self, Settings, process_env};
+use crate::dhcp::*;
+use crate::dns::*;
 use crate::shared::dhcp::Mode as DhcpMode;
 use crate::shared::peer::{self, PeerZone};
 use crate::shared::{access, apply, docker, fs, http, human, render, secret};
@@ -431,16 +430,6 @@ pub(crate) async fn auth(State(app): Shared, mut req: Request, next: Next) -> Re
     res
 }
 
-// What: JSON file, or null when missing or bad.
-// Why: pages render even before the file exists.
-// From: Issue #1683 | PR #1980
-pub(crate) fn read_json(path: &str) -> Value {
-    std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(Value::Null)
-}
-
 // What: adds a human-readable byte size field.
 // Why: pages show sizes like 40 GiB, not raw bytes.
 // From: Issue #1683 | PR #1980
@@ -503,7 +492,15 @@ pub(crate) fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
 pub(crate) async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
-    ctx.insert("alarms", &read_json(&s.text("WATCHDOG_ALARM_FILE")?));
+    // What: a bad alarm file is logged, the page stays.
+    // Why: the dashboard must render without the file.
+    // From: Issue #1683 | PR #2020
+    let path = s.text("WATCHDOG_ALARM_FILE")?;
+    let alarms = fs::read_json::<Value>(Path::new(&path))
+        .inspect_err(|e| eprintln!("ui: alarms: {e}"))
+        .ok()
+        .flatten();
+    ctx.insert("alarms", &alarms);
     let containers = project_containers(&app, &s).await.unwrap_or_default();
     ctx.insert("containers", &containers);
     let (totals, recent) = proxy_log(&s).await?;
@@ -2797,9 +2794,9 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
             _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
-        // What: secondary zones and TSIG via the pdns API.
-        // Why: a secondary has no ui server to do it.
-        // From: Issue #1683
+        // What: one DHCP probe as JSON on stdout.
+        // Why: setup.sh and the DHCP page run it.
+        // From: Issue #1683 | PR #1985
         Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
         _ => None,
     }
@@ -2986,8 +2983,8 @@ pub async fn run(args: &[String]) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-// What: state of one zone and the worst-of rule.
-// Why: in sync only when every managed zone matches.
+// What: unit tests of the ui helpers.
+// Why: cargo test runs them without a stack.
 // From: Issue #1683
 #[cfg(test)]
 mod tests {

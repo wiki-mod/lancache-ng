@@ -16,9 +16,9 @@
 // Any modification, rewording, shortening, relocation, or removal
 // of this notice is explicitly DISACK.
 
-// What: dns helper: the recursors follow own zones.
-// Why: a secondary has no ui to render after a change.
-// From: Issue #1683
+// What: DNS zones, records, secondaries and dns helper.
+// Why: one home for DNS logic of ui and the dns role.
+// From: Issue #1683 | PR #2020
 
 use crate::config::{self, Settings, process_env};
 use crate::shared::dns::Role;
@@ -371,8 +371,7 @@ pub(crate) async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), S
     if !snapshot_zones(s)?.iter().any(|z| z == zone) {
         return Err(tr("err_zone_no_snapshots").replace("{zone}", zone));
     }
-    let body = zone_store(s, zone)?.read(id)?;
-    let rows: Vec<Value> = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    let rows: Vec<Value> = zone_store(s, zone)?.read(id)?;
     let api = pdns_api(s)?;
     api.restore(zone, &rows).await?;
     snapshot(s, &api, zone).await?;

@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::Settings;
-use crate::shared::fs::{Owner, PRIVATE_MODE, Place, write};
+use crate::shared::fs::{Owner, PRIVATE_MODE, Place, read_json, write};
 use crate::shared::{clock, http, secret};
 use base64::Engine as _;
 use futures_util::{StreamExt, stream};
@@ -226,17 +226,6 @@ impl Ctx {
         )
         .map_err(|e| format!("{name}: {e}"))
     }
-}
-
-// What: a JSON file, or None when it does not exist.
-// Why: a missing file is a normal first state.
-// From: Issue #871 | PR #1980
-fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>, String> {
-    let raw =
-        crate::shared::fs::read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    raw.map(|b| serde_json::from_slice(&b))
-        .transpose()
-        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // What: remove a file; a missing file is fine.
