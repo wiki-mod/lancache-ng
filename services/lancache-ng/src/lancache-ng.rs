@@ -660,6 +660,21 @@ mod cachehamster {
             "account": session.map(|s| s.account),
             "login_pending": c.path(PENDING_FILE).exists(),
             "jobs": jobs,
+            "limits": limits(c)?,
+        }))
+    }
+
+    // What: time window and speed cap as JSON.
+    // Why: status shows why a job waits or is slow.
+    // From: Issue #871 | PR #2020
+    fn limits(c: &Ctx) -> Result<Value, String> {
+        let text = c.s.text("CACHEHAMSTER_WINDOW")?;
+        Ok(json!({
+            "window": text,
+            "in_window": in_window(window(&text)?),
+            "max_mbit": c.s.uint("CACHEHAMSTER_MAX_MBIT")?,
+            "queues": c.s.uint("CACHEHAMSTER_QUEUES")?,
+            "connections": c.s.uint("CACHEHAMSTER_CONCURRENCY")?,
         }))
     }
 
@@ -917,6 +932,41 @@ mod cachehamster {
                 .map_err(|()| format!("{raw}: no port possible"))?;
             Ok(u)
         }
+    }
+
+    // What: one ranged GET through the proxy.
+    // Why: shows proxy reach, TLS trust, cache state.
+    // From: Issue #871 | PR #2020
+    async fn fetch_check(c: &Ctx, args: &[String]) -> Result<Value, String> {
+        let raw = match args {
+            [u] => u,
+            _ => return Err("usage: fetch-check <url>".into()),
+        };
+        let dl = Dl::load(&c.s, 1)?;
+        let url = dl.url(raw)?;
+        let started = std::time::Instant::now();
+        let resp = dl
+            .client
+            .get(url.clone())
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .timeout(Duration::from_secs(c.s.uint("HTTP_CLIENT_TIMEOUT")?))
+            .send()
+            .await
+            .map_err(|e| format!("{url}: {e}"))?;
+        let head = |k: &str| {
+            resp.headers()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        Ok(json!({
+            "url": raw,
+            "via": url.as_str(),
+            "status": resp.status().as_u16(),
+            "cache_status": head("x-cache-status"),
+            "served_by": head("x-served-by"),
+            "ms": started.elapsed().as_millis() as u64,
+        }))
     }
 
     // What: run one URL job with many connections.
@@ -2103,7 +2153,7 @@ mod cachehamster {
     // What: every command cachehamster takes.
     // Why: the help names the same set as the match.
     // From: Issue #871 | PR #2020
-    const COMMANDS: [&str; 15] = [
+    const COMMANDS: [&str; 16] = [
         "daemon",
         "status",
         "login-begin",
@@ -2113,6 +2163,7 @@ mod cachehamster {
         "library",
         "cached",
         "wipe",
+        "fetch-check",
         "lookup",
         "evict",
         "add",
@@ -2136,6 +2187,7 @@ mod cachehamster {
             Some("logout") => remove(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
             Some("library") => library(&c, &client).await,
             Some("cached") => cached(&c),
+            Some("fetch-check") => fetch_check(&c, &args[1..]).await,
             Some("wipe") => wipe(&c),
             Some("lookup") => app_cache(&c, &args[1..], false).await,
             Some("evict") => app_cache(&c, &args[1..], true).await,
@@ -14318,9 +14370,11 @@ mod ui {
         State(app): Shared,
         Extension(csrf): Extension<Csrf>,
         axum::extract::Path(op): axum::extract::Path<String>,
+        axum::extract::Query(query): axum::extract::Query<Fields>,
         headers: HeaderMap,
     ) -> Page {
         csrf.check_header(&headers)?;
+        let url = field(&query, "url");
         let allowed = [
             "login-begin",
             "login-poll",
@@ -14335,6 +14389,10 @@ mod ui {
         // From: Issue #871 | PR #1991
         let args: Vec<&str> = match op.split_once('-') {
             Some((cmd @ ("lookup" | "evict"), id)) if id.parse::<u32>().is_ok() => vec![cmd, id],
+            // What: fetch-check?url= probes one address.
+            // Why: REST runs the CLI check of the owner.
+            // From: Issue #871 | PR #2020
+            _ if op == "fetch-check" && !url.is_empty() => vec!["fetch-check", &url],
             _ if allowed.contains(&op.as_str()) => vec![op.as_str()],
             _ => return Err(Fail(StatusCode::NOT_FOUND, "no such call".into())),
         };
@@ -15328,7 +15386,7 @@ mod ui {
         let css = static_file(&dir, "admin.css")?;
         let icon = static_file(&dir, "favicon.ico")?;
         let logo = static_file(&dir, "logo-icon.png")?;
-        let mut pages = Router::new()
+        let pages = Router::new()
             .route(&p("UI_PAGE_DASHBOARD")?, get(dashboard))
             .route(&p("UI_PAGE_SETUP")?, get(setup))
             .route(&p("UI_ROUTE_SETUP_SAVE")?, post(save))
@@ -15340,14 +15398,7 @@ mod ui {
             .route(&p("UI_PAGE_DHCP")?, get(dhcp))
             .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
             .route(&p("UI_PAGE_STATS")?, get(stats))
-            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph));
-        // What: one route per action, tagged with SOT key.
-        // Why: handlers match the key, never a path text.
-        // From: Issue #1683
-        for &op in HamsterOp::ALL {
-            pages = pages.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
-        }
-        let pages = pages
+            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
             .merge(api_routes(&s)?)
             .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
         Ok(Router::new()
@@ -15383,7 +15434,7 @@ mod ui {
     fn api_routes(s: &Settings) -> Result<Router<Arc<App>>, String> {
         let p = |key: &str| s.text(key);
         let mut r = Router::new();
-        // What: DHCP and DNS page actions, one route each.
+        // What: DHCP, DNS, hamster actions, one route each.
         // Why: page, REST and CLI post the same form.
         // From: Issue #1683 | PR #2020
         for &op in DhcpOp::ALL {
@@ -15397,6 +15448,9 @@ mod ui {
                 &p(op.key())?,
                 post(secondary_action).layer(Extension(Op(op))),
             );
+        }
+        for &op in HamsterOp::ALL {
+            r = r.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
         }
         Ok(r.route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
             .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
