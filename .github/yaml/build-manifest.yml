@@ -818,6 +818,8 @@ runtime:
     - UI_ROUTE_APPLY_PREVIEW=/api/apply/preview
     - UI_ROUTE_PROXY_PSL=/api/proxy/psl
     - UI_ROUTE_DOCKER=/api/system/docker
+    - UI_ROUTE_STATS_LIST=/api/stats
+    - UI_ROUTE_STATS_SAMPLE=/api/stats/sample
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
     - UI_ROUTE_DNS_FLUSH=/api/dns/flush

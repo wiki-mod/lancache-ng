@@ -12457,6 +12457,65 @@ end
             Ok(out)
         }
 
+        // What: graphs with sources, RRD file, last write.
+        // Why: REST and CLI show what is recorded.
+        // From: Issue #1683 | PR #2020
+        pub fn listing(s: &Settings) -> Result<serde_json::Value, String> {
+            let mut rows = Vec::new();
+            for g in all(s)? {
+                let path = file(s, &g)?;
+                let updated = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs());
+                let sources: Vec<serde_json::Value> = g
+                    .sources
+                    .iter()
+                    .map(|x| serde_json::json!({"ds": x.ds, "from": x.oid, "kind": x.kind}))
+                    .collect();
+                rows.push(serde_json::json!({
+                    "name": g.name, "tab": g.tab, "title": g.title,
+                    "file": path, "updated_unix": updated, "sources": sources,
+                }));
+            }
+            Ok(serde_json::json!({"graphs": rows}))
+        }
+
+        // What: lancache-ng stats list|graph|sample.
+        // Why: reads here; a sample round runs in the ui.
+        // From: Issue #1683 | PR #2020
+        pub async fn stats_run(args: &[String]) -> Result<(), String> {
+            let s = Settings::from_process()?;
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            match words.as_slice() {
+                ["list"] => println!("{}", listing(&s)?),
+                ["graph", name, range, out] => {
+                    let g = all(&s)?
+                        .into_iter()
+                        .find(|g| g.name == *name)
+                        .ok_or_else(|| format!("{name}: no such graph"))?;
+                    let png = png(&s, &g, range, false)?;
+                    std::fs::write(out, &png).map_err(|e| format!("{out}: {e}"))?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"graph": name, "file": out, "bytes": png.len()})
+                    );
+                }
+                ["sample"] => {
+                    let route = s.text("UI_ROUTE_STATS_SAMPLE")?;
+                    let body = crate::shared::http::Body::Form(vec![]);
+                    let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+                    println!("{v}");
+                    if v["errors"].as_array().is_some_and(|e| !e.is_empty()) {
+                        return Err("sample: a graph could not be recorded".into());
+                    }
+                }
+                _ => return Err("commands: list | graph <name> <range> <file.png> | sample".into()),
+            }
+            Ok(())
+        }
+
         // What: program values, row tab.name:sources.
         // Why: PowerDNS, nginx, Kea and chrony give values.
         // From: Issue #1683 | PR #1980
@@ -14866,6 +14925,40 @@ mod ui {
             .ok()
     }
 
+    // What: one sample round: SNMP, containers, programs.
+    // Why: the loop and a sample on demand run it alike.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn sample_round(app: &App, s: &Settings) -> Vec<String> {
+        let c = s.clone();
+        let mut errs = match tokio::task::spawn_blocking(move || sample_all(&c)).await {
+            Ok(list) => list,
+            Err(e) => vec![e.to_string()],
+        };
+        errs.extend(sample_containers(app, s).await);
+        errs.extend(sample_services(app, s).await);
+        errs
+    }
+
+    // What: POST one sample round; answers its errors.
+    // Why: CLI and REST record now, not at the next step.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stats_sample_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        let errs = sample_round(&app, &app.settings()).await;
+        Ok(axum::Json(json!({"errors": errs})).into_response())
+    }
+
+    // What: GET graph list with sources and files.
+    // Why: REST read on the listing of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stats_list_api(State(app): Shared) -> Response {
+        json_reply(crate::shared::rrd::listing(&app.settings()).map(Some), "")
+    }
+
     // What: records stats every STATS_STEP seconds.
     // Why: the dashboard graphs need a time series.
     // From: Issue #1683 | PR #1980
@@ -14875,16 +14968,7 @@ mod ui {
             let Some(step) = or_stop("stats", s.uint("STATS_STEP")) else {
                 return;
             };
-            let c = s.clone();
-            let errs = tokio::task::spawn_blocking(move || sample_all(&c)).await;
-            match errs {
-                Ok(list) => list.iter().for_each(|e| eprintln!("ui: stats: {e}")),
-                Err(e) => eprintln!("ui: stats: {e}"),
-            }
-            for e in sample_containers(&app, &s).await {
-                eprintln!("ui: stats: {e}");
-            }
-            for e in sample_services(&app, &s).await {
+            for e in sample_round(&app, &s).await {
                 eprintln!("ui: stats: {e}");
             }
             match dhcp_stays_off(&app, &s).await {
@@ -16183,7 +16267,6 @@ mod ui {
             .route(&p("UI_PAGE_DHCP")?, get(dhcp))
             .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
             .route(&p("UI_PAGE_STATS")?, get(stats))
-            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
             .merge(api_routes(&s)?)
             .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
         Ok(Router::new()
@@ -16265,6 +16348,9 @@ mod ui {
             .route(&p("UI_ROUTE_APPLY_PREVIEW")?, get(apply_preview_api))
             .route(&p("UI_ROUTE_PROXY_PSL")?, get(proxy_psl_api))
             .route(&p("UI_ROUTE_DOCKER")?, get(docker_api))
+            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
+            .route(&p("UI_ROUTE_STATS_LIST")?, get(stats_list_api))
+            .route(&p("UI_ROUTE_STATS_SAMPLE")?, post(stats_sample_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -16969,6 +17055,7 @@ async fn main() -> std::process::ExitCode {
         "secret" => code(shared::secret::secret_run(&argv)),
         "cache" => code(shared::tidy::cache_run(&argv).await),
         "cdn" => code(shared::cdn::cdn_run(&argv).await),
+        "stats" => code(shared::rrd::stats_run(&argv).await),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -16988,8 +17075,8 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 8] = [
-    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache", "cdn",
+const GROUPS: [&str; 9] = [
+    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache", "cdn", "stats",
 ];
 
 // What: turn a role Result into a process exit code.
