@@ -1045,6 +1045,32 @@ pub mod dns {
         if address.contains(':') { "AAAA" } else { "A" }
     }
 
+    // What: host and port of host, host:port or [v6]:port.
+    // Why: one reader; a bare v6 address has no port.
+    // From: Issue #1683 | PR #2020
+    pub fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), String> {
+        let bad = || format!("{raw:?} is no host or host:port");
+        let (host, port) = match raw.strip_prefix('[') {
+            Some(rest) => {
+                let (h, tail) = rest.split_once(']').ok_or_else(bad)?;
+                match tail {
+                    "" => (h, None),
+                    t => (h, Some(t.strip_prefix(':').ok_or_else(bad)?)),
+                }
+            }
+            None if raw.matches(':').count() == 1 => raw
+                .split_once(':')
+                .map(|(h, p)| (h, Some(p)))
+                .ok_or_else(bad)?,
+            None => (raw, None),
+        };
+        if host.is_empty() {
+            return Err(bad());
+        }
+        let port = port.map(|p| p.parse::<u16>().ok().filter(|n| *n > 0).ok_or_else(bad));
+        Ok((host, port.transpose()?))
+    }
+
     // What: host:port; an IPv6 address gets brackets.
     // Why: bare, nobody sees where its port starts.
     // From: Issue #1683 | PR #2017
@@ -2168,14 +2194,9 @@ pub mod log {
             .into_iter()
             .chain(s.list("SYSLOG_FORWARD"))
             .map(|t| {
-                let (host, port) = t
-                    .rsplit_once(':')
-                    .ok_or_else(|| format!("syslog target {t:?} needs host:port"))?;
-                let port = port
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|p| *p > 0)
-                    .ok_or_else(|| format!("syslog target {t:?}: bad port"))?;
+                let need = || format!("syslog target {t:?} needs host:port");
+                let (host, port) = crate::shared::dns::split_host_port(&t).map_err(|_| need())?;
+                let port = port.ok_or_else(need)?;
                 Ok(Target {
                     host: host.to_string(),
                     port,
@@ -3593,23 +3614,7 @@ pub mod recursor_conf {
     // From: Issue #1683
     pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
         let bad = || format!("{key}: {raw} is no IP address");
-        let (host, port) = match raw.strip_prefix('[') {
-            Some(rest) => {
-                let (h, tail) = rest.split_once(']').ok_or_else(bad)?;
-                match tail {
-                    "" => (h, None),
-                    t => (h, Some(t.strip_prefix(':').ok_or_else(bad)?)),
-                }
-            }
-            None if raw.matches(':').count() == 1 => raw
-                .split_once(':')
-                .map(|(h, p)| (h, Some(p)))
-                .ok_or_else(bad)?,
-            None => (raw, None),
-        };
-        if let Some(p) = port {
-            p.parse::<u16>().ok().filter(|n| *n > 0).ok_or_else(bad)?;
-        }
+        let (host, _) = crate::shared::dns::split_host_port(raw).map_err(|_| bad())?;
         let ip: std::net::IpAddr = host.parse().map_err(|_| bad())?;
         if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
             return Err(format!(
