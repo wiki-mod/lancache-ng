@@ -3166,8 +3166,8 @@ RestartSec=${restart_seconds}
 [Install]
 WantedBy=multi-user.target
 EOF
-    # What: reconcile (exit ignored), then converge
-    # Why: a failed reconcile must not stop the drift repair
+    # What: one convergence run per start
+    # Why: converge-tick owns the steps; OpenRC runs it too
     # From: Issue #819
     cat > "$unit_dir/$CONVERGE_SERVICE_UNIT" <<EOF || die "Failed to write $CONVERGE_SERVICE_UNIT."
 [Unit]
@@ -3177,8 +3177,7 @@ After=${docker_unit}
 [Service]
 Type=oneshot
 WorkingDirectory=${stack_dir}
-ExecStart=-${setup_sh} converge-reconcile ${stack_dir}
-ExecStart=${compose} up -d --remove-orphans
+ExecStart=${setup_sh} converge-tick ${stack_dir}
 EOF
     cat > "$unit_dir/$CONVERGE_TIMER_UNIT" <<EOF || die "Failed to write $CONVERGE_TIMER_UNIT."
 [Unit]
@@ -7654,10 +7653,7 @@ cmd_openrc_loop() {
         [[ "$OPENRC_LOOP_STOP" = 0 ]] || break
         rc=0
         if [[ "$job" = converge ]]; then
-            "$SCRIPT_DIR/setup.sh" converge-reconcile "$stack_dir" || rc=$?
-            [[ "$rc" -eq 0 ]] || print_error "converge-reconcile failed (exit $rc); compose up runs anyway."
-            rc=0
-            "$SCRIPT_DIR/setup.sh" compose "$stack_dir" up -d --remove-orphans || rc=$?
+            "$SCRIPT_DIR/setup.sh" converge-tick "$stack_dir" || rc=$?
         else
             "$SCRIPT_DIR/setup.sh" auto-update "$stack_dir" || rc=$?
         fi
@@ -7854,6 +7850,16 @@ reconcile_auto_update_timer_state() {
         if host_unit_enabled "$unit"; then host_unit_action "$unit" disable; fi
         if host_unit_active "$unit"; then host_unit_action "$unit" stop; fi
     fi
+}
+
+# What: one convergence run: reconcile, then compose up
+# Why: a failed reconcile must not stop the drift repair
+# From: Issue #819
+cmd_converge_tick() {
+    local stack_dir="$1" rc=0
+    ( cmd_converge_reconcile "$stack_dir" ) || rc=$?
+    [[ "$rc" -eq 0 ]] || print_error "converge-reconcile failed (exit $rc); compose up runs anyway."
+    cmd_compose "$stack_dir" up -d --remove-orphans
 }
 
 # What: syncs the auto-update timer with the .env per tick
@@ -9778,7 +9784,7 @@ esac
 # Why: one check; that function owns the help list
 # From: Issue #1683 | PR #1912
 if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]] \
-    && [[ ! "$setup_command" =~ ^(compose|converge-reconcile|openrc-loop|help|--help|-h)$ ]]; then
+    && [[ ! "$setup_command" =~ ^(compose|converge-reconcile|converge-tick|openrc-loop|help|--help|-h)$ ]]; then
     print_command_help "$setup_command" && exit 0
 fi
 # What: runs the subcommand named in the first argument
@@ -9817,9 +9823,14 @@ case "$setup_command" in
         cmd_auto_update "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
     converge-reconcile)
         # What: internal-only; not in the usage text
-        # Why: the converge service calls it
+        # Why: units written by older setup.sh still call it
         # From: Issue #1683 | PR #1858
         cmd_converge_reconcile "${2:-$DEFAULT_INSTALL_DIR}"; exit 0 ;;
+    converge-tick)
+        # What: internal-only; not in the usage text
+        # Why: the converge service and OpenRC loop call it
+        # From: Issue #819
+        cmd_converge_tick "${2:-$DEFAULT_INSTALL_DIR}"; exit $? ;;
     openrc-loop)
         # What: internal-only; not in the usage text
         # Why: the OpenRC loop services call it
