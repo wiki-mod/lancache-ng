@@ -624,44 +624,95 @@ runtime:
     # From: Issue #871 | PR #1980
     - CACHEHAMSTER_MAX_MBIT=0
     - CACHEHAMSTER_WINDOW=00:00-24:00
+    # What: DHCP lease time, its bounds and the max factor.
+    # Why: the Kea render and the DHCP page use them.
+    # From: Issue #1683 | PR #2020
     - DHCP_LEASE_TIME=86400
     - DHCP_LEASE_TIME_MIN=60
     - DHCP_LEASE_TIME_MAX=604800
     - DHCP_MAX_LEASE_FACTOR=2
+    # What: cache slices, validity, eviction and keep days.
+    # Why: nginx templates and the watchdog purge read them.
+    # From: Issue #1683 | PR #2020
     - CACHE_SLICE_SIZE=8m
     - CACHE_VALID_HIT=@CACHE_VALID_DAYS@d
     - CACHE_VALID_ANY=1m
     - CACHE_INACTIVE=@CACHE_VALID_DAYS@d
     - CACHE_MIN_FREE=1g
     - CACHE_VALID_DAYS=365
+    # What: log budget, keep days and xz level.
+    # Why: the watchdog prunes and packs logs by them.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_MAX_GB=10
     - SYSLOG_RETENTION_DAYS=30
     - SYSLOG_XZ_PRESET=6
+    # What: old switch for DNS query logging.
+    # Why: no program reads it since v0.4.0; setup.sh does.
+    # From: Issue #1683 | PR #2020
     - LOG_QUERIES=0
+    # What: local root zone copy on or off.
+    # Why: the dns render adds the root copy when on.
+    # From: Issue #1683 | PR #2020
     - ROOT_ZONE_MIRROR=1
+    # What: upstream DNS servers and the zones they serve.
+    # Why: the recursors forward these zones there.
+    # From: Issue #1683 | PR #2020
     - DNS_UPSTREAM_SERVERS=
     - DNS_UPSTREAM_ZONES=.
     - DNS_UPSTREAM_UNSIGNED_ZONES=
+    # What: main LAN domain of DHCP and DNS.
+    # Why: zones, SOA and the DHCP domain build on it.
+    # From: Issue #1683 | PR #2020
     - DHCP_DOMAIN=lancache-ng.lan
     # What: more LAN domains beside DHCP_DOMAIN.
     # Why: each gets its own zone; empty = only one.
     # From: Issue #1683
     - DNS_EXTRA_LAN_DOMAINS=
+    # What: old DDNS switch of the dhcp image.
+    # Why: unread by code since v0.4.0; DHCP_DDNS rules.
+    # From: Issue #1683 | PR #2020
     - DHCP_DDNS_ENABLED=false
+    # What: Kea control agent user and port.
+    # Why: the ui calls Kea there with basic auth.
+    # From: Issue #1683 | PR #2020
     - KEA_CTRL_USER=admin
     - KEA_CTRL_PORT=8000
+    # What: Kea config snapshot dir and file name.
+    # Why: the ui keeps rollback points of the Kea config.
+    # From: Issue #1683 | PR #2020
     - KEA_CONFIG_SNAPSHOT_DIR=@KEA_DATA_DIR@/config-snapshots
     - KEA_CONFIG_SNAPSHOT_FILE=dhcp4.json
+    # What: syslog port the stack programs log to.
+    # Why: syslog-ng listens there; the renders send to it.
+    # From: Issue #1683 | PR #2020
     - LANCACHE_LOG_PORT=5514
+    # What: log switches per service of an older layout.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - LOGGING_PROXY_ENABLED=1
     - LOGGING_DNS_ENABLED=1
     - LOGGING_DHCP_ENABLED=1
     - LOGGING_UI_ENABLED=1
+    # What: upstream resolver of the proxy nginx.
+    # Why: nginx must not ask the LanCache DNS.
+    # From: Issue #1683 | PR #2020
     - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+    # What: client ACL mode of the proxy: lazy or strict.
+    # Why: the ui renders the client ACL by it.
+    # From: Issue #1683 | PR #2020
     - PROXY_SECURITY_MODE=lazy
+    # What: upstream NTP servers of chrony.
+    # Why: chrony syncs the stack clock from them.
+    # From: Issue #1683 | PR #2020
     - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
+    # What: cache size on disk and key zone memory.
+    # Why: nginx.conf and the dashboard read them.
+    # From: Issue #1683 | PR #2020
     - CACHE_MAX_GB=50
     - CACHE_MEM_MB=512
+    # What: default DHCP subnet, range, gateway and NTP.
+    # Why: setup.sh and the Kea render start from them.
+    # From: Issue #1683 | PR #2020
     - DHCP_SUBNET=10.0.0.0/24
     - DHCP_SUBNET_ID=1
     - DHCP_RANGE_START=10.0.0.128
@@ -672,9 +723,21 @@ runtime:
     # Why: a new install is usable before a login exists
     # From: Issue #1683 | PR #1985
     - ALLOW_INSECURE_UI=true
+    # What: run dir of the old supervisor.
+    # Why: no release reads it; compose gets it unused.
+    # From: Issue #1683 | PR #2020
     - SUPERVISE_RUN_DIR=/run/lancache
+    # What: shared secret dir of the images.
+    # Why: compose mounts it; the secrets live there.
+    # From: Issue #1683 | PR #2020
     - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+    # What: data dir of the ui.
+    # Why: compose mounts it; ui files sit below it.
+    # From: Issue #1683 | PR #2020
     - UI_DATA_DIR=/data
+    # What: old desired-state file of the ui.
+    # Why: no release has read it; SERVICES_STOPPED rules.
+    # From: Issue #1683 | PR #2020
     - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
     # What: dir and file of the stack .env in the containers
     # Why: one file for setup.sh, Compose and the ui
@@ -685,12 +748,27 @@ runtime:
     # Why: its values move into the stack .env, then it goes
     # From: Issue #1683 | PR #2017
     - UI_SETTINGS_FILE_RETIRED=@UI_DATA_DIR@/lancache-ui-settings.env
+    # What: older ui session secret and database files.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
-    - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
     - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
+    # What: path of the secondary registration token.
+    # Why: only CI reads it; the ui uses the secret dir.
+    # From: Issue #1683 | PR #2020
+    - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
+    # What: older ui log file and log page size.
+    # Why: no program reads them since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - UI_LOG_FILE=/var/log/lancache-ui/ui.log
-    - UI_LISTEN_PORT=8080
     - UI_LOGS_MAX_ENTRIES=200
+    # What: port the ui listens on.
+    # Why: compose and the ui image publish it.
+    # From: Issue #1683 | PR #2020
+    - UI_LISTEN_PORT=8080
+    # What: old ui session lifetime.
+    # Why: only setup.sh and compose read it since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - UI_SESSION_TTL_SECONDS=86400
     # What: wait for one secondary SOA answer, seconds.
     # Why: a silent secondary is a status, not a hang.
