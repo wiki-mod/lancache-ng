@@ -29,7 +29,7 @@ mod watchdog;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // What: the program name may name the role (busybox style).
+    // What: the program name may name the role (busybox).
     // Why: old callers run lancache-ui/-dns/... unchanged.
     // From: Issue #1683
     let exe = std::env::args().next().unwrap_or_default();
@@ -59,7 +59,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 // What: turn a role Result into a process exit code.
-// Why: three roles return Result, cachehamster its own code.
+// Why: roles return Result; cachehamster its own code.
 // From: Issue #1683
 fn code(r: Result<(), String>) -> std::process::ExitCode {
     match r {
