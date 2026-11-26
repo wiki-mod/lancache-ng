@@ -1362,8 +1362,13 @@ impl Cm {
             .as_str()
             .ok_or("CM list: no websocket server")?
             .to_string();
-        let (ws, _) = tokio_tungstenite::connect_async(format!("wss://{host}/cmsocket/"))
+        // What: connect within the SOT request limit.
+        // Why: a silent CM must not hang a lookup forever.
+        // From: Issue #871 | PR #2020
+        let url = format!("wss://{host}/cmsocket/");
+        let (ws, _) = tokio::time::timeout(cfg.limit, tokio_tungstenite::connect_async(url))
             .await
+            .map_err(|_| format!("CM {host}: connect timed out"))?
             .map_err(|e| format!("CM {host}: {e}"))?;
         let mut cm = Self {
             ws,
@@ -1421,11 +1426,13 @@ impl Cm {
         frame.extend_from_slice(&(header.0.len() as u32).to_le_bytes());
         frame.extend_from_slice(&header.0);
         frame.extend_from_slice(body);
-        self.ws
-            .send(tokio_tungstenite::tungstenite::Message::Binary(
-                frame.into(),
-            ))
+        let msg = tokio_tungstenite::tungstenite::Message::Binary(frame.into());
+        // What: send within the SOT request limit.
+        // Why: a full socket must not hang the job.
+        // From: Issue #871 | PR #2020
+        tokio::time::timeout(self.limit, self.ws.send(msg))
             .await
+            .map_err(|_| "CM send timed out".to_string())?
             .map_err(|e| format!("CM send: {e}"))
     }
 
