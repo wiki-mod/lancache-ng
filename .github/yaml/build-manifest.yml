@@ -816,6 +816,7 @@ runtime:
     - UI_ROUTE_APPLY_PLAN=/api/apply/plan
     - UI_ROUTE_APPLY=/api/apply
     - UI_ROUTE_APPLY_PREVIEW=/api/apply/preview
+    - UI_ROUTE_PROXY_PSL=/api/proxy/psl
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
     - UI_ROUTE_DNS_FLUSH=/api/dns/flush

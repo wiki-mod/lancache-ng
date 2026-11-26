@@ -10548,7 +10548,14 @@ end
             let v = match args.first().map(String::as_str) {
                 Some("status") => live(&s).await?,
                 Some("log") => crate::shared::access::summary(&s).await?,
-                _ => return Err("commands: status log".into()),
+                // What: how the proxy maps one host name.
+                // Why: root, cache match and cert per host.
+                // From: Issue #1683 | PR #2020
+                Some("psl") => match args.get(1) {
+                    Some(host) => crate::shared::render::psl_lookup(&s, host)?,
+                    None => return Err("usage: psl <host>".into()),
+                },
+                _ => return Err("commands: status log psl".into()),
             };
             println!("{v}");
             Ok(())
@@ -11362,6 +11369,35 @@ end
         // From: Issue #1683 | PR #2017
         fn cache_hosts(s: &Settings, domains: &str) -> Result<nginx_conf::Hosts, String> {
             nginx_conf::hosts(domains, &psl(s)?)
+        }
+
+        // What: root, ending, cache entry, cert of a host.
+        // Why: the same PSL and host map nginx gets.
+        // From: Issue #1683 | PR #2020
+        pub fn psl_lookup(s: &Settings, host: &str) -> Result<serde_json::Value, String> {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            let list = psl(s)?;
+            let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
+            // What: exact name first, then longest *. key.
+            // Why: nginx map hostnames picks the same way.
+            // From: Issue #1683 | PR #2020
+            let keys = hosts.keys();
+            let hit = keys.iter().find(|(k, _)| *k == host).or_else(|| {
+                keys.iter()
+                    .filter(|(k, _)| {
+                        k.strip_prefix("*.")
+                            .is_some_and(|b| host.ends_with(&format!(".{b}")))
+                    })
+                    .max_by_key(|(k, _)| k.len())
+            });
+            Ok(serde_json::json!({
+                "host": host,
+                "root": list.root(&host),
+                "public_ending": list.is_tld(crate::shared::dns::ending(&host)),
+                "cached": hit.is_some(),
+                "server_key": hit.map(|(k, _)| k),
+                "cert": hit.map(|(_, c)| c),
+            }))
         }
 
         // What: the Public Suffix List next to templates.
@@ -13724,6 +13760,20 @@ mod ui {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn apply_plan_api(State(app): Shared) -> Response {
         json_reply(render_plan(&app.settings()).await.map(Some), "")
+    }
+
+    // What: GET psl ?host=: how the proxy maps it.
+    // Why: REST read on the lookup of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn proxy_psl_api(
+        State(app): Shared,
+        axum::extract::Query(q): axum::extract::Query<Fields>,
+    ) -> Response {
+        let host = field(&q, "host");
+        json_reply(
+            crate::shared::render::psl_lookup(&app.settings(), &host).map(Some),
+            "",
+        )
     }
 
     // What: GET preview ?pick=owner-or-path, masked.
@@ -16104,6 +16154,7 @@ mod ui {
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_APPLY_PREVIEW")?, get(apply_preview_api))
+            .route(&p("UI_ROUTE_PROXY_PSL")?, get(proxy_psl_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
