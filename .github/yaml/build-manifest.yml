@@ -921,9 +921,12 @@ runtime:
     # Why: setup.sh reads them here; no path in its code.
     # From: Issue #1683 | PR #1858
     - SYSTEMD_UNIT_DIR=/etc/systemd/system
-    - OPENRC_INIT_DIR=/etc/init.d
     - OPENRC_LOG_DIR=/var/log
     - OPENRC_STOP_TIMEOUT_SECONDS=600
+    # What: OpenRC init.d dir on the host and in images.
+    # Why: setup.sh and ci.sh openrc-setup read one row.
+    # From: Issue #1683
+    - OPENRC_INIT_DIR=/etc/init.d
     # What: 1 = dns answers private PTR zones itself.
     # Why: private PTR answers are opt-in.
     # From: Issue #1918 | PR #1858
@@ -1539,7 +1542,6 @@ runtime:
     # From: Issue #1683
     - OPENRC_RC_CONF=/etc/rc.conf
     - OPENRC_RC_SETTINGS=rc_sys=docker rc_env_allow=* rc_controller_cgroups=NO rc_cgroup_mode=legacy
-    - OPENRC_INIT_DIR=/etc/init.d
     - OPENRC_RUNLEVEL_DIR=/etc/runlevels
     - OPENRC_DROP_RUNLEVELS=sysinit boot
     - OPENRC_DEFAULT_RUNLEVEL=default
