@@ -2510,23 +2510,6 @@ note_env_overrides() {
     print_warn "$env_file.local overrides ${keys:-no key} of $env_file; delete it to run with $env_file alone."
 }
 
-# What: builds -f args for base and operator override
-# Why: any -f disables auto-discovery; base is listed
-# From: Issue #1683 | PR #1858
-compose_file_args_for_install_dir() {
-    local install_dir="$1" override_file
-    local -a args=(-f "$install_dir/docker-compose.yml")
-
-    for override_file in "$install_dir/docker-compose.override.yml" "$install_dir/docker-compose.override.yaml"; do
-        if [[ -f "$override_file" ]]; then
-            args+=(-f "$override_file")
-            break
-        fi
-    done
-
-    printf '%s\n' "${args[@]}"
-}
-
 # What: volume exists (0), absent (1), lookup error (2)
 # Why: a lookup error must never read as "no data"
 # From: Issue #1683 | PR #1858
@@ -2539,26 +2522,31 @@ docker_volume_exists() {
     list_has "$1" "$names"
 }
 
-# What: fills an array with the compose -f arguments
-# Why: a failed list must stop, never shrink the stack
-# From: Issue #1683 | PR #1858
-compose_files_into() {
-    local -n _compose_files_ref="$1"
-    local files
-    files=$(compose_file_args_for_install_dir "$2") \
-        || die "Cannot build the compose file list for $2 (exit $?)."
-    mapfile -t _compose_files_ref <<< "$files"
-}
-
 # What: docker compose with one install's env and files
 # Why: every call must see the stack with all its overrides
 # From: Issue #1683 | PR #1858
 stack_compose() {
-    local install_dir="$1" env_file="$2"
-    local -a stack_files
+    local install_dir="$1" env_file="$2" rows state override
+    local -a files=(-f "$install_dir/docker-compose.yml") sot_env=() env_args=()
     shift 2
-    compose_files_into stack_files "$install_dir"
-    sot_compose "$install_dir" "$env_file" "${stack_files[@]}" "$@"
+    # What: the base file plus the first operator override
+    # Why: any -f disables compose's own file discovery
+    # From: Issue #1683 | PR #1858
+    for override in "$install_dir"/docker-compose.override.{yml,yaml}; do
+        [[ -f "$override" ]] || continue
+        files+=(-f "$override")
+        break
+    done
+    state=$(install_state_root "$install_dir" "$env_file") \
+        || die "Cannot resolve the state root of $install_dir (exit $?)."
+    rows=$(sot_compose_env "$env_file" "$state") || exit $?
+    mapfile -t sot_env <<< "$rows"
+    # What: <file>.local as the second env file
+    # Why: compose takes a key from the later file
+    # From: Issue #1683 | PR #2017
+    env_args=(--env-file "$env_file")
+    [[ ! -f "$env_file.local" ]] || env_args+=(--env-file "$env_file.local")
+    env "${sot_env[@]}" docker compose "${env_args[@]}" "${files[@]}" "$@"
 }
 
 # What: fills an array with the services of a stack
@@ -3654,7 +3642,7 @@ runtime_defaults_expand() {
 }
 
 # What: one key's value in a runtime.defaults row list
-# Why: sot_compose reads the list once, not once per key
+# Why: sot_compose_env reads the list once, not per key
 # From: Issue #1683 | PR #1912
 runtime_default_in() {
     awk -v p="$2=" 'index($0, p) == 1 && !f { print substr($0, length(p) + 1); f = 1 } END { exit !f }' <<< "$1" \
@@ -3693,25 +3681,6 @@ sot_compose_env() {
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
         printf '%s=%s\n' "$key" "$dir"
     done
-}
-
-# What: docker compose with the env file and SOT rows
-# Why: compose names no path, port or default of its own
-# From: Issue #1683 | PR #1912
-sot_compose() {
-    local install_dir="$1" env_file="$2" rows state
-    local -a sot_env=() env_args=()
-    shift 2
-    state=$(install_state_root "$install_dir" "$env_file") \
-        || die "Cannot resolve the state root of $install_dir (exit $?)."
-    rows=$(sot_compose_env "$env_file" "$state") || exit $?
-    mapfile -t sot_env <<< "$rows"
-    # What: <file>.local as the second env file
-    # Why: compose takes a key from the later file
-    # From: Issue #1683 | PR #2017
-    env_args=(--env-file "$env_file")
-    [[ ! -f "$env_file.local" ]] || env_args+=(--env-file "$env_file.local")
-    env "${sot_env[@]}" docker compose "${env_args[@]}" "$@"
 }
 
 # What: "svc KEY [TARGET]" rows moved out of config/prod
