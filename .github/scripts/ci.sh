@@ -1094,16 +1094,34 @@ _ci_workspace_src_dir() {
     esac
 }
 
+# What: dir|src of each bin crate a service builds.
+# Why: one owner of the SOT crates filter over Cargo.
+# From: Issue #1683 | PR #2020
+_ci_service_crate_dirs() {
+    local svc="$1" root="${2:-${CI_REPO_ROOT:-.}}" crates rows dir bin crate
+    crates="$(_ci_required_field "${svc}" crates list)" || return 2
+    crates=" ${crates//$'\n'/ } "
+    rows="$(_ci_workspace_rows "${root}")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        [ -n "${bin}" ] || continue
+        [[ "${crates}" == *" ${crate} "* ]] || continue
+        printf '%s|%s\n' "${dir}" "$(_ci_workspace_src_dir "${dir}" "${bin}")"
+    done <<< "${rows}"
+}
+
 # What: the repo paths a Rust service builds from.
 # Why: plan and the context-edge check read one list.
 # From: Issue #1683 | PR #1912
 ci_service_context_paths() {
-    local svc="$1" root="${2:-${CI_REPO_ROOT:-.}}" own crates manifest lock rows dir bin crate type
+    local svc="$1" root="${2:-${CI_REPO_ROOT:-.}}" own manifest lock rows dirs dir bin crate src type
+    local -A crate_src=()
     type="$(_ci_required_field "${svc}" build_type)" || return 2
     [ "${type}" = rust ] || return 0
     own="$(_ci_required_field "${svc}" context)" || return 2
-    crates="$(_ci_required_field "${svc}" crates list)" || return 2
-    crates=" ${crates//$'\n'/ } "
+    dirs="$(_ci_service_crate_dirs "${svc}" "${root}")" || return 2
+    while IFS='|' read -r dir src; do
+        [ -z "${dir}" ] || crate_src["${dir}"]="${src}"
+    done <<< "${dirs}"
     manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
     lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
     rows="$(_ci_workspace_rows "${root}")" || return 2
@@ -1115,9 +1133,7 @@ ci_service_context_paths() {
             continue
         fi
         printf '%s/%s\n' "${dir}" "${manifest}"
-        if [[ "${crates}" == *" ${crate} "* ]]; then
-            _ci_workspace_src_dir "${dir}" "${bin}"
-        fi
+        [ -z "${crate_src["${dir}"]+set}" ] || printf '%s\n' "${crate_src["${dir}"]}"
     done <<< "${rows}"
 }
 
@@ -3932,16 +3948,15 @@ _ci_cargo_lock() {
 # Why: 64.4: only what the service reaches is input.
 # From: Issue #1683 | PR #1912
 _ci_rust_content() {
-    local service="$1" ref="${2:-}" mode="${3:-id}" crates rows lock dir bin crate src listing line items
+    local service="$1" ref="${2:-}" mode="${3:-id}" crates rows dirs lock dir bin crate src listing line items
     local roots="" pkgs lib sel h refs lockf
     crates="$(_ci_required_field "${service}" crates list)" || return 2
     crates=" ${crates//$'\n'/ } "
     lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
     rows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
-    while IFS='|' read -r dir bin crate; do
-        [ -n "${bin}" ] || continue
-        [[ "${crates}" == *" ${crate} "* ]] || continue
-        src="$(_ci_workspace_src_dir "${dir}" "${bin}")"
+    dirs="$(_ci_service_crate_dirs "${service}")" || return 2
+    while IFS='|' read -r dir src; do
+        [ -n "${dir}" ] || continue
         listing="$(_ci_tracked_listing "${src}" "${ref}")" || return 2
         while IFS= read -r line; do
             [ -n "${line}" ] || continue
@@ -3965,7 +3980,7 @@ _ci_rust_content() {
             h="$(_ci_sha256_hex <<< "${items}")" || return 2
             printf '%s\t%s\n' "${line%%$'\t'*}" "${h}"
         done <<< "${listing}"
-    done <<< "${rows}"
+    done <<< "${dirs}"
     # What: every ref reads this job's generated lock.
     # Why: a resolved input, like a base image digest.
     # From: Issue #1683 | PR #1858
@@ -4147,7 +4162,7 @@ _ci_identity_content() {
 # From: Issue #1683 | PR #1858
 _ci_context_build_rows() {
     local service="$1" ref="$2" rows="$3" df text srcs src line path keep type
-    local crates manifest wrows dir bin crate
+    local manifest wrows dir
     df="$(_ci_service_path "${service}" Dockerfile "")" || return 2
     text="$(_ci_identity_git "${df}" "${ref}" show "${ref}:${df}")" || return 2
     srcs="$(_ci_dockerfile_copy_sources "${text}")" || return 2
@@ -4156,14 +4171,11 @@ _ci_context_build_rows() {
     # From: Issue #1683 | PR #1858
     type="$(_ci_required_field "${service}" build_type)" || return 2
     if [ "${type}" = rust ]; then
-        crates="$(_ci_required_field "${service}" crates list)" || return 2
-        crates=" ${crates//$'\n'/ } "
         manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
-        wrows="$(_ci_workspace_rows "${CI_REPO_ROOT:-.}")" || return 2
-        while IFS='|' read -r dir bin crate; do
-            [ -n "${bin}" ] || continue
-            [[ "${crates}" == *" ${crate} "* ]] || continue
-            srcs+=$'\n'"${dir}/${manifest}"$'\n'"$(_ci_workspace_src_dir "${dir}" "${bin}")"
+        wrows="$(_ci_service_crate_dirs "${service}")" || return 2
+        while IFS='|' read -r dir src; do
+            [ -n "${dir}" ] || continue
+            srcs+=$'\n'"${dir}/${manifest}"$'\n'"${src}"
         done <<< "${wrows}"
     fi
     while IFS= read -r line; do
@@ -4246,9 +4258,12 @@ _ci_dockerfile_copy_sources() {
 # Why: lock, library dirs, other crates' manifests.
 # From: Issue #1683 | PR #1912
 _ci_rust_skip_paths() {
-    local crates rows manifest dir bin crate lock out
-    crates="$(_ci_required_field "$1" crates list)" || return 2
-    crates=" ${crates//$'\n'/ } "
+    local rows dirs manifest dir bin crate src lock out
+    local -A crate_own=()
+    dirs="$(_ci_service_crate_dirs "$1")" || return 2
+    while IFS='|' read -r dir src; do
+        [ -z "${dir}" ] || crate_own["${dir}"]=1
+    done <<< "${dirs}"
     manifest="$(_ci_variable CI_CARGO_MANIFEST)" || return 2
     lock="$(_ci_variable CI_CARGO_LOCK)" || return 2
     out=" ${lock} "
@@ -4256,7 +4271,7 @@ _ci_rust_skip_paths() {
     while IFS='|' read -r dir bin crate; do
         if [ -z "${bin}" ]; then
             out+="${dir} "
-        elif [[ "${crates}" != *" ${crate} "* ]]; then
+        elif [ -z "${crate_own["${dir}"]+set}" ]; then
             out+="${dir}/${manifest} "
         fi
     done <<< "${rows}"
@@ -19386,38 +19401,6 @@ _ci_installer() {
         return 2
     fi
     printf '%s\n' "${p}"
-}
-
-# What: the one sed -n match in a file; rc 1 if not one
-# Why: one reader for values a product file owns
-# From: Issue #1683 | PR #1858
-_ci_file_value() {
-    local file="$1" expr="$2" out
-    out="$(_ci_capture 0 sed -nE "${expr}" "${file}")" || return 2
-    printf '%s\n' "${out}"
-    [[ -n "${out}" && "${out}" != *$'\n'* ]]
-}
-
-# What: a proxy path or port the supervisor renders
-# Why: main.rs owns them; the SOT owns NGINX_DIR
-# From: Issue #1683 | PR #1912
-_ci_proxy_constant() {
-    local name="$1" root="${2-${CI_REPO_ROOT:-.}}" src raw re='^("([^"$]+)"|([0-9]+))$'
-    src="$(_ci_service_path services src/main.rs "${root}")" || return 2
-    # What: Rust const item; other value forms fail closed.
-    # Why: visibility and spacing are valid Rust grammar.
-    # From: Issue #1683 | PR #1912
-    raw="$(_ci_file_value "${src}" "s/^[[:space:]]*(pub(\\([a-z]+\\))?[[:space:]]+)?const[[:space:]]+${name}[[:space:]]*:[[:space:]]*(&('static[[:space:]]+)?str|u16)[[:space:]]*=[[:space:]]*(\"[^\"\\\\]+\"|[0-9]+)[[:space:]]*;([[:space:]]*\\/\\/.*)?\$/\\5/p")" \
-        || [ "$?" -eq 1 ] || return 2
-    if [[ ! "${raw}" =~ ${re} ]]; then
-        ci_error "[CI-ERROR-CORE-0129]" "path=\"${src}\" name=\"${name}\" reason=\"need exactly one literal const\"" "${raw}"
-        return 2
-    fi
-    if [ -n "${BASH_REMATCH[3]}" ]; then
-        printf '%s\n' "${BASH_REMATCH[3]}"
-        return 0
-    fi
-    _ci_nginx_path "${BASH_REMATCH[2]}"
 }
 
 # What: a relative path joined under the SOT NGINX_DIR.

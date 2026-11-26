@@ -1721,7 +1721,7 @@ _ci_compose_image_render() {
 # From: Issue #1683
 _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local prod dep crates rows dir bin crate hit
+    local prod dep rows dir src hit
     local -a srcs=()
     prod="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${prod#"${repo_root}/"}"
@@ -1730,16 +1730,12 @@ _ci_check_image_channel_resolution() {
     # What: the source dirs of the ui crates, from Cargo.
     # Why: Cargo.toml owns the layout; no file name here.
     # From: Issue #1683 | PR #2020
-    crates="$(_ci_required_field ui crates list)" || return 2
-    crates=" ${crates//$'\n'/ } "
-    rows="$(_ci_workspace_rows "${repo_root}")" || return 2
-    while IFS='|' read -r dir bin crate; do
-        if [ -n "${bin}" ] && [[ "${crates}" == *" ${crate} "* ]]; then
-            srcs+=("${repo_root}/$(_ci_workspace_src_dir "${dir}" "${bin}")")
-        fi
+    rows="$(_ci_service_crate_dirs ui "${repo_root}")" || return 2
+    while IFS='|' read -r dir src; do
+        [ -z "${dir}" ] || srcs+=("${repo_root}/${src}")
     done <<< "${rows}"
     if [ "${#srcs[@]}" -eq 0 ]; then
-        viol+=("no Rust source dir for the ui crates:${crates% }")
+        viol+=("no Rust source dir for the ui crates")
     else
         for f in \
             '"image_registry": process_env("LANCACHE_IMAGE_REGISTRY")' \
