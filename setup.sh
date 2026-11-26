@@ -5927,7 +5927,17 @@ cmd_restore() (
                 # What: restarts only if it was running
                 # Why: a stopped stack must stay stopped
                 # From: Issue #1683 | PR #1858
-                [[ "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
+                if [[ "$stack_was_running" = "1" ]]; then
+                    compose_stack_start "$install_dir"
+                    # What: the restart must become healthy
+                    # Why: rollback waits itself, later
+                    # From: Issue #1683 | PR #2017
+                    if [[ "${RESTORE_SKIP_WAIT:-0}" != 1 ]] \
+                        && ! wait_for_whole_stack "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")"; then
+                        print_error "Files restored, but the restarted stack is not healthy; see: $SCRIPT_DIR/setup.sh debug $install_dir"
+                        status=1
+                    fi
+                fi
             else
                 # What: failure keeps the stack stopped
                 # Why: no start on a partial restore
@@ -6339,9 +6349,11 @@ Usage: ./setup.sh restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [inst
 Restores a setup-script backup. Files from the archived install directory are
 remapped to [install-dir] when it differs from the original path. After
 restoring, runs the same .env convergence and Compose validation as
-setup.sh update, then starts the stack. If convergence or validation fails,
-the stack is left stopped instead of starting on an unconverged config; fix
-the reported problem and run setup.sh update.
+setup.sh update, then starts the stack again if it was running and waits
+until it is healthy; a stack that does not become healthy ends the restore
+with an error. If convergence or validation fails, the stack is left
+stopped instead of starting on an unconverged config; fix the reported
+problem and run setup.sh update.
 
 Same-host limitation: the Docker Compose project name is fixed
 ("lancache-ng") for every install, so two installs on the same host share the
@@ -6839,7 +6851,7 @@ rollback_stack_update() {
         print_warn "Returned $LANCACHE_UPDATE_REPO to $LANCACHE_UPDATE_OLD_SHA"
     fi
     print_warn "Rolling back to pre-update backup: $latest_backup"
-    if cmd_restore "$latest_backup" "$install_dir"; then
+    if RESTORE_SKIP_WAIT=1 cmd_restore "$latest_backup" "$install_dir"; then
         # What: the restored .env names the old channel
         # Why: the backup holds the asked one, not the run
         # From: Issue #1683 | PR #1858
