@@ -2295,6 +2295,18 @@ env_key_fill() {
     set_env_assignment "$key" "$value" "$env_file"
 }
 
+# What: renamed .env keys: add = new beside old, move
+# Why: add keeps a rollback's old compose working
+# From: Issue #1683 | PR #1912
+env_renamed_keys() {
+    local env_file="$1" mode="$2" pair
+    for pair in IP_HTTP:IP_STANDARD IP_HTTPS:IP_SSL HTTPS_ENABLED:SSL_ENABLED \
+        PDNS_DIR:PDNS_STANDARD_DIR; do
+        env_key_fill "${pair%%:*}" "$env_file" absent "" "${pair#*:}"
+        [[ "$mode" = add ]] || remove_env_key "${pair#*:}" "$env_file"
+    done
+}
+
 # What: sets strict proxy mode to default if no allowlist
 # Why: no allowlist means no strict policy to preserve
 # From: Issue #563 | PR #572
@@ -5074,13 +5086,7 @@ migrate_env_for_update() (
 
     print_step "Checking runtime .env"
 
-    # What: moves IP_STANDARD/IP_SSL to IP_HTTP/IP_HTTPS.
-    # Why: older installs still carry the old key names.
-    # From: Issue #1683 | PR #1912
-    env_key_fill IP_HTTP "$env_file" absent "" IP_STANDARD
-    env_key_fill IP_HTTPS "$env_file" absent "" IP_SSL
-    remove_env_key IP_STANDARD "$env_file"
-    remove_env_key IP_SSL "$env_file"
+    env_renamed_keys "$env_file" move
     # What: drops every NATS and Netdata key on update.
     # Why: NATS and Netdata are gone from the stack.
     # From: Issue #1683 | PR #1980
@@ -5164,11 +5170,10 @@ migrate_env_for_update() (
     set_env_key LANCACHE_IMAGE_TAG "$lancache_image_tag" "$env_file"
     [[ "$keep_image_refs" = "1" ]] || write_lancache_image_refs "$env_file" "$lancache_image_refs"
     adopt_moved_config_prod_keys "$install_dir" "$env_file" copy
-    # What: moves SSL_ENABLED to HTTPS_ENABLED.
-    # Why: old installs and config/prod keep the old key.
+    # What: config/prod may bring back SSL_ENABLED
+    # Why: the adopted old name moves like any other
     # From: Issue #1683 | PR #1912
-    env_key_fill HTTPS_ENABLED "$env_file" absent "" SSL_ENABLED
-    remove_env_key SSL_ENABLED "$env_file"
+    env_renamed_keys "$env_file" move
 
     # What: validates an operator TTL; default is the SOT
     # Why: .env never repeats a runtime.defaults value
@@ -5203,11 +5208,9 @@ migrate_env_for_update() (
     remove_env_key CACHE_DIR_STANDARD "$env_file"
     remove_env_key CACHE_DIR_SSL "$env_file"
 
-    # What: moves PDNS_STANDARD_DIR to PDNS_DIR, data stays
+    # What: PDNS_DIR was PDNS_STANDARD_DIR; data stays
     # Why: moving the key must not move the zone data.
     # From: Issue #1683 | PR #1912
-    env_key_fill PDNS_DIR "$env_file" absent "" PDNS_STANDARD_DIR
-    remove_env_key PDNS_STANDARD_DIR "$env_file"
     if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$state_dir/pdns" ]]; then
         set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
     fi
@@ -7464,6 +7467,10 @@ perform_stack_update_flow() {
     cd "$install_dir"
     _UPDATE_ENV_FILE=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     _UPDATE_STACK_DIR="$install_dir"
+    # What: new key names join before the first compose call
+    # Why: after git pull the new compose needs them at once
+    # From: Issue #1683 | PR #1912
+    env_renamed_keys "$_UPDATE_ENV_FILE" add
     UPDATE_CONVERGENCE_COMPLETED=0
     if [[ "${LANCACHE_UPDATE_RESUMED:-0}" = 1 ]]; then
         update_resume_handoff
