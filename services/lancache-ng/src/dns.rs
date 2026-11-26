@@ -131,10 +131,37 @@ async fn round(s: &Settings, done: &mut Done) -> Result<(), String> {
     Ok(())
 }
 
+// What: dns role entry: the loop or one command.
+// Why: image rows call it bare; the CLI checks a round.
+// From: Issue #1683 | PR #2020
+pub async fn run(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        None | Some("daemon") => follow().await,
+        // What: one follow round, then exit with it.
+        // Why: the CLI check runs the daemon loop code.
+        // From: Issue #1683 | PR #2020
+        Some("follow-once") => {
+            let s = Settings::from_process()?;
+            if Role::from_settings(&s)? != Role::Secondary {
+                return Err("follow-once: this host is no secondary".into());
+            }
+            round(&s, &mut Done::default()).await?;
+            println!("{}", json!({"round": "ok"}));
+            Ok(())
+        }
+        _ => Err(format!("commands: {}", COMMANDS.join(" "))),
+    }
+}
+
+// What: every command of the dns role.
+// Why: the help names the same set as the match.
+// From: Issue #1683 | PR #2020
+const COMMANDS: [&str; 2] = ["daemon", "follow-once"];
+
 // What: idle on a primary, else rounds forever.
 // Why: OpenRC keeps the process; the primary's ui renders.
 // From: Issue #1683
-pub async fn run(_args: &[String]) -> Result<(), String> {
+async fn follow() -> Result<(), String> {
     let mut done = Done::default();
     loop {
         let s = Settings::from_process()?;
