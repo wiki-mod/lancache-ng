@@ -2583,6 +2583,17 @@ mod config {
         env(key).filter(|v| !v.is_empty())
     }
 
+    // What: where a setting's value came from.
+    // Why: CLI and REST show why a value is set.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Origin {
+        File,
+        Env,
+        Default,
+    }
+
     // What: file, else env, else default; fills @KEY@.
     // Why: KEY= in file means default; env is a stale copy.
     // From: Issue #1683 | PR #2017
@@ -2592,18 +2603,20 @@ mod config {
         env: &dyn Fn(&str) -> Option<String>,
         defaults: &BTreeMap<&str, &str>,
         depth: u8,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<(String, Origin)>, String> {
         match file.get(key) {
-            Some(v) if !v.is_empty() => return Ok(Some(v.clone())),
+            Some(v) if !v.is_empty() => return Ok(Some((v.clone(), Origin::File))),
             Some(_) => {}
             None => {
                 if let Some(v) = env_set(env, key) {
-                    return Ok(Some(v));
+                    return Ok(Some((v, Origin::Env)));
                 }
             }
         }
         match defaults.get(key).filter(|v| !v.is_empty()) {
-            Some(v) => expand_default(v, file, env, defaults, depth).map(Some),
+            Some(v) => {
+                expand_default(v, file, env, defaults, depth).map(|v| Some((v, Origin::Default)))
+            }
             None => Ok(None),
         }
     }
@@ -2630,9 +2643,10 @@ mod config {
             let len = after.bytes().take_while(key_char).count();
             if len > 0 && after[len..].starts_with('@') {
                 let name = &after[..len];
-                let got = effective(name, file, env, defaults, depth + 1)?.ok_or_else(|| {
-                    format!("default {value:?} names @{name}@, which has no value")
-                })?;
+                let (got, _) =
+                    effective(name, file, env, defaults, depth + 1)?.ok_or_else(|| {
+                        format!("default {value:?} names @{name}@, which has no value")
+                    })?;
                 out.push_str(&got);
                 rest = &after[len + 1..];
             } else {
@@ -2813,6 +2827,7 @@ mod config {
     pub struct Settings {
         specs: BTreeMap<String, Spec>,
         values: BTreeMap<String, Value>,
+        origins: BTreeMap<String, Origin>,
         pub warnings: Vec<String>,
     }
 
@@ -2867,10 +2882,11 @@ mod config {
                     }
                 };
                 match raw {
-                    Some(raw) => match spec.check(&raw) {
+                    Some((raw, origin)) => match spec.check(&raw) {
                         Ok((value, note)) => {
                             set.warnings.extend(note);
                             set.values.insert(spec.key.clone(), value);
+                            set.origins.insert(spec.key.clone(), origin);
                         }
                         Err(e) => errors.push(e),
                     },
@@ -2886,10 +2902,10 @@ mod config {
                 if set.specs.contains_key(*key) {
                     continue;
                 }
-                let raw = match env_set(env, key) {
-                    Some(raw) => raw,
+                let (raw, origin) = match env_set(env, key) {
+                    Some(raw) => (raw, Origin::Env),
                     None => match expand_default(value, &file, env, &defaults, 0) {
-                        Ok(raw) => raw,
+                        Ok(raw) => (raw, Origin::Default),
                         Err(e) => {
                             errors.push(e);
                             continue;
@@ -2898,6 +2914,7 @@ mod config {
                 };
                 if !raw.is_empty() {
                     set.values.insert(key.to_string(), Value::Text(raw));
+                    set.origins.insert(key.to_string(), origin);
                 }
             }
             if errors.is_empty() {
@@ -2956,6 +2973,45 @@ mod config {
         // From: Issue #1683 | PR #2020
         pub fn view_json(&self) -> serde_json::Value {
             serde_json::json!({"values": self.view(), "warnings": self.warnings})
+        }
+
+        // What: schema row, masked value, origin per key.
+        // Why: REST and CLI show what a setting is and why.
+        // From: Issue #1683 | PR #2020
+        pub fn describe(&self, only: Option<&str>) -> Result<serde_json::Value, String> {
+            let view = self.view();
+            let mut out = serde_json::Map::new();
+            for sp in self.specs().filter(|sp| only.is_none_or(|k| k == sp.key)) {
+                let (kind, extra) = match &sp.kind {
+                    Kind::Uint { min, max, clamp } => (
+                        "uint",
+                        serde_json::json!({"min": min, "max": max, "clamp": clamp}),
+                    ),
+                    Kind::Choice(c) => ("choice", serde_json::json!({"choices": c})),
+                    Kind::Text => ("text", serde_json::Value::Null),
+                    Kind::Bool => ("bool", serde_json::Value::Null),
+                    Kind::List => ("list", serde_json::Value::Null),
+                    Kind::Path => ("path", serde_json::Value::Null),
+                    Kind::Secret => ("secret", serde_json::Value::Null),
+                };
+                out.insert(
+                    sp.key.clone(),
+                    serde_json::json!({
+                        "kind": kind,
+                        "limits": extra,
+                        "required": sp.required,
+                        "effect": format!("{:?}", sp.effect).to_lowercase(),
+                        "owner": sp.owner,
+                        "secret": sp.is_secret(),
+                        "value": view.get(&sp.key),
+                        "origin": self.origins.get(&sp.key),
+                    }),
+                );
+            }
+            match only {
+                Some(k) if out.is_empty() => Err(format!("{k}: no such setting")),
+                _ => Ok(serde_json::Value::Object(out)),
+            }
         }
 
         // What: value as text; missing is an error.
@@ -3140,6 +3196,11 @@ mod config {
         let s = Settings::from_process()?;
         match args {
             [cmd] if cmd == "show" => println!("{}", s.view_json()),
+            // What: schema row and origin of every setting.
+            // Why: type, limits and why a value is set.
+            // From: Issue #1683 | PR #2020
+            [cmd] if cmd == "schema" => println!("{}", s.describe(None)?),
+            [cmd, key] if cmd == "schema" => println!("{}", s.describe(Some(key))?),
             [cmd, key] if cmd == "show" => match s.view().get(key) {
                 Some(v) => println!("{v}"),
                 None => return Err(format!("{key}: no such setting or a secret")),
@@ -3160,7 +3221,12 @@ mod config {
                 let v = crate::shared::http::ui_socket(&s, &route, body).await?;
                 println!("{v}");
             }
-            _ => return Err("usage: config show [KEY] | config set KEY=VALUE ...".into()),
+            _ => {
+                return Err(
+                    "usage: config show [KEY] | config schema [KEY] | config set KEY=VALUE ..."
+                        .into(),
+                );
+            }
         }
         Ok(())
     }
@@ -13175,6 +13241,13 @@ mod ui {
         adopt(app, &old, new).await
     }
 
+    // What: GET schema rows, masked values and origins.
+    // Why: REST read on the describer of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn settings_schema_api(State(app): Shared) -> Response {
+        json_reply(app.settings().describe(None).map(Some), "")
+    }
+
     // What: GET the cache domain rows and the list.
     // Why: REST read on the reader of page and CLI.
     // From: Issue #1683 | PR #2020
@@ -15527,6 +15600,7 @@ mod ui {
             .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
             .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
             .route(&p("UI_ROUTE_CDN")?, get(cdn_api))
+            .route(&p("UI_ROUTE_SETTINGS_SCHEMA")?, get(settings_schema_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
