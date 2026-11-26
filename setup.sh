@@ -3586,6 +3586,13 @@ ensure_default_install_dir() {
 # From: Issue #1683 | PR #1912
 runtime_defaults_list() {
     local rows
+    # What: rows parsed once per loaded SOT text
+    # Why: a parse costs ~20 ms; a run asks dozens of times
+    # From: Issue #1683 | PR #2017
+    if [[ -n "${RUNTIME_DEFAULTS_ROWS:-}" ]]; then
+        printf '%s\n' "$RUNTIME_DEFAULTS_ROWS"
+        return 0
+    fi
     rows=$(lancache_sot_list defaults runtime) || exit $?
     runtime_defaults_expand <<< "$rows"
 }
@@ -9823,6 +9830,8 @@ LANCACHE_SOT=.github/yaml/build-manifest.yml
 # From: Issue #1683 | PR #2017
 load_script_dir_sot() {
     LANCACHE_SOT_TEXT=$(lancache_repo_file_text "$LANCACHE_SOT") || exit $?
+    RUNTIME_DEFAULTS_ROWS=""
+    RUNTIME_DEFAULTS_ROWS=$(runtime_defaults_list) || exit $?
     PROD_COMPOSE_REL=$(lancache_sot_value compose_file runtime) || exit $?
     PROD_STACK_REL="${PROD_COMPOSE_REL%/*}"
     PROD_COMPOSE="$SCRIPT_DIR/$PROD_COMPOSE_REL"
