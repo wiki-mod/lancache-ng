@@ -262,7 +262,13 @@ ask() {
 ask_checked() {
     local -n _ask_checked_ref="$1"
     local prompt="$2" default="$3" check="$4" error="$5" optional="${6:-0}" normalize="${7:-}" retry_default="$3"
+    local reason reason_file
+    shift $(( $# < 7 ? $# : 7 ))
     [[ "$optional" != 1 ]] || retry_default=""
+    # What: a failed check may print its reason to stdout
+    # Why: the error names it; the check runs in this shell
+    # From: Issue #1683 | PR #2017
+    reason_file=$(mktemp) || die "Cannot create a temporary file (exit $?)."
     ask "$prompt" "$default"
     while true; do
         _ask_checked_ref="$REPLY"
@@ -271,18 +277,43 @@ ask_checked() {
         # From: Issue #1683 | PR #2017
         [[ -z "$normalize" ]] || _ask_checked_ref=$("$normalize" "$REPLY") || exit $?
         [[ "$optional" = 1 && -z "$_ask_checked_ref" ]] && break
-        "$check" "$_ask_checked_ref" && break
-        print_error "${error}: ${_ask_checked_ref}"
+        "$check" "$_ask_checked_ref" "$@" > "$reason_file" && break
+        reason=$(<"$reason_file")
+        print_error "${error}: ${reason:-$_ask_checked_ref}"
         ask "$prompt" "$retry_default"
     done
+    rm -f -- "$reason_file" || print_error "Failed to remove $reason_file (exit $?)."
+}
+
+# What: false and the first problem of a list answer
+# Why: the list check of ask_list, run by ask_checked
+# From: Issue #1683
+_list_answer_ok() {
+    local text="$1" label="$2" none_word="$3" optional="$4" check="$5" entry key problem=""
+    local -a items=() seen=()
+    shift 5
+    [[ -n "$none_word" && "${text,,}" = "$none_word" ]] || list_items_into items "$text"
+    (( ${#items[@]} > 0 || optional == 1 )) || problem="enter at least one ${label}"
+    for entry in "${items[@]}"; do
+        [[ -z "$problem" ]] || break
+        problem=$("$check" "$entry" "$@") || exit $?
+        # What: the same value twice is refused
+        # Why: a list names each server or domain once
+        # From: Issue #1683
+        key=$(dns_name_normalized "$entry")
+        [[ -n "$problem" ]] || ! list_has "$key" "${seen[@]}" || problem="'${entry}' is listed twice"
+        seen+=("$key")
+    done
+    [[ -z "$problem" ]] && return 0
+    printf '%s\n' "$problem"
+    return 1
 }
 
 # What: asks a list, checks each entry, asks again on fault
-# Why: one owner of the list ask; ask_checked owns one value
+# Why: the list form of ask_checked; items into array $1
 # From: Issue #1683
 ask_list() {
-    local optional=0 none_word="" entry key bad problem
-    local -a seen=()
+    local optional=0 none_word="" answer
     while [[ "${1:-}" = --* ]]; do
         case "$1" in
             --optional) optional=1; shift ;;
@@ -293,25 +324,10 @@ ask_list() {
     local -n _ask_list_ref="$1"
     local prompt="$2" default="$3" label="$4" check="$5"
     shift 5
-    while true; do
-        ask "$prompt" "$default"
-        _ask_list_ref=()
-        [[ -n "$none_word" && "${REPLY,,}" = "$none_word" ]] || list_items_into _ask_list_ref "$REPLY"
-        bad="" seen=()
-        (( ${#_ask_list_ref[@]} > 0 || optional == 1 )) || bad="enter at least one ${label}"
-        for entry in "${_ask_list_ref[@]}"; do
-            problem=$("$check" "$entry" "$@") || exit $?
-            # What: the same value twice is refused
-            # Why: a list names each server or domain once
-            # From: Issue #1683
-            key=$(dns_name_normalized "$entry")
-            [[ -n "$problem" ]] || ! list_has "$key" "${seen[@]}" || problem="'${entry}' is listed twice"
-            seen+=("$key")
-            [[ -z "$problem" ]] || bad="$problem"
-        done
-        [[ -n "$bad" ]] || return 0
-        print_error "Invalid ${label}: $bad"
-    done
+    ask_checked answer "$prompt" "$default" _list_answer_ok "Invalid ${label}" 0 "" \
+        "$label" "$none_word" "$optional" "$check" "$@"
+    _ask_list_ref=()
+    [[ -n "$none_word" && "${answer,,}" = "$none_word" ]] || list_items_into _ask_list_ref "$answer"
 }
 
 # What: a SOT 0/1 or true/false default as Y or N
@@ -1079,14 +1095,26 @@ confirm() {
     # What: ask again until the answer is y, yes, n or no.
     # Why: a typo must not count as no and skip the step.
     # From: Issue #1683
-    while true; do
-        ask "$prompt $hint" "$default"
-        case "${REPLY,,}" in
-            y|yes) return 0 ;;
-            n|no) return 1 ;;
-        esac
-        print_warn "Answer y or n (got '$REPLY')."
-    done
+    local answer
+    ask_checked answer "$prompt $hint" "$default" is_yes_no "Answer y or n" 0 lower_case
+    [[ "$answer" = y || "$answer" = yes ]]
+}
+
+# What: true for y, yes, n or no (lower case)
+# Why: the check of confirm, run by ask_checked
+# From: Issue #1683
+is_yes_no() {
+    case "$1" in
+        y|yes|n|no) return 0 ;;
+    esac
+    return 1
+}
+
+# What: $1 in lower case
+# Why: the normalizer ask_checked runs on a free answer
+# From: Issue #1683 | PR #2017
+lower_case() {
+    printf '%s\n' "${1,,}"
 }
 
 # What: sets $1 to 1 when a yes/no question gets a yes
@@ -1117,7 +1145,7 @@ confirm_experimental_channel() {
 # Why: one channel choice; role install adds the second yes
 # From: Issue #1683 | PR #2017
 choose_lancache_channel() {
-    local default="$1" role="$2" install_channel selectable retired channel_hint offered current reason
+    local default="$1" role="$2" install_channel selectable channel_hint offered current
     install_channel=$(lancache_sot_value install_channel release) || exit $?
     selectable=$(lancache_selectable_channels) || exit $?
     if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
@@ -1144,7 +1172,6 @@ choose_lancache_channel() {
     fi
     list_has "$default" "$selectable" \
         || die "The default channel '$default' is not a channel setup.sh offers."
-    retired=$(lancache_release_rows retired) || exit $?
     while IFS= read -r offered; do
         if [[ "$offered" = "$install_channel" ]]; then
             printf "  %s — tested releases; the recommended default.\n" "$offered"
@@ -1155,28 +1182,38 @@ choose_lancache_channel() {
     printf "\n"
     channel_hint=$(lines_joined / "$selectable")
     while true; do
-        ask "Release channel [$channel_hint]" "$default"
-        if list_has "${REPLY,,}" "$selectable"; then
-            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
-            # What: install: another channel, a second yes
-            # Why: untested builds never install unwarned
-            # From: Issue #1683 | PR #1858
-            if [[ "$role" = install && "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
-                confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" || continue
-            fi
-            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
-            return 0
-        fi
-        # What: a retired name shows why it went
-        # Why: the release doc asks for a clear answer
+        ask_checked LANCACHE_IMAGE_CHANNEL "Release channel [$channel_hint]" "$default" \
+            is_offered_channel "Not a channel" 0 lower_case
+        # What: install: another channel, a second yes
+        # Why: untested builds never install unwarned
         # From: Issue #1683 | PR #1858
-        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
-        if [[ -n "$reason" ]]; then
-            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
-        else
-            print_error "Please answer one of: $channel_hint."
+        if [[ "$role" = install && "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
+            confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" || continue
         fi
+        print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
+        return 0
     done
+}
+
+# What: true for an offered channel; else prints the reason
+# Why: the check of the channel prompt, run by ask_checked
+# From: Issue #1683 | PR #1858
+is_offered_channel() {
+    local selectable reason
+    selectable=$(lancache_selectable_channels) || exit $?
+    list_has "$1" "$selectable" && return 0
+    reason=$(retired_channel_reason "$1") || exit $?
+    printf '%sanswer one of: %s\n' "${reason:+"'$1' is no longer supported ($reason); "}" "$(lines_joined / "$selectable")"
+    return 1
+}
+
+# What: why channel $1 was retired; empty if it never was
+# Why: a retired name shows why it went (release doc)
+# From: Issue #1683 | PR #1858
+retired_channel_reason() {
+    local retired
+    retired=$(lancache_release_rows retired) || exit $?
+    awk -v c="$1" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired"
 }
 
 # What: runs a broadcast DHCP probe before Kea activation
@@ -4503,14 +4540,13 @@ lancache_channel_words() {
 # Why: retired names stop with their reason; no fallback
 # From: Issue #1683 | PR #1858
 validate_lancache_image_channel() {
-    local channel="$1" accepted pinned retired reason valid
+    local channel="$1" accepted pinned reason valid
     accepted=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     accepted=$(printf '%s\n%s\n' "$accepted" "$pinned")
     [[ -z "$channel" ]] || ! list_has "$channel" "$accepted" || return 0
     valid=$(lines_joined ' ' "$accepted")
-    retired=$(lancache_release_rows retired) || exit $?
-    reason=$(awk -v c="$channel" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
+    reason=$(retired_channel_reason "$channel") || exit $?
     [[ -z "$reason" ]] \
         || die "LANCACHE_IMAGE_CHANNEL=$channel is no longer supported ($reason). Set LANCACHE_IMAGE_CHANNEL to one of: $valid; then re-run setup.sh."
     die "LANCACHE_IMAGE_CHANNEL must be one of: $valid."
