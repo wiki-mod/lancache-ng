@@ -5612,7 +5612,15 @@ compose_project_name() {
             || die "Failed to read $compose_dir/docker-compose.yml (exit $?)."
         name="${compose_name_lines%%$'\n'*}"
     fi
-    name="${name:-$(basename "$compose_dir")}"
+    if [[ -z "$name" ]]; then
+        # What: the dir name as compose normalizes it
+        # Why: lower case; a-z0-9_- only; no leading - or _
+        # From: Issue #1683 | PR #2017
+        name=$(basename "$compose_dir")
+        name=$(tr -cd 'a-z0-9_-' <<< "${name,,}") || die "Failed to normalize the project name $name (exit $?)."
+        [[ "$name" =~ ^[-_]*(.*)$ ]]
+        name="${BASH_REMATCH[1]}"
+    fi
     printf '%s\n' "$name"
 }
 
