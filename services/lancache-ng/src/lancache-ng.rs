@@ -12994,57 +12994,67 @@ end
                 .collect()
         }
 
-        // What: remove files older than days.
-        // Why: returns count removed and the errors.
-        // From: Issue #1683 | PR #1980
-        pub fn drop_older(dir: &Path, days: u64, now: u64) -> (usize, Vec<String>) {
-            let (mut gone, mut errs) = (0, Vec::new());
-            for f in files(dir) {
-                if now.saturating_sub(f.mtime) / DAY <= days {
-                    continue;
-                }
-                match std::fs::remove_file(&f.path) {
-                    Ok(()) => gone += 1,
-                    Err(e) => errs.push(format!("{}: {e}", f.path.display())),
-                }
-            }
-            (gone, errs)
+        // What: split files into older than days, rest.
+        // Why: one age rule for the run and the dry run.
+        // From: Issue #1683 | PR #2020
+        pub fn older(all: Vec<Item>, days: u64, now: u64) -> (Vec<Item>, Vec<Item>) {
+            all.into_iter()
+                .partition(|f| now.saturating_sub(f.mtime) / DAY > days)
         }
 
-        // What: remove oldest until under budget.
-        // Why: files written today stay; returns size.
-        // From: Issue #1683 | PR #1980
-        pub fn fit_budget(dir: &Path, budget: u64, now: u64) -> (u64, Vec<String>) {
-            let mut all = files(dir);
+        // What: oldest files to drop to fit the budget.
+        // Why: files written today stay; gives the size.
+        // From: Issue #1683 | PR #2020
+        pub fn over_budget(mut all: Vec<Item>, budget: u64, now: u64) -> (Vec<Item>, u64) {
             let mut size: u64 = all.iter().map(|f| f.size).sum();
             all.sort_by_key(|f| f.mtime);
             let today = day_start(now);
-            let mut errs = Vec::new();
-            for f in &all {
+            let mut pick = Vec::new();
+            for f in all {
                 if size <= budget {
                     break;
                 }
-                if f.mtime >= today {
-                    continue;
-                }
-                match std::fs::remove_file(&f.path) {
-                    Ok(()) => size = size.saturating_sub(f.size),
-                    Err(e) => errs.push(format!("{}: {e}", f.path.display())),
+                if f.mtime < today {
+                    size = size.saturating_sub(f.size);
+                    pick.push(f);
                 }
             }
-            (size, errs)
+            (pick, size)
         }
 
-        // What: xz every file closed before today.
-        // Why: past days are never written again.
-        // From: Issue #1683 | PR #1980
-        pub fn pack_closed(dir: &Path, preset: u64, now: u64) -> Vec<String> {
-            let today = day_start(now);
-            let mut errs = Vec::new();
-            for f in files(dir) {
-                if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
-                    continue;
+        // What: remove the picked files.
+        // Why: gives freed bytes; a gone file is no error.
+        // From: Issue #1683 | PR #2020
+        pub fn remove(pick: &[Item]) -> (u64, Vec<String>) {
+            let (mut freed, mut errs) = (0u64, Vec::new());
+            for f in pick {
+                match std::fs::remove_file(&f.path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        errs.push(format!("{}: {e}", f.path.display()));
+                    }
+                    _ => freed = freed.saturating_add(f.size),
                 }
+            }
+            (freed, errs)
+        }
+
+        // What: files closed before today, not yet xz.
+        // Why: past days are never written again.
+        // From: Issue #1683 | PR #2020
+        pub fn closed(dir: &Path, now: u64) -> Vec<Item> {
+            let today = day_start(now);
+            files(dir)
+                .into_iter()
+                .filter(|f| f.mtime < today && f.path.extension().is_none_or(|e| e != "xz"))
+                .collect()
+        }
+
+        // What: xz every picked file.
+        // Why: saves log disk; returns the errors.
+        // From: Issue #1683 | PR #1980
+        pub fn pack(pick: &[Item], preset: u64) -> Vec<String> {
+            let mut errs = Vec::new();
+            for f in pick {
                 // What: late lines join existing .xz file.
                 // Why: xz will not overwrite a file.
                 // From: Issue #1683 | PR #1985
@@ -15094,6 +15104,25 @@ mod ui {
             .map_err(|e| e.to_string())
     }
 
+    // What: run a command; read its last JSON line.
+    // Why: cachehamster and watchdog answer in JSON.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn exec_json(
+        app: &App,
+        s: &Settings,
+        service: &str,
+        cmd: &[&str],
+    ) -> Result<(i64, Value), String> {
+        let (code, out) = exec_in(app, s, service, cmd).await?;
+        let line = out
+            .lines()
+            .rev()
+            .find(|l| l.starts_with('{'))
+            .unwrap_or_default();
+        let v = serde_json::from_str(line).map_err(|e| format!("{}: {e}: {out}", cmd.join(" ")))?;
+        Ok((code, v))
+    }
+
     // What: restart or reload one program.
     // Why: only through OpenRC; only listed ones.
     // From: Issue #1683 | PR #1980
@@ -15150,14 +15179,7 @@ mod ui {
         let program = s.text("CACHEHAMSTER_PROGRAM")?;
         let mut cmd = vec![program.as_str(), "cachehamster"];
         cmd.extend_from_slice(args);
-        let (code, out) = exec_in(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd).await?;
-        let line = out
-            .lines()
-            .rev()
-            .find(|l| l.starts_with('{'))
-            .unwrap_or_default();
-        let v: Value =
-            serde_json::from_str(line).map_err(|e| format!("cachehamster: {e}: {out}"))?;
+        let (code, v) = exec_json(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd).await?;
         if let Some(e) = v.get("error").and_then(Value::as_str) {
             // What: service text behind a translated lead.
             // Why: Steam details stay as the service wrote.
@@ -15171,6 +15193,33 @@ mod ui {
             return Err(tr("hamster_exit").replace("{x}", &code.to_string()));
         }
         Ok(v)
+    }
+
+    // What: POST UI_ROUTE_WATCHDOG_TIDY, ?dry_run=1.
+    // Why: REST runs the watchdog step in services.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn watchdog_tidy(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        axum::extract::Path(op): axum::extract::Path<String>,
+        axum::extract::Query(query): axum::extract::Query<Fields>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        if !crate::watchdog::TIDY_STEPS.contains(&op.as_str()) {
+            return Err(Fail(StatusCode::NOT_FOUND, "no such step".into()));
+        }
+        let s = app.settings();
+        let program = s.text("SERVICES_PROGRAM")?;
+        let mut cmd = vec![program.as_str(), "watchdog", op.as_str()];
+        if field(&query, "dry_run") == "1" {
+            cmd.push("--dry-run");
+        }
+        let service = s.text("SERVICES_SERVICE")?;
+        let (_, v) = exec_json(&app, &s, &service, &cmd)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        Ok(axum::Json(v).into_response())
     }
 
     // What: cachehamster page.
@@ -16463,6 +16512,7 @@ mod ui {
             .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
             .route(&p("UI_ROUTE_LOGS")?, get(logs_api))
             .route(&p("UI_ROUTE_LANG")?, get(lang_api))
+            .route(&p("UI_ROUTE_WATCHDOG_TIDY")?, post(watchdog_tidy))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -16675,6 +16725,7 @@ mod watchdog {
         alarms: Vec<Alarm>,
         containers: Vec<Value>,
         cache: Value,
+        heal: Value,
     }
 
     impl Findings {
@@ -16712,6 +16763,7 @@ mod watchdog {
         alarms: &'a [Alarm],
         containers: &'a [Value],
         cache: &'a Value,
+        heal: &'a Value,
     }
 
     // What: failure streaks and restart times.
@@ -16787,24 +16839,109 @@ mod watchdog {
                 Err(e) => f.crit(service, format!("{word}; restart failed: {e}")),
             }
         }
+        heal_state(s, f, m)
+    }
+
+    // What: miss streak and recent restarts per row.
+    // Why: the state lives only in this loop.
+    // From: Issue #1683 | PR #2020
+    fn heal_state(s: &Settings, f: &mut Findings, m: &Memory) -> Result<(), String> {
+        let (max, window) = (
+            s.uint("WATCHDOG_RESTART_LIMIT")?,
+            s.uint("WATCHDOG_RESTART_WINDOW")?,
+        );
+        let now = clock::unix_secs();
+        for row in &mut f.containers {
+            let name = row["name"].as_str().unwrap_or_default().to_string();
+            let recent = m.restarts.get(&name).map_or(0, |t| {
+                t.iter()
+                    .filter(|t| now.saturating_sub(**t) <= window)
+                    .count()
+            });
+            row["failed_checks"] = m.streak.get(&name).copied().unwrap_or(0).into();
+            row["restarts"] = recent.into();
+        }
+        f.heal = serde_json::json!({
+            "restart_after": s.uint("RESTART_AFTER")?,
+            "restart_limit": max, "restart_window": window,
+        });
         Ok(())
+    }
+
+    // What: how a tidy step runs.
+    // Why: the round waits for its stamp; CLI does not.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    enum When {
+        Due,
+        Now,
+        Dry,
+    }
+
+    // What: the tidy steps the CLI and REST offer.
+    // Why: one list for the command and the route.
+    // From: Issue #1683 | PR #2020
+    pub(crate) const TIDY_STEPS: [&str; 3] = ["purge-cache", "prune-logs", "pack-logs"];
+
+    // What: what one tidy step picked and did.
+    // Why: round, CLI and REST read one answer.
+    // From: Issue #1683 | PR #2020
+    #[derive(Default, Serialize)]
+    struct Tidied {
+        step: &'static str,
+        dry_run: bool,
+        ok: bool,
+        count: usize,
+        bytes: u64,
+        files: Vec<String>,
+        errors: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        budget: Option<u64>,
+    }
+
+    // What: the answer for the picked files.
+    // Why: lists at most WATCHDOG_TIDY_LIST_MAX names.
+    // From: Issue #1683 | PR #2020
+    fn picked(
+        s: &Settings,
+        step: &'static str,
+        when: When,
+        pick: &[tidy::Item],
+    ) -> Result<Tidied, String> {
+        let max = s.num::<usize>("WATCHDOG_TIDY_LIST_MAX")?;
+        let names = pick.iter().take(max).map(|f| f.path.display().to_string());
+        Ok(Tidied {
+            step,
+            dry_run: when == When::Dry,
+            count: pick.len(),
+            bytes: pick.iter().map(|f| f.size).sum(),
+            files: names.collect(),
+            ..Tidied::default()
+        })
     }
 
     // What: daily: drop cache files past their days.
     // Why: CACHE_VALID_DAYS keeps the disk usable.
     // From: Issue #1683 | PR #1980
-    fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    fn purge_cache(s: &Settings, now: u64, when: When) -> Result<Option<Tidied>, String> {
         let stamp = PathBuf::from(s.text("PURGE_STAMP")?);
-        if !tidy::is_due(&stamp, now) {
-            return Ok(());
+        if when == When::Due && !tidy::is_due(&stamp, now) {
+            return Ok(None);
         }
-        let dir = tidy::cache_root(s)?;
-        let (gone, errs) = tidy::drop_older(&dir, s.uint("CACHE_VALID_DAYS")?, now);
-        eprintln!("watchdog: cache purge removed {gone} files");
-        for e in errs {
-            f.warn("cache purge", e);
+        let all = tidy::files(&tidy::cache_root(s)?);
+        let (pick, _) = tidy::older(all, s.uint("CACHE_VALID_DAYS")?, now);
+        let mut t = picked(s, "purge-cache", when, &pick)?;
+        if when != When::Dry {
+            t.errors = tidy::remove(&pick).1;
+            eprintln!(
+                "watchdog: cache purge removed {} files",
+                t.count - t.errors.len()
+            );
+            tidy::save_stamp(&stamp, now)?;
         }
-        tidy::save_stamp(&stamp, now)
+        Ok(Some(t))
     }
 
     // What: log root, only inside the allowed prefix.
@@ -16820,35 +16957,78 @@ mod watchdog {
     // What: daily: log age limit, then size budget.
     // Why: over budget retries after the cooldown.
     // From: Issue #1683 | PR #1980
-    fn prune_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
+    fn prune_logs(s: &Settings, now: u64, when: When) -> Result<Option<Tidied>, String> {
         let stamp = PathBuf::from(s.text("SYSLOG_PRUNE_STAMP")?);
-        if !tidy::is_due(&stamp, now) {
-            return Ok(());
+        if when == When::Due && !tidy::is_due(&stamp, now) {
+            return Ok(None);
         }
         let root = log_root(s)?;
         let budget = s.uint("SYSLOG_MAX_GB")?.saturating_mul(1 << 30);
-        let (_, mut errs) = tidy::drop_older(&root, s.uint("SYSLOG_RETENTION_DAYS")?, now);
-        let (size, more) = tidy::fit_budget(&root, budget, now);
-        errs.extend(more);
-        for e in errs {
-            f.warn("log prune", e);
+        let days = s.uint("SYSLOG_RETENTION_DAYS")?;
+        let (mut pick, rest) = tidy::older(tidy::files(&root), days, now);
+        let (more, mut size) = tidy::over_budget(rest, budget, now);
+        pick.extend(more);
+        let mut t = picked(s, "prune-logs", when, &pick)?;
+        if when != When::Dry {
+            let (freed, errs) = tidy::remove(&pick);
+            // What: bytes of failed removals stay counted.
+            // Why: the budget check sees the real size.
+            // From: Issue #1683 | PR #2020
+            size = size.saturating_add(t.bytes.saturating_sub(freed));
+            t.errors = errs;
+            let wait = s.uint("SYSLOG_PRUNE_RETRY_COOLDOWN")?;
+            let at = if size <= budget {
+                now
+            } else {
+                (now + wait).saturating_sub(tidy::DAY)
+            };
+            tidy::save_stamp(&stamp, at)?;
         }
-        if size <= budget {
-            return tidy::save_stamp(&stamp, now);
-        }
-        f.warn("logs", format!("log size {size} bytes is over the budget"));
-        let wait = s.uint("SYSLOG_PRUNE_RETRY_COOLDOWN")?;
-        tidy::save_stamp(&stamp, (now + wait).saturating_sub(tidy::DAY))
+        (t.size, t.budget) = (Some(size), Some(budget));
+        Ok(Some(t))
     }
 
     // What: pack closed log files with xz.
     // Why: saves log disk; open files stay plain.
     // From: Issue #1683 | PR #1980
-    fn pack_logs(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
-        for e in tidy::pack_closed(&log_root(s)?, s.uint("SYSLOG_XZ_PRESET")?, now) {
-            f.warn("log pack", e);
+    fn pack_logs(s: &Settings, now: u64, when: When) -> Result<Option<Tidied>, String> {
+        let pick = tidy::closed(&log_root(s)?, now);
+        let mut t = picked(s, "pack-logs", when, &pick)?;
+        if when != When::Dry {
+            t.errors = tidy::pack(&pick, s.uint("SYSLOG_XZ_PRESET")?);
         }
-        Ok(())
+        Ok(Some(t))
+    }
+
+    // What: one tidy step by its CLI name.
+    // Why: CLI and REST run the round's functions.
+    // From: Issue #1683 | PR #2020
+    fn tidy_now(s: &Settings, step: &str, dry: bool) -> Result<Tidied, String> {
+        let (now, when) = (clock::unix_secs(), if dry { When::Dry } else { When::Now });
+        let done = match step {
+            "purge-cache" => purge_cache(s, now, when)?,
+            "prune-logs" => prune_logs(s, now, when)?,
+            "pack-logs" => pack_logs(s, now, when)?,
+            _ => return Err(format!("{step}: steps: {}", TIDY_STEPS.join(" "))),
+        };
+        let mut t = done.ok_or("step did not run")?;
+        let fits = t.size.zip(t.budget).is_none_or(|(n, b)| n <= b);
+        t.ok = t.errors.is_empty() && fits;
+        Ok(t)
+    }
+
+    // What: alarm rows of one tidy step in the round.
+    // Why: a step error and an over budget size warn.
+    // From: Issue #1683 | PR #2020
+    fn tidy_alarms(f: &mut Findings, name: &str, t: Tidied) {
+        for e in t.errors {
+            f.warn(name, e);
+        }
+        if let (Some(size), Some(budget)) = (t.size, t.budget)
+            && size > budget
+        {
+            f.warn("logs", format!("log size {size} bytes is over the budget"));
+        }
     }
 
     // What: logs arrive but nothing is written.
@@ -17014,18 +17194,27 @@ mod watchdog {
         if let Err(e) = containers(s, &mut f, m).await {
             f.crit("docker", e);
         }
-        let steps: [(&str, Result<(), String>); 7] = [
+        let steps: [(&str, Result<(), String>); 4] = [
             ("cache", cache_light(s, &mut f)),
             ("disks", disks(s, &mut f)),
             ("conntrack", conntrack(s, &mut f)),
             ("certs", certs(s, &mut f)),
-            ("cache purge", purge_cache(s, &mut f, now)),
-            ("log prune", prune_logs(s, &mut f, now)),
-            ("log pack", pack_logs(s, &mut f, now)),
         ];
         for (name, result) in steps {
             if let Err(e) = result {
                 f.crit(name, e);
+            }
+        }
+        let tidy_steps = [
+            ("cache purge", purge_cache(s, now, When::Due)),
+            ("log prune", prune_logs(s, now, When::Due)),
+            ("log pack", pack_logs(s, now, When::Due)),
+        ];
+        for (name, result) in tidy_steps {
+            match result {
+                Err(e) => f.crit(name, e),
+                Ok(Some(t)) => tidy_alarms(&mut f, name, t),
+                Ok(None) => {}
             }
         }
         if let Err(e) = log_writing(s, &mut f, m) {
@@ -17050,6 +17239,7 @@ mod watchdog {
             alarms: &f.alarms,
             containers: &f.containers,
             cache: &f.cache,
+            heal: &f.heal,
         };
         let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
         fs::write(&path, &body, mode, fs::Place::Replace, fs::Owner::default())
@@ -17101,10 +17291,31 @@ mod watchdog {
                 println!("{v}");
                 return Ok(());
             }
+            // What: one tidy step now, or --dry-run.
+            // Why: the same functions as the round.
+            // From: Issue #1683 | PR #2020
+            Some(step) if TIDY_STEPS.contains(&step) => {
+                let dry = match args.get(1).map(String::as_str) {
+                    None => false,
+                    Some("--dry-run") => true,
+                    Some(x) => return Err(format!("{x}: only --dry-run")),
+                };
+                let t = tidy_now(&Settings::from_process()?, step, dry)?;
+                println!("{}", serde_json::to_string(&t).map_err(|e| e.to_string())?);
+                if !t.ok {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             // What: an unknown word fails with the list.
             // Why: it must not start a second check loop.
             // From: Issue #1683 | PR #2020
-            Some(_) => return Err("commands: healthcheck alarms (none: check loop)".into()),
+            Some(_) => {
+                let steps = TIDY_STEPS.join(" | ");
+                return Err(format!(
+                    "commands: healthcheck | alarms | {steps} [--dry-run] (none: check loop)"
+                ));
+            }
         }
         use tokio::signal::unix::{SignalKind, signal};
         let mut settings = Settings::from_process()?;

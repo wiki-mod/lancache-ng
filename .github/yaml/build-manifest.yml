@@ -822,6 +822,7 @@ runtime:
     - UI_ROUTE_STATS_SAMPLE=/api/stats/sample
     - UI_ROUTE_LOGS=/api/logs
     - UI_ROUTE_LANG=/api/ui/lang
+    - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
     - UI_ROUTE_DNS_FLUSH=/api/dns/flush
@@ -1362,7 +1363,7 @@ runtime:
     # Why: cachehamster and the ui read them.
     # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_POLL_INTERVAL=5
-    - CACHEHAMSTER_PROGRAM=lancache-ng
+    - CACHEHAMSTER_PROGRAM=@SERVICES_PROGRAM@
     - CACHEHAMSTER_QUEUES=2
     - CACHEHAMSTER_SERVICE=@SERVICES_SERVICE@
     # What: cache domains: own, default list file, disabled.
@@ -1452,6 +1453,10 @@ runtime:
     - DNS_SERVICE=dns
     - PROXY_SERVICE=proxy
     - SERVICES_SERVICE=services
+    # What: the program the ui runs in services.
+    # Why: watchdog and cachehamster are one binary.
+    # From: Issue #1683 | PR #2020
+    - SERVICES_PROGRAM=lancache-ng
     # What: DNS zone snapshot dir and how many stay.
     # Why: the ui keeps a rollback point per zone change.
     # From: Issue #1683 | PR #2020
@@ -1839,6 +1844,10 @@ runtime:
     - WATCHDOG_RESTART_LIMIT=3
     - WATCHDOG_RESTART_WINDOW=900
     - WATCHDOG_STOP_GRACE=10
+    # What: most file names a tidy answer lists.
+    # Why: a cache purge can pick millions of files.
+    # From: Issue #1683 | PR #2020
+    - WATCHDOG_TIDY_LIST_MAX=100
     # What: cert files, cert warn time and disk limits.
     # Why: the watchdog warns before they run out.
     # From: Issue #1683 | PR #2020
@@ -1933,6 +1942,7 @@ runtime:
     - DNS_SERVICE=text;;;live;ui
     - PROXY_SERVICE=text;;;live;ui
     - SERVICES_SERVICE=text;;;live;ui
+    - SERVICES_PROGRAM=text;;;live;ui
     - DHCP_SUBNET=text;;;reload;dhcp
     - DHCP_SUBNET_ID=uint;1;4294967294;reload;dhcp
     - DHCP_SUBNET_START=text?;;;reload;dhcp
@@ -2168,6 +2178,7 @@ runtime:
     - WATCHDOG_RESTART_LIMIT=uint;1;100;live;services
     - WATCHDOG_RESTART_WINDOW=uint;60;86400;live;services
     - WATCHDOG_STOP_GRACE=uint;1;600;live;services
+    - WATCHDOG_TIDY_LIST_MAX=uint;0;100000;live;services
     - WATCHDOG_CERT_FILES=list?;;;live;services
     - WATCHDOG_CERT_WARN_SECS=uint;3600;31536000;live;services
     - WATCHDOG_DISK_MIN_FREE_PERCENT=uint;1;99;live;services
