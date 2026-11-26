@@ -2388,12 +2388,11 @@ pub(crate) fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64
     // What: the cache volume as the ui mounts it.
     // Why: NGINX_CACHE_DIR exists in the proxy only.
     // From: Issue #1069 | PR #1980
-    let dir = s.text("CACHE_DIR")?;
-    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
+    let sp = crate::shared::tidy::cache_space(s)?;
     // What: measured cache bytes; disk use as fallback.
     // Why: the disk holds files of the system too.
     // From: Issue #1069 | PR #1991
-    let used = sp.total.saturating_sub(sp.free);
+    let used = sp.used();
     let held = if cached == u64::MAX {
         used.min(old)
     } else {

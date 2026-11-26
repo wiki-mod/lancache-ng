@@ -260,6 +260,15 @@ pub mod fs {
         pub free: u64,
     }
 
+    impl Space {
+        // What: bytes in use: total minus free.
+        // Why: one rule for every use figure of a disk.
+        // From: Issue #1683 | PR #2020
+        pub fn used(&self) -> u64 {
+            self.total.saturating_sub(self.free)
+        }
+    }
+
     // What: statvfs of the filesystem holding path.
     // Why: free counts blocks a non-root user may use.
     // From: Issue #1683 | PR #1858
@@ -6312,6 +6321,14 @@ pub mod tidy {
     // From: Issue #1683 | PR #2020
     pub fn cache_root(s: &crate::config::Settings) -> Result<PathBuf, String> {
         inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)
+    }
+
+    // What: size and free bytes of the cache volume.
+    // Why: the light and the size check read one figure.
+    // From: Issue #1683 | PR #2020
+    pub fn cache_space(s: &crate::config::Settings) -> Result<crate::shared::fs::Space, String> {
+        let dir = s.text("CACHE_DIR")?;
+        crate::shared::fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))
     }
 
     // What: one regular file with its facts.

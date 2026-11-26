@@ -255,8 +255,8 @@ fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), Str
 // From: Issue #1683 | PR #1980
 fn cache_light(s: &Settings, f: &mut Findings) -> Result<(), String> {
     let dir = s.text("CACHE_DIR")?;
-    let sp = fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))?;
-    let used = sp.total.saturating_sub(sp.free);
+    let sp = tidy::cache_space(s)?;
+    let used = sp.used();
     let pct = used.saturating_mul(100) / sp.total.max(1);
     let (warn, alarm) = (s.uint("DISK_WARN_PCT")?, s.uint("DISK_ALARM_PCT")?);
     let colour = if pct >= alarm {
