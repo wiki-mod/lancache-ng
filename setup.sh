@@ -2192,7 +2192,7 @@ append_env_key_if_missing() {
     # Why: empty placeholders must survive updates
     # From: Issue #1683 | PR #1858
     env_key_exists "$key" "$env_file" \
-        || append_env_line "$env_file" "$key" "$value"
+        || set_env_assignment "$key" "$value" "$env_file"
 }
 
 # What: fills a default only when missing or empty
@@ -2212,7 +2212,7 @@ set_env_key_if_empty_or_missing() {
             set_env_key "$key" "$value" "$env_file"
         fi
     else
-        append_env_line "$env_file" "$key" "$value"
+        set_env_assignment "$key" "$value" "$env_file"
     fi
 }
 
