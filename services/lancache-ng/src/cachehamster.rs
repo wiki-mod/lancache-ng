@@ -2087,6 +2087,27 @@ async fn daemon(c: Ctx) -> Result<(), String> {
     }
 }
 
+// What: every command cachehamster takes.
+// Why: the help names the same set as the match.
+// From: Issue #871 | PR #2020
+const COMMANDS: [&str; 15] = [
+    "daemon",
+    "status",
+    "login-begin",
+    "login-poll",
+    "login-cancel",
+    "logout",
+    "library",
+    "cached",
+    "wipe",
+    "lookup",
+    "evict",
+    "add",
+    "start",
+    "cancel",
+    "remove",
+];
+
 // What: run one command and answer as JSON.
 // Why: the UI calls these through docker exec.
 // From: Issue #871 | PR #1980
@@ -2113,11 +2134,7 @@ async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
             };
             submit(&c, &order)
         }
-        _ => Err(
-            "commands: daemon status login-begin login-poll login-cancel \
-                  logout library cached lookup evict add start cancel remove"
-                .into(),
-        ),
+        _ => Err(format!("commands: {}", COMMANDS.join(" "))),
     }
 }
 
