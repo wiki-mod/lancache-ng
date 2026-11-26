@@ -2499,46 +2499,32 @@ remove_env_key() {
     warn_env_key_overridden "$key" "$env_file"
 }
 
-# What: default LANCACHE_STATE_DIR for an install dir
-# Why: deploy/prod takes the SOT runtime default
-# From: Issue #1683 | PR #1858
-production_state_root_default() {
-    local install_dir="$1" root
-
-    # What: prod runs keep state outside the checkout
-    # Why: state must not live in the Git checkout
-    # From: Issue #1683 | PR #1858
-    if install_dir_is prod "$install_dir"; then
-        # What: the root the SOT names for prod state
-        # Why: the SOT owns it; compose and setup read it
-        # From: Issue #1683 | PR #1912
-        root=$(prod_env_default LANCACHE_STATE_DIR) || exit $?
-        [[ "$root" =~ ^/[^[:space:]]*$ ]] \
-            || die "The SOT runtime default LANCACHE_STATE_DIR is no absolute path: ${root}"
-        printf '%s\n' "$root"
-    else
-        printf '%s\n' "$install_dir"
-    fi
-}
-
-# What: an install's state root: env, legacy root, default
-# Why: one resolution for update, backup, logs and DHCP
+# What: an install's state root: env, own dir, legacy, SOT
+# Why: one answer for install, update, backup, logs, DHCP
 # From: Issue #1683 | PR #1858
 install_state_root() {
     local install_dir="$1" env_file="$2" state
     state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
         || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-    # What: quickstart and secondary .env lack the key
-    # Why: their state lives in their own dir
-    # From: Issue #1683 | PR #1858
-    if [[ -z "$state" ]] && { install_dir_is quickstart "$install_dir" || install_dir_is secondary "$install_dir"; }; then
+    [[ -z "$state" ]] || { printf '%s\n' "$state"; return 0; }
+    # What: prod keeps state outside the checkout (SOT root)
+    # Why: state must not live in the Git checkout
+    # From: Issue #1683 | PR #1912
+    if install_dir_is prod "$install_dir"; then
+        state=$(prod_env_default LANCACHE_STATE_DIR) || exit $?
+        [[ "$state" =~ ^/[^[:space:]]*$ ]] \
+            || die "The SOT runtime default LANCACHE_STATE_DIR is no absolute path: ${state}"
+    else
         state="$install_dir"
-    elif [[ -z "$state" ]]; then
-        state=$(production_state_root_default "$install_dir") \
-            || die "Cannot resolve the default state root of $install_dir (exit $?)."
-        state=$(legacy_dir_or_default "$(legacy_state_path)" "$state") || exit $?
     fi
-    printf '%s\n' "$state"
+    # What: quickstart and secondary keep their own dir
+    # Why: their state never lived in the legacy root
+    # From: Issue #1683 | PR #1858
+    if install_dir_is quickstart "$install_dir" || install_dir_is secondary "$install_dir"; then
+        printf '%s\n' "$state"
+        return 0
+    fi
+    legacy_dir_or_default "$(legacy_state_path)" "$state"
 }
 
 # What: the one env file and the state root of a stack
@@ -10235,7 +10221,7 @@ print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabl
 # From: Issue #1683 | PR #1858
 print_step "Data directory"
 
-STATE_ROOT_DEFAULT=$(production_state_root_default "$INSTALL_DIR") \
+STATE_ROOT_DEFAULT=$(install_state_root "$INSTALL_DIR" "$ENV_FILE") \
     || die "Cannot read the default state root from $INSTALL_DIR (exit $?)."
 printf "  LanCache-NG itself stays in %s.\n" "$INSTALL_DIR"
 printf "  Here you choose where its data goes: cache, DNS, DHCP, NTP.\n"
