@@ -1583,18 +1583,43 @@ install_docker_parts() {
     verify_docker_installation
 }
 
+# What: runs $3.. every $2 s until it passes or $1 s pass
+# Why: one wall-time rule; rc 1 = time up, rc 2 = stop now
+# From: Issue #1683 | PR #2017
+poll_until() {
+    # What: own names only; the check sees the caller's vars
+    # Why: bash scope is dynamic; a shared rc gets clobbered
+    # From: Issue #1683 | PR #2017
+    local _poll_limit="$1" _poll_every="$2" _poll_start=$SECONDS _poll_rc
+    shift 2
+    while true; do
+        if "$@"; then
+            return 0
+        else
+            _poll_rc=$?
+        fi
+        [[ "$_poll_rc" -ne 2 ]] || return 2
+        (( SECONDS - _poll_start < _poll_limit )) || return 1
+        sleep "$_poll_every"
+    done
+}
+
+# What: one docker info try; the text goes to the caller
+# Why: poll_until repeats it; the last error is reported
+# From: Issue #1683 | PR #2017
+_docker_info_round() {
+    info=$(docker info 2>&1)
+}
+
 # What: waits until docker info answers, up to the SOT time
 # Why: rc-service returns before dockerd listens
 # From: Issue #1683 | PR #2017
 wait_for_docker_daemon() {
-    local why="$1" wait poll deadline info
+    local why="$1" wait poll info=""
     wait=$(prod_env_default SETUP_DOCKER_WAIT_SECONDS) || exit $?
     poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-    deadline=$((SECONDS + wait))
-    until info=$(docker info 2>&1); do
-        (( SECONDS < deadline )) || die "$why (no answer within ${wait} s): ${info##*$'\n'}"
-        sleep "$poll"
-    done
+    poll_until "$wait" "$poll" _docker_info_round \
+        || die "$why (no answer within ${wait} s): ${info##*$'\n'}"
 }
 
 # What: Docker's userland-proxy set as the SOT says
@@ -6703,8 +6728,8 @@ wait_for_stack_health() {
     local timeout_seconds="$1"
     shift
     local -a services=()
-    local interval_seconds start deadline svc all_healthy baseline state
-    local -a regressed_services pre_existing_unhealthy_services failed_services
+    local interval_seconds start svc
+    local -a regressed_services=() pre_existing_unhealthy_services=() failed_services=()
 
     interval_seconds=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
     wanted_stack_services services "$_UPDATE_ENV_FILE" "$@"
@@ -6712,40 +6737,7 @@ wait_for_stack_health() {
     # Why: each round takes seconds; sleeps alone stretch it
     # From: Issue #1683
     start=$SECONDS
-    deadline=$((start + timeout_seconds))
-
-    while (( SECONDS < deadline )); do
-        all_healthy=1
-        regressed_services=()
-        pre_existing_unhealthy_services=()
-        failed_services=()
-        for svc in "${services[@]}"; do
-            state=$(service_container_state "$svc") || exit $?
-            [[ "$state" != healthy ]] || continue
-            baseline="${_UPDATE_HEALTH_BASELINE[$svc]-1}"
-            if [[ "$baseline" = "1" ]]; then
-                all_healthy=0
-                regressed_services+=("$svc")
-                [[ "$state" != failed ]] || failed_services+=("$svc")
-            else
-                pre_existing_unhealthy_services+=("$svc")
-            fi
-        done
-        if [[ "$all_healthy" = "1" ]] && verify_stack_functional_health; then
-            if (( ${#pre_existing_unhealthy_services[@]} > 0 )); then
-                print_warn "Proceeding despite service(s) unhealthy before this update started too (not a regression this update caused, so not blocking it): ${pre_existing_unhealthy_services[*]}"
-            fi
-            return 0
-        fi
-        # What: a service Docker marks failed ends the wait
-        # Why: waiting on keeps a broken stack running
-        # From: Issue #1683
-        if (( ${#failed_services[@]} > 0 )); then
-            print_error "Docker reports ${failed_services[*]} as unhealthy or stopped after $((SECONDS - start)) s; the gate ends now."
-            break
-        fi
-        sleep "$interval_seconds"
-    done
+    poll_until "$timeout_seconds" "$interval_seconds" _stack_health_round && return 0
 
     if (( ${#regressed_services[@]} > 0 )); then
         print_error "Service(s) not healthy after this start: ${regressed_services[*]}"
@@ -6766,6 +6758,42 @@ wait_for_stack_health() {
                 print_warn "No container found for unhealthy service '$svc'; cannot dump its logs."
             fi
         done
+    fi
+    return 1
+}
+
+# What: one round of wait_for_stack_health over its lists
+# Why: poll_until repeats it; rc 2 = Docker marked a failure
+# From: Issue #1683 | PR #1858
+_stack_health_round() {
+    local all_healthy=1 state baseline
+    regressed_services=()
+    pre_existing_unhealthy_services=()
+    failed_services=()
+    for svc in "${services[@]}"; do
+        state=$(service_container_state "$svc") || exit $?
+        [[ "$state" != healthy ]] || continue
+        baseline="${_UPDATE_HEALTH_BASELINE[$svc]-1}"
+        if [[ "$baseline" = "1" ]]; then
+            all_healthy=0
+            regressed_services+=("$svc")
+            [[ "$state" != failed ]] || failed_services+=("$svc")
+        else
+            pre_existing_unhealthy_services+=("$svc")
+        fi
+    done
+    if [[ "$all_healthy" = "1" ]] && verify_stack_functional_health; then
+        if (( ${#pre_existing_unhealthy_services[@]} > 0 )); then
+            print_warn "Proceeding despite service(s) unhealthy before this update started too (not a regression this update caused, so not blocking it): ${pre_existing_unhealthy_services[*]}"
+        fi
+        return 0
+    fi
+    # What: a service Docker marks failed ends the wait
+    # Why: waiting on keeps a broken stack running
+    # From: Issue #1683
+    if (( ${#failed_services[@]} > 0 )); then
+        print_error "Docker reports ${failed_services[*]} as unhealthy or stopped after $((SECONDS - start)) s; the gate ends now."
+        return 2
     fi
     return 1
 }
@@ -8932,7 +8960,7 @@ restore_dns_upstream() {
 # From: Issue #1918 | PR #1858
 dns_upstream_is_live() {
     local install_dir="$1" env_file="$2" servers="$3" cid rc conf dns_svc
-    local wait poll deadline key server ok
+    local wait poll key
     local -a confs=() wanted=()
     # What: collects the recursor files the ui renders
     # Why: the wait below reads them; /run holds no copy
@@ -8943,7 +8971,6 @@ dns_upstream_is_live() {
     done
     wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-    deadline=$((SECONDS + wait))
     read -r -a wanted <<< "${servers//,/ }"
     dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     cid=$(stack_compose "$install_dir" "$env_file" ps -q "$dns_svc") \
@@ -8955,27 +8982,29 @@ dns_upstream_is_live() {
     # What: poll; the ui renders the files after its start.
     # Why: the ui starts last in the ordered update.
     # From: Issue #1918
-    while true; do
-        ok=1
-        for conf in "${confs[@]}"; do
-            rc=0
-            docker exec "$cid" grep -q -e 'forward_zones_recurse:' "$conf" || rc=$?
-            case "$rc" in
-                0) (( ${#wanted[@]} > 0 )) || ok=0 ;;
-                1) (( ${#wanted[@]} == 0 )) || ok=0 ;;
-                *) ok=0 ;;
-            esac
-            for server in "${wanted[@]}"; do
-                docker exec "$cid" grep -q -F -e "\"${server}\"" "$conf" || ok=0
-            done
+    poll_until "$wait" "$poll" _dns_upstream_conf_round && return 0
+    print_error "The recursor config in the dns container does not match the setting after ${wait}s (last read exit ${rc})."
+    return 1
+}
+
+# What: one read of the recursor files, live check
+# Why: poll_until repeats it; rc is kept for the error text
+# From: Issue #1918
+_dns_upstream_conf_round() {
+    local ok=1 server
+    for conf in "${confs[@]}"; do
+        rc=0
+        docker exec "$cid" grep -q -e 'forward_zones_recurse:' "$conf" || rc=$?
+        case "$rc" in
+            0) (( ${#wanted[@]} > 0 )) || ok=0 ;;
+            1) (( ${#wanted[@]} == 0 )) || ok=0 ;;
+            *) ok=0 ;;
+        esac
+        for server in "${wanted[@]}"; do
+            docker exec "$cid" grep -q -F -e "\"${server}\"" "$conf" || ok=0
         done
-        (( ok == 1 )) && return 0
-        if (( SECONDS >= deadline )); then
-            print_error "The recursor config in the dns container does not match the setting after ${wait}s (last read exit ${rc})."
-            return 1
-        fi
-        sleep "$poll"
     done
+    (( ok == 1 ))
 }
 
 # What: shows and changes the upstream DNS of an install
