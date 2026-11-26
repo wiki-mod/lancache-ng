@@ -65,13 +65,13 @@ services:
     # What: the image.description label ci.sh sets.
     # Why: the Dockerfile holds no label text (AG-CI-023).
     # From: Issue #1683 | PR #1912
-    description: "LanCache-NG services: supervisor for watchdog, retention, syslog-ng and chrony."
+    description: "LanCache-NG services: watchdog, cachehamster, syslog-ng, chrony and snmpd."
     build_type: rust
     # What: crates (cargo -p) the services image builds.
-    # Why: supervisor and cachehamster run in one container.
+    # Why: watchdog and cachehamster run in one container.
     # From: Issue #1683
     crates: [lancache-ng]
-    # What: processes lancache-watchdog supervise runs.
+    # What: OpenRC services of the services image.
     # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
     # From: Issue #1683
     processes:
@@ -266,7 +266,7 @@ services:
       - lancache-ui=/usr/local/bin/lancache-ng,ui
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: a command argument runs the ui tool directly.
-    # Why: render-dns, hash-password run without OpenRC.
+    # Why: hash-password, dhcp-probe etc. skip OpenRC.
     # From: Issue #1683
     init_pre:
       - 'if [ "$#" -gt 0 ] && [ ! -d "@OPENRC_RUNLEVEL_DIR@/$1" ]; then exec /usr/local/bin/lancache-ng ui "$@"; fi'
@@ -640,8 +640,8 @@ runtime:
     # From: Issue #1683 | PR #1912
     - SECONDARY_PROBE_TIMEOUT=4
     # What: stored alarm history cap of the ui, newest kept.
-    # Why: an alarm burst must not grow the file unbounded.
-    # From: Issue #1683 | PR #1858
+    # Why: deprecated; no release reads it, v0.1-v0.4.
+    # From: Issue #1683 | PR #2020
     - UI_ALARMS_MAX=50
     # What: every ui page and route path the ui serves.
     # Why: one owner for ui, setup.sh, ci.sh (AG-CODE-011)
@@ -717,14 +717,14 @@ runtime:
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
     - UI_ROUTE_HEALTH=@PROXY_HEALTH_PATH@
     # What: ui page refresh timings, in seconds.
-    # Why: templates read the value; no literal in markup.
-    # From: Issue #1683 | PR #1912
+    # Why: deprecated; no release reads them, v0.1-v0.4.
+    # From: Issue #1683 | PR #2020
     - UI_WATCHDOG_REFRESH_SECONDS=10
     - UI_DASHBOARD_REFRESH_SECONDS=10
     - UI_STATS_REFRESH_SECONDS=3
     # What: restart page poll gap and first wait, seconds.
-    # Why: the page script reads them; no literal in markup.
-    # From: Issue #1683 | PR #1912
+    # Why: deprecated; no code has ever read them.
+    # From: Issue #1683 | PR #2020
     - UI_RESTART_POLL_INTERVAL_SECONDS=1
     - UI_RESTART_POLL_FIRST_DELAY_SECONDS=2
     # What: proxy start wait gap until nginx.conf exists.
@@ -2685,6 +2685,23 @@ file_headers:
     - services/ui/src/static/admin.css
     - "services/ui/src/lang/*.json"
     - services/ui/nginx/public_suffix_list.dat
+  # What: verbatim maintainer notice after a Rust header.
+  # Why: the comment check passes this text only, line 5 on.
+  # From: Issue #1683 | PR #2020
+  rust_notice:
+    - "BINDING MAINTAINER DECISION [AG-WF-029]"
+    - ""
+    - "This Rust source file MUST be restricted exclusively to its"
+    - "designated functional responsibility."
+    - ""
+    - "Functionality outside its designated responsibility MUST NOT"
+    - "be implemented in this file. Shared functionality MUST be"
+    - "implemented in the designated shared Rust source file."
+    - ""
+    - "This notice is mandatory and MUST be retained verbatim."
+    - ""
+    - "Any modification, rewording, shortening, relocation, or removal"
+    - "of this notice is explicitly DISACK."
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.

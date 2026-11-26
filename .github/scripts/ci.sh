@@ -17031,7 +17031,7 @@ _CI_AWK_COMMENTS='
     # What: all rules for the file held in L[1..n].
     # Why: the lexer runs once; every rule reads its arrays.
     # From: Issue #1683 | PR #1912
-    function cm_file(  i, b, ok, leg, pc, sc, lc, bl, bs, rl, rs, t, k) {
+    function cm_file(  i, b, ok, leg, pc, sc, lc, bl, bs, rl, rs, t, k, nm, nok) {
         cl_lex()
         b = cur; sub(/.*\//, "", b)
         if (style == "rust") ok = (L[1] == "//!")
@@ -17058,9 +17058,18 @@ _CI_AWK_COMMENTS='
             if (bl > 3) cm_out("C", cur ":" bs ": block " bl " lines (max 3)")
             bl = 0
         }
+        # What: the exact SOT Rust notice at line 5 passes.
+        # Why: maintainer decision; other text still fails.
+        # From: Issue #1683 | PR #2020
+        nm = 0
+        if (style == "rust" && rn != "") {
+            nm = split(rn, NT, "\n"); nok = (n >= 4 + nm)
+            for (i = 1; nok && i <= nm; i++) nok = (L[4 + i] == (NT[i] == "" ? "//" : "// " NT[i]))
+            if (!nok) nm = 0
+        }
         for (i = 1; i <= n + 1; i++) {
             if (i <= n && C[i]) { if (!rs) rs = i; if (!D[i]) rl++; continue }
-            if (rl > 3) cm_out("C", cur ":" rs ": story-telling block (" rl " lines)")
+            if (rl > 3 && !(nm && rs == 5 && rl == nm)) cm_out("C", cur ":" rs ": story-telling block (" rl " lines)")
             rs = rl = 0
         }
         cm_stmt()
@@ -17077,7 +17086,7 @@ _CI_AWK_COMMENTS='
     FNR == 1 {
         if (cur != "") cm_file()
         delete L; delete F; delete C; delete D; delete T; delete H; delete K; delete IB; delete S; delete ST
-        cur = FILENAME; style = cm_style(cur)
+        cur = FILENAME; style = cm_style(cur); rn = ENVIRON["CI_RUST_NOTICE"]
         if (style == "") { cm_out("G", cur); cur = ""; nextfile }
         h2 = cm_hdr(hp); h3 = cm_hdr(hs)
     }
@@ -17089,10 +17098,11 @@ _CI_AWK_COMMENTS='
 # From: Issue #1683 | PR #1912
 _ci_check_comments() {
     local -a _ci_override=("$@") files=() todo=() hdr=() size=() chron=() dup=() nogr=() bad=()
-    local path out line project spdx arc=0 rc=0
+    local path out line project spdx notice arc=0 rc=0
     _ci_scan_files files _ci_override || return 2
     _ci_prose_exempt_load || return 2
     _ci_block_entry_fields file_headers "" project project spdx spdx || return 2
+    notice="$(_ci_block_entry_list file_headers "" rust_notice)" || return 2
     for path in "${files[@]}"; do
         _ci_prose_excluded "${path}" && continue
         if [ -s "${path}" ]; then todo+=("${path}"); else hdr+=("${path}: empty file has no header"); fi
@@ -17101,7 +17111,7 @@ _ci_check_comments() {
     # Why: AG-CODE-012 sets a character limit
     # From: Issue #1683 | PR #1858
     if [ "${#todo[@]}" -gt 0 ]; then
-        out="$(LC_ALL=C.UTF-8 awk -v hp="${project}" -v hs="${spdx}" "${_CI_AWK_COMMENTS}${_CI_AWK_HEREDOC_WORD}${_CI_AWK_COMMENT_LEX}" "${todo[@]}" 2>&1)" || arc=$?
+        out="$(CI_RUST_NOTICE="${notice}" LC_ALL=C.UTF-8 awk -v hp="${project}" -v hs="${spdx}" "${_CI_AWK_COMMENTS}${_CI_AWK_HEREDOC_WORD}${_CI_AWK_COMMENT_LEX}" "${todo[@]}" 2>&1)" || arc=$?
     fi
     while IFS= read -r line; do
         case "${line%%$'\t'*}" in
