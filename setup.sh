@@ -1057,12 +1057,12 @@ set_compose_profiles() {
         existing=$(get_env_var COMPOSE_PROFILES "$env_file") || exit $?
     fi
     # What: role names from the SOT; the .env tells which
-    # Why: is_secondary_dir is the one test for a secondary
+    # Why: install_dir_is owns the role of a dir
     # From: Issue #1683 | PR #2017
     primary=$(prod_env_default DNS_REPLICATION_ROLE) || exit $?
     secondary=$(prod_env_default DNS_REPLICATION_ROLE_SECONDARY) || exit $?
     result="$primary"
-    ! is_secondary_dir "$stack_dir" || result="$secondary"
+    ! install_dir_is secondary "$stack_dir" || result="$secondary"
 
     list_items_into profiles "$existing"
     for profile in "${profiles[@]}"; do
@@ -2508,7 +2508,7 @@ production_state_root_default() {
     # What: prod runs keep state outside the checkout
     # Why: state must not live in the Git checkout
     # From: Issue #1683 | PR #1858
-    if is_deploy_prod_install_dir "$install_dir"; then
+    if install_dir_is prod "$install_dir"; then
         # What: the root the SOT names for prod state
         # Why: the SOT owns it; compose and setup read it
         # From: Issue #1683 | PR #1912
@@ -2531,7 +2531,7 @@ install_state_root() {
     # What: quickstart and secondary .env lack the key
     # Why: their state lives in their own dir
     # From: Issue #1683 | PR #1858
-    if [[ -z "$state" ]] && { is_quickstart_install "$install_dir" || is_secondary_dir "$install_dir"; }; then
+    if [[ -z "$state" ]] && { install_dir_is quickstart "$install_dir" || install_dir_is secondary "$install_dir"; }; then
         state="$install_dir"
     elif [[ -z "$state" ]]; then
         state=$(production_state_root_default "$install_dir") \
@@ -2562,12 +2562,22 @@ resolve_stack_dir_checked() {
     printf '%s\n' "$dir"
 }
 
-# What: true for the manual checkout path deploy/prod
-# Why: quickstart installs live elsewhere
+# What: true if dir $2 has role $1: prod, secondary, quickstart
+# Why: one owner of the roles and of how they exclude
 # From: Issue #1683 | PR #1858
-is_deploy_prod_install_dir() {
-    local dir="${1%/}"
-    [[ "$dir" = "$PROD_STACK_REL" || "$dir" = */"$PROD_STACK_REL" ]]
+install_dir_is() {
+    local role="$1" dir="${2%/}" found=none
+    # What: deploy/prod is the primary, whatever .env says
+    # Why: a hand-set LISTEN_IP must not change its role
+    # From: Issue #1683 | PR #2017
+    if [[ "$dir" = "$PROD_STACK_REL" || "$dir" = */"$PROD_STACK_REL" ]]; then
+        found=prod
+    elif env_key_exists LISTEN_IP "$dir/.env"; then
+        found=secondary
+    elif [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]; then
+        found=quickstart
+    fi
+    [[ "$found" = "$role" ]]
 }
 
 # What: the stack's settings file, <install dir>/.env
@@ -2899,15 +2909,6 @@ resolve_stack_dir() {
         out="$dir"
     fi
     realpath -m -- "$out" || die "Cannot resolve the path $out (exit $?)."
-}
-
-# What: true for a quickstart copy outside deploy/prod
-# Why: these installs must converge to deploy/prod on update
-# From: Issue #1683 | PR #1858
-is_quickstart_install() {
-    local dir="$1"
-    ! is_deploy_prod_install_dir "$dir" && ! is_secondary_dir "$dir" \
-        && [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]
 }
 
 # What: puts back lost files and dirs the old stack mounts
@@ -3484,7 +3485,7 @@ deploy_prod_repo_root() {
 deploy_prod_repo_input_paths() {
     local install_dir="$1" repo_root rels rel
     local -a composes
-    is_deploy_prod_install_dir "$install_dir" || return 0
+    install_dir_is prod "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir") || exit $?
     composes=("$install_dir"/docker-compose*.y*ml)
     [[ -e "${composes[0]}" ]] || return 0
@@ -3827,7 +3828,7 @@ config_prod_moved_keys() {
 # From: Issue #1683 | PR #1858
 adopt_moved_config_prod_keys() {
     local install_dir="$1" env_file="$2" step="$3" repo_root rows svc key target local_env raw current
-    is_deploy_prod_install_dir "$install_dir" || return 0
+    install_dir_is prod "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir") \
         || die "Cannot resolve the repository root of $install_dir (exit $?)."
     rows=$(config_prod_moved_keys)
@@ -6230,7 +6231,7 @@ cmd_restore() (
     rel_install="${archived_install#/}"
     archived_repo_root=""
     new_repo_root=""
-    if is_deploy_prod_install_dir "$archived_install" && is_deploy_prod_install_dir "$install_dir"; then
+    if install_dir_is prod "$archived_install" && install_dir_is prod "$install_dir"; then
         archived_repo_root=$(deploy_prod_repo_root "$archived_install") || exit $?
         new_repo_root=$(deploy_prod_repo_root "$install_dir") || exit $?
     fi
@@ -6294,7 +6295,7 @@ cmd_restore() (
     # What: restored quickstart archives move to deploy/prod
     # Why: the old bundle no longer matches this checkout
     # From: Issue #1683 | PR #1858
-    if is_quickstart_install "$install_dir"; then
+    if install_dir_is quickstart "$install_dir"; then
         if ! compose_stack_available "$install_dir"; then
             stack_stopped=0
             die "Restored a quickstart install, but Docker is not available to migrate it. Install Docker, then run: setup.sh update $install_dir"
@@ -7481,7 +7482,7 @@ update_code_plan() {
     local -n _plan_action="$1" _plan_repo="$2" _plan_channel="$3" _plan_target="$4"
     local install_dir="$5" tag branch dir commit head
     _plan_action=stay _plan_repo="$install_dir" _plan_target=""
-    is_deploy_prod_install_dir "$install_dir" && _plan_repo=$(deploy_prod_repo_root "$install_dir")
+    install_dir_is prod "$install_dir" && _plan_repo=$(deploy_prod_repo_root "$install_dir")
     _plan_channel=$(resolve_lancache_image_channel "$_UPDATE_ENV_FILE") || exit $?
     tag=$(shell_or_env_value LANCACHE_IMAGE_TAG "$_UPDATE_ENV_FILE") || exit $?
     # What: another channel's dir or the old root moves
@@ -7610,7 +7611,7 @@ stack_container_drift() {
 update_pending_reasons() {
     local install_dir="$1" code_action="$2" edited tag want have
     [[ "$code_action" = stay ]] || printf 'the code moves (%s)\n' "$code_action"
-    if is_deploy_prod_install_dir "$install_dir"; then
+    if install_dir_is prod "$install_dir"; then
         edited=$(config_prod_edited_files "$(deploy_prod_repo_root "$install_dir")") || exit $?
         [[ -z "$edited" ]] || printf 'config/prod has local edits\n'
     fi
@@ -7632,7 +7633,7 @@ perform_stack_update_flow() {
     # Why: both may make a secret; nothing changed yet
     # From: Issue #1683 | PR #2017
     install_secret_generator_tools
-    if is_quickstart_install "$install_dir"; then
+    if install_dir_is quickstart "$install_dir"; then
         migrate_quickstart_install "$install_dir" || exit $?
         install_dir="${PROD_COMPOSE%/*}"
         migrated=1
@@ -7676,7 +7677,7 @@ perform_stack_update_flow() {
     # What: deploy/prod template edits move into .local.env
     # Why: a clean checkout keeps git pulls possible
     # From: Issue #1683 | PR #1858
-    if is_deploy_prod_install_dir "$install_dir"; then
+    if install_dir_is prod "$install_dir"; then
         adopt_config_prod_edits "$(deploy_prod_repo_root "$install_dir")"
     fi
 
@@ -7698,7 +7699,7 @@ perform_stack_update_flow() {
         _UPDATE_ROLLBACK_DIR="$install_dir"
         trap rollback_update_after_env_failure EXIT
     fi
-    if is_deploy_prod_install_dir "$install_dir"; then
+    if install_dir_is prod "$install_dir"; then
         ensure_public_suffix_list "$(deploy_prod_repo_root "$install_dir")"
     fi
     migrate_env_for_update "$install_dir"
@@ -7758,7 +7759,7 @@ cmd_update() {
     # What: update refuses a secondary dir
     # Why: it would migrate the secondary into a primary
     # From: Issue #1683 | PR #2017
-    ! is_secondary_dir "$install_dir" \
+    ! install_dir_is secondary "$install_dir" \
         || die "$install_dir is a secondary DNS node; update only runs a primary. Refresh it in that directory with: setup.sh secondary --rotate (asks for a new token). Nothing was changed."
     # What: a lone setup.sh first fetches its channel code
     # Why: without it a v0.3 quickstart is not migrated
@@ -9372,16 +9373,6 @@ is_secondary_name() {
     [[ "$1" != *.* && "${#1}" -le "$max" ]] && is_valid_dns_name "$1"
 }
 
-# What: true when the dir holds a secondary's .env
-# Why: every release writes LISTEN_IP; other .env lack it
-# From: Issue #1683
-is_secondary_dir() {
-    # What: deploy/prod is the primary, whatever .env says
-    # Why: a hand-set LISTEN_IP must not change its role
-    # From: Issue #1683 | PR #2017
-    ! is_deploy_prod_install_dir "$1" && env_key_exists LISTEN_IP "$1/.env"
-}
-
 # What: dies when this host holds another lancache system
 # Why: runs before any change; a secondary needs its host
 # From: Issue #1683 | PR #2017
@@ -9508,7 +9499,7 @@ cmd_secondary() {
     terminal_available && tty=1
     if [[ "$tty" = 1 && -z "$name" ]]; then
         local name_default=""
-        [[ "$rotate" -eq 1 ]] && is_secondary_dir . && name_default=$(basename "$PWD")
+        [[ "$rotate" -eq 1 ]] && install_dir_is secondary . && name_default=$(basename "$PWD")
         ask_checked name "Name of this secondary (a-z, 0-9, -)" "$name_default" is_secondary_name "Not a valid name ($(secondary_name_rule))"
     fi
     die_if_any_empty "Required argument(s) missing (see ./setup.sh secondary --help)" "--name=$name"
@@ -9519,13 +9510,13 @@ cmd_secondary() {
     # Why: before any question; a failed run blocks nothing
     # From: Issue #1683
     secondary_dir="${name}"
-    [[ "$(basename "$PWD")" != "$name" ]] || ! is_secondary_dir . || secondary_dir="."
+    [[ "$(basename "$PWD")" != "$name" ]] || ! install_dir_is secondary . || secondary_dir="."
     if [[ "$rotate" -eq 1 ]]; then
-        is_secondary_dir "$secondary_dir" \
+        install_dir_is secondary "$secondary_dir" \
             || die "No existing secondary '${name}' (no secondary settings in ${secondary_dir}/.env). Run --rotate from its parent directory or from inside the existing '${name}' directory, or run without --rotate."
     elif [[ "$secondary_dir" = "." ]]; then
         die "Current directory already matches secondary '${name}'; rerun with --rotate to update the secondary files"
-    elif is_secondary_dir "$secondary_dir"; then
+    elif install_dir_is secondary "$secondary_dir"; then
         die "Secondary '${secondary_dir}' already exists; rerun with --rotate to update the secondary files"
     elif [[ -e "${secondary_dir}/.env" ]]; then
         die "${secondary_dir}/.env belongs to another program; choose another --name or run setup.sh from another directory. Nothing was changed."
@@ -9544,7 +9535,7 @@ cmd_secondary() {
     # Why: one file answers the wizard and keeps its values
     # From: Issue #1683 | PR #2017
     existing_env_file=""
-    ! is_secondary_dir "$secondary_dir" || existing_env_file="${secondary_dir}/.env"
+    ! install_dir_is secondary "$secondary_dir" || existing_env_file="${secondary_dir}/.env"
     # What: an existing secondary's .env answers the wizard
     # Why: --rotate asks again only for the token
     # From: Issue #1683
@@ -10953,7 +10944,7 @@ confirm "Start now?" "Y" || start_now=0
 # What: pulls images before enabling any unit
 # Why: failed first installs stay reversible
 # From: Issue #1683 | PR #1858
-if is_deploy_prod_install_dir "$INSTALL_DIR"; then
+if install_dir_is prod "$INSTALL_DIR"; then
     ensure_public_suffix_list "$(deploy_prod_repo_root "$INSTALL_DIR")"
 fi
 print_step "Pulling images"
