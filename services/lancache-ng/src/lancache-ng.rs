@@ -3686,12 +3686,20 @@ mod dns {
             // From: Issue #1683 | PR #2020
             Some("do") => {
                 use crate::ui::DnsOp;
-                // What: zone rollback keeps its own word.
+                // What: rollback and CDN rows: own words.
                 // Why: one CLI way per job.
                 // From: Issue #1683 | PR #2020
                 let keys: Vec<&str> = DnsOp::ALL
                     .iter()
-                    .filter(|o| !matches!(o, DnsOp::ZoneRollback))
+                    .filter(|o| {
+                        !matches!(
+                            o,
+                            DnsOp::ZoneRollback
+                                | DnsOp::DnsAdd
+                                | DnsOp::DnsRemove
+                                | DnsOp::DnsToggle
+                        )
+                    })
                     .map(|o| o.key())
                     .collect();
                 let s = Settings::from_process()?;
@@ -11434,13 +11442,65 @@ end
             Ok(out)
         }
 
+        // What: names of the switched-on rows.
+        // Why: render and listing count the same rows.
+        // From: Issue #1683 | PR #2020
+        fn enabled(rows: &[Row]) -> Vec<&str> {
+            rows.iter()
+                .filter(|r| r.enabled)
+                .map(|r| r.display.as_str())
+                .collect()
+        }
+
+        // What: rows and effective list as JSON.
+        // Why: page, REST and CLI read one listing.
+        // From: Issue #1683 | PR #2020
+        pub fn listing(s: &Settings) -> Result<serde_json::Value, String> {
+            let rows = parse_rows(s)?;
+            let effective = enabled(&rows);
+            Ok(serde_json::json!({"rows": rows, "effective": effective}))
+        }
+
+        // What: lancache-ng cdn list|add|remove|on|off.
+        // Why: list reads here; changes go to the ui.
+        // From: Issue #1683 | PR #2020
+        pub async fn cdn_run(args: &[String]) -> Result<(), String> {
+            use crate::shared::http::{Body, ui_socket};
+            let s = Settings::from_process()?;
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+            let (key, form) = match words.as_slice() {
+                ["list"] => {
+                    println!("{}", listing(&s)?);
+                    return Ok(());
+                }
+                ["add", d] => ("UI_ROUTE_DNS_ADD", vec![pair("domain", d)]),
+                ["remove", d] => ("UI_ROUTE_DNS_REMOVE", vec![pair("domain", d)]),
+                ["on", d] => (
+                    "UI_ROUTE_DNS_TOGGLE",
+                    vec![pair("domain", d), pair("enabled", "true")],
+                ),
+                ["off", d] => (
+                    "UI_ROUTE_DNS_TOGGLE",
+                    vec![pair("domain", d), pair("enabled", "false")],
+                ),
+                _ => return Err(
+                    "commands: list | add <domain> | remove <domain> | on <domain> | off <domain>"
+                        .into(),
+                ),
+            };
+            ui_socket(&s, &s.text(key)?, Body::Form(form)).await?;
+            println!("{}", listing(&Settings::from_process()?)?);
+            Ok(())
+        }
+
         // What: enabled rows, one per line.
         // Why: input of the RPZ and nginx host maps.
         // From: Issue #1683 | PR #1980
         pub fn effective(s: &Settings) -> Result<String, String> {
             let mut out = String::new();
-            for r in parse_rows(s)?.into_iter().filter(|r| r.enabled) {
-                out.push_str(&r.display);
+            for name in enabled(&parse_rows(s)?) {
+                out.push_str(name);
                 out.push('\n');
             }
             Ok(out)
@@ -13006,6 +13066,13 @@ mod ui {
         };
         render_check(&new)?;
         adopt(app, &old, new).await
+    }
+
+    // What: GET the cache domain rows and the list.
+    // Why: REST read on the reader of page and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn cdn_api(State(app): Shared) -> Response {
+        json_reply(crate::shared::cdn::listing(&app.settings()).map(Some), "")
     }
 
     // What: GET the apply plan: files, owners, errors.
@@ -15346,6 +15413,7 @@ mod ui {
             .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
             .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
             .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
+            .route(&p("UI_ROUTE_CDN")?, get(cdn_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
@@ -16051,6 +16119,7 @@ async fn main() -> std::process::ExitCode {
         "ntp" => code(shared::ntp::ntp_run(&argv).await),
         "secret" => code(shared::secret::secret_run(&argv)),
         "cache" => code(shared::tidy::cache_run(&argv).await),
+        "cdn" => code(shared::cdn::cdn_run(&argv).await),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -16070,8 +16139,8 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 7] = [
-    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache",
+const GROUPS: [&str; 8] = [
+    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache", "cdn",
 ];
 
 // What: turn a role Result into a process exit code.
