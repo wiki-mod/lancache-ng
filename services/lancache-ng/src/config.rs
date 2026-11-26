@@ -801,3 +801,25 @@ pub fn saved_file() -> Option<PathBuf> {
 pub fn process_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
+
+// What: image coordinates this install runs on.
+// Why: footer, peer kit and setup link read one place.
+// From: Issue #1683 | PR #2020
+pub struct Image {
+    pub registry: String,
+    pub prefix: String,
+    pub channel: String,
+    pub tag: String,
+}
+
+// What: the image coordinates from the process env.
+// Why: compose sets them; an unset one is empty.
+// From: Issue #1683 | PR #2020
+pub fn image() -> Image {
+    Image {
+        registry: process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
+        prefix: process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
+        channel: process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
+        tag: process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
+    }
+}

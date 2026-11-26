@@ -1738,10 +1738,10 @@ _ci_check_image_channel_resolution() {
         viol+=("no Rust source dir for the ui crates")
     else
         for f in \
-            '"image_registry": process_env("LANCACHE_IMAGE_REGISTRY")' \
-            '"image_prefix": process_env("LANCACHE_IMAGE_PREFIX")' \
-            '"image_channel": process_env("LANCACHE_IMAGE_CHANNEL")' \
-            '"image_tag": process_env("LANCACHE_IMAGE_TAG")'; do
+            'registry: process_env("LANCACHE_IMAGE_REGISTRY")' \
+            'prefix: process_env("LANCACHE_IMAGE_PREFIX")' \
+            'channel: process_env("LANCACHE_IMAGE_CHANNEL")' \
+            'tag: process_env("LANCACHE_IMAGE_TAG")'; do
             hit="$(_ci_run -m 1 "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" \
                 grep -rF --include='*.rs' -- "${f}" "${srcs[@]}")" || return 2
             [ -n "${hit}" ] || viol+=("the ui crate sources must expose/use ${f}")

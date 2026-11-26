@@ -946,7 +946,7 @@ pub(crate) async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>
     // What: setup.sh from the branch of this channel.
     // Why: a nightly primary must not hand out master.
     // From: Issue #1683 | PR #1980
-    let nightly = process_env("LANCACHE_IMAGE_CHANNEL").as_deref() == Some("nightly");
+    let nightly = config::image().channel == "nightly";
     let (url_key, ref_key) = if nightly {
         ("SETUP_SCRIPT_URL_NIGHTLY", "SETUP_GIT_REF_NIGHTLY")
     } else {
@@ -2627,15 +2627,14 @@ pub(crate) fn encode_password_hash() -> Result<(), String> {
 // Why: Tera checks calls when a template is added.
 // From: Issue #1683 | PR #1980
 pub(crate) fn register_image_functions(t: &mut Tera) {
-    for (func, key) in [
-        ("lancache_image_registry", "LANCACHE_IMAGE_REGISTRY"),
-        ("lancache_image_prefix", "LANCACHE_IMAGE_PREFIX"),
-        ("lancache_image_tag", "LANCACHE_IMAGE_TAG"),
-        ("lancache_image_channel", "LANCACHE_IMAGE_CHANNEL"),
+    let image = config::image();
+    for (func, value) in [
+        ("lancache_image_registry", image.registry),
+        ("lancache_image_prefix", image.prefix),
+        ("lancache_image_tag", image.tag),
+        ("lancache_image_channel", image.channel),
     ] {
-        t.register_function(func, move |_: tera::Kwargs, _: &tera::State| {
-            process_env(key).unwrap_or_default()
-        });
+        t.register_function(func, move |_: tera::Kwargs, _: &tera::State| value.clone());
     }
 }
 

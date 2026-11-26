@@ -20,7 +20,7 @@
 // Why: one home for DNS logic of ui and the dns role.
 // From: Issue #1683 | PR #2020
 
-use crate::config::{self, Settings, process_env};
+use crate::config::{self, Settings};
 use crate::shared::dns::Role;
 use crate::shared::peer::{self, PeerZone, ZoneState};
 use crate::shared::tool;
@@ -687,6 +687,7 @@ pub(crate) fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> 
 // From: Issue #1683 | PR #1980
 pub(crate) fn peer_kit(s: &Settings) -> Result<Value, String> {
     let primary = s.text("IP_HTTP")?;
+    let image = config::image();
     Ok(json!({
         "primary": primary,
         // What: the zones the primary serves.
@@ -698,10 +699,10 @@ pub(crate) fn peer_kit(s: &Settings) -> Result<Value, String> {
         "tsig_secret": secret::tsig_secret(s)?,
         "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
         "dns_local_reverse_zones": s.text_or_empty("DNS_LOCAL_REVERSE_ZONES"),
-        "image_registry": process_env("LANCACHE_IMAGE_REGISTRY").unwrap_or_default(),
-        "image_prefix": process_env("LANCACHE_IMAGE_PREFIX").unwrap_or_default(),
-        "image_channel": process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
-        "image_tag": process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
+        "image_registry": image.registry,
+        "image_prefix": image.prefix,
+        "image_channel": image.channel,
+        "image_tag": image.tag,
     }))
 }
 
