@@ -3893,6 +3893,23 @@ mod dns {
                 Ok(())
             }
             Some("secondary") => secondary_do(&args[1..]).await,
+            // What: zones: overview; zones ensure: via ui.
+            // Why: ensure renders and reloads in the ui.
+            // From: Issue #1683 | PR #2020
+            Some("zones") => {
+                let s = Settings::from_process()?;
+                match args.get(1).map(String::as_str) {
+                    None => println!("{}", zone_overview(&s).await?),
+                    Some("ensure") => {
+                        let route = s.text("UI_ROUTE_DNS_ZONES_ENSURE")?;
+                        let body = crate::shared::http::Body::Form(vec![]);
+                        let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+                        println!("{v}");
+                    }
+                    Some(_) => return Err("usage: zones [ensure]".into()),
+                }
+                Ok(())
+            }
             // What: query NAME TYPE [http/https/auth/ip#n]
             // Why: a real DNS answer; needs no running ui.
             // From: Issue #1683 | PR #2020
@@ -3978,7 +3995,7 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 10] = [
+    const COMMANDS: [&str; 11] = [
         "daemon",
         "follow-once",
         "sync-check",
@@ -3989,6 +4006,7 @@ mod dns {
         "api-check",
         "stats",
         "query",
+        "zones",
     ];
 
     // What: serials of managed zones on all servers.
@@ -4028,7 +4046,17 @@ mod dns {
                 json!({"zone": z.zone, "serials": serials, "states": states})
             })
             .collect();
-        Ok(json!({"columns": columns, "rows": rows}))
+        // What: zones in pdns that nothing here manages.
+        // Why: a left-over zone answers for no LAN domain.
+        // From: Issue #1683 | PR #2020
+        let mut known = crate::shared::dns::managed_zones(s)?;
+        known.extend(own_tops(s)?);
+        let extra: Vec<&str> = ours
+            .iter()
+            .map(|z| z.name.as_str())
+            .filter(|n| !known.iter().any(|k| k == n))
+            .collect();
+        Ok(json!({"columns": columns, "rows": rows, "extra": extra}))
     }
 
     // What: cells not in sync plus servers that failed.
@@ -15487,6 +15515,22 @@ mod ui {
         }
     }
 
+    // What: POST zones ensure: the apply with zones.
+    // Why: the same way a save makes its zones ready.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn zones_ensure_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        let s = app.settings();
+        let lines = apply_all(&app, &s, &s, true)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        Ok(axum::Json(json!({"report": lines})).into_response())
+    }
+
     // What: retry zones and TSIG until pdns answers.
     // Why: at ui start the dns container may not run yet.
     // From: Issue #1683 | PR #1980
@@ -16151,6 +16195,7 @@ mod ui {
             .route(&p("UI_ROUTE_DNS_API_CHECK")?, get(dns_api_check))
             .route(&p("UI_ROUTE_DNS_STATS")?, get(dns_stats_api))
             .route(&p("UI_ROUTE_DNS_QUERY")?, get(dns_query_api))
+            .route(&p("UI_ROUTE_DNS_ZONES_ENSURE")?, post(zones_ensure_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_APPLY_PREVIEW")?, get(apply_preview_api))
