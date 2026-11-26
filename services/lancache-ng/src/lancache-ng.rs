@@ -9679,14 +9679,16 @@ end
             }))
         }
 
-        // What: lancache-ng proxy status: nginx as JSON.
+        // What: lancache-ng proxy status|log as JSON.
         // Why: proxy reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
         pub async fn proxy_run(args: &[String]) -> Result<(), String> {
-            if args.first().map(String::as_str) != Some("status") {
-                return Err("commands: status".into());
-            }
-            let v = live(&crate::config::Settings::from_process()?).await?;
+            let s = crate::config::Settings::from_process()?;
+            let v = match args.first().map(String::as_str) {
+                Some("status") => live(&s).await?,
+                Some("log") => crate::shared::access::summary(&s).await?,
+                _ => return Err("commands: status log".into()),
+            };
             println!("{v}");
             Ok(())
         }
@@ -10982,6 +10984,35 @@ end
                     _ => self.other += 1,
                 }
             }
+        }
+
+        // What: totals and newest requests, human sizes.
+        // Why: one reader for dashboard, REST and CLI.
+        // From: Issue #1683 | PR #2020
+        pub async fn summary(s: &crate::config::Settings) -> Result<serde_json::Value, String> {
+            let dir = Path::new(&s.text("SYSLOG_LOG_ROOT")?).join(s.text("PROXY_LOG_PROGRAM")?);
+            let limit = s.num::<usize>("UI_RECENT_REQUESTS")?;
+            let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
+            let (stats, recent) =
+                tokio::task::spawn_blocking(move || (stats(&dir), tail(&dir, limit, chunk)))
+                    .await
+                    .map_err(|e| e.to_string())?;
+            let totals = with_human(&stats, "total_bytes_human", stats.total_bytes);
+            let rows: Vec<serde_json::Value> = recent
+                .iter()
+                .rev()
+                .map(|e| with_human(e, "bytes_human", e.bytes))
+                .collect();
+            Ok(serde_json::json!({"totals": totals, "recent": rows}))
+        }
+
+        // What: adds a human-readable byte size field.
+        // Why: readers show 40 GiB, not raw bytes.
+        // From: Issue #1683 | PR #1980
+        fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> serde_json::Value {
+            let mut out = serde_json::to_value(v).unwrap_or(serde_json::Value::Null);
+            out[field] = crate::shared::human::bytes(n).into();
+            out
         }
 
         // What: count requests, hits and bytes.
@@ -12365,36 +12396,6 @@ mod ui {
         res
     }
 
-    // What: adds a human-readable byte size field.
-    // Why: pages show sizes like 40 GiB, not raw bytes.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn with_human(v: &impl serde::Serialize, field: &str, n: u64) -> Value {
-        let mut out = serde_json::to_value(v).unwrap_or(Value::Null);
-        out[field] = human::bytes(n).into();
-        out
-    }
-
-    // What: proxy request totals and recent rows.
-    // Why: dashboard; read off the async threads.
-    // From: Issue #1683 | PR #1858
-    pub(crate) async fn proxy_log(s: &Settings) -> Result<(Value, Vec<Value>), String> {
-        let dir = Path::new(&s.text("SYSLOG_LOG_ROOT")?).join(s.text("PROXY_LOG_PROGRAM")?);
-        let limit = s.num::<usize>("UI_RECENT_REQUESTS")?;
-        let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
-        let (stats, recent) = tokio::task::spawn_blocking(move || {
-            (access::stats(&dir), access::tail(&dir, limit, chunk))
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        let totals = with_human(&stats, "total_bytes_human", stats.total_bytes);
-        let rows = recent
-            .iter()
-            .rev()
-            .map(|e| with_human(e, "bytes_human", e.bytes))
-            .collect();
-        Ok((totals, rows))
-    }
-
     // What: dashboard: alarms, containers, cache.
     // Why: first page; shows what needs a look.
     // From: Issue #1683 | PR #1858
@@ -12417,9 +12418,9 @@ mod ui {
             .inspect_err(|e| eprintln!("ui: containers: {e}"))
             .unwrap_or_default();
         ctx.insert("containers", &containers);
-        let (totals, recent) = proxy_log(&s).await?;
-        ctx.insert("log_stats", &totals);
-        ctx.insert("recent_logs", &recent);
+        let log = crate::shared::access::summary(&s).await?;
+        ctx.insert("log_stats", &log["totals"]);
+        ctx.insert("recent_logs", &log["recent"]);
         // What: no nginx answer: no live box, error logged.
         // Why: the dashboard renders while nginx is down.
         // From: Issue #1683 | PR #2020
@@ -14340,6 +14341,14 @@ mod ui {
         json_reply(r.map(Some), "")
     }
 
+    // What: proxy log totals and newest requests, JSON.
+    // Why: REST diagnosis on the reader of page and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn proxy_log_api(State(app): Shared) -> Response {
+        let r = crate::shared::access::summary(&app.settings()).await;
+        json_reply(r.map(Some), "")
+    }
+
     // What: nginx stub_status numbers as JSON.
     // Why: REST diagnosis on the reader of page and CLI.
     // From: Issue #1683 | PR #2020
@@ -14782,6 +14791,7 @@ mod ui {
             .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
             .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
             .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
+            .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
