@@ -205,6 +205,13 @@ pub(crate) async fn main_subnet(
     commit(app, f).await
 }
 
+// What: {"snapshots":[{id,created_unix}]} of Kea.
+// Why: one reader for the page, REST and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) fn kea_snapshots(s: &Settings) -> Result<Value, String> {
+    Ok(json!({"snapshots": kea_store(s)?.rows()?}))
+}
+
 // What: change Kea subnets with a closure.
 // Why: get, edit, set, write, snapshot; one path.
 // From: Issue #1683 | PR #1980

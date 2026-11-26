@@ -2440,6 +2440,21 @@ pub mod snapshot {
             Ok(ids)
         }
 
+        // What: the snapshots as id and time rows.
+        // Why: pages, REST and CLI show one shape.
+        // From: Issue #1683 | PR #2017
+        pub fn rows(&self) -> Result<Vec<serde_json::Value>, String> {
+            let mut rows = Vec::new();
+            for id in self.list()? {
+                let path = self.path(&id);
+                let meta =
+                    std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let created = crate::shared::fs::modified_secs(&meta);
+                rows.push(serde_json::json!({"id": id, "created_unix": created}));
+            }
+            Ok(rows)
+        }
+
         // What: one snapshot, parsed as JSON.
         // Why: rollback restores exactly this.
         // From: Issue #1683 | PR #2020

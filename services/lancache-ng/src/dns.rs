@@ -27,7 +27,7 @@ use crate::shared::tool;
 use crate::shared::{apply, fs, render, secret};
 use crate::ui::{
     App, Failing, Fields, apply_all, commit, list_change, or_stop, primary_https_ip, single_field,
-    snapshot_rows, tr,
+    tr,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -369,21 +369,20 @@ pub(crate) fn snapshot_list(s: &Settings) -> Result<Vec<(String, Vec<Value>)>, S
     let mut out = Vec::new();
     for zone in snapshot_zones(s)? {
         let store = zone_store(s, &zone)?;
-        out.push((zone, snapshot_rows(&store)?));
+        out.push((zone, store.rows()?));
     }
     Ok(out)
 }
 
-// What: print {"zones":{zone:[{id,created_unix}]}}.
+// What: {"zones":{zone:[{id,created_unix}]}}.
 // Why: setup.sh reset-config reads this shape.
 // From: Issue #1683 | PR #1980
-pub(crate) fn zone_snapshots_cli(s: &Settings) -> Result<(), String> {
+pub(crate) fn zone_snapshots(s: &Settings) -> Result<Value, String> {
     let zones: serde_json::Map<String, Value> = snapshot_list(s)?
         .into_iter()
         .map(|(z, rows)| (z, Value::Array(rows)))
         .collect();
-    println!("{}", json!({"zones": zones}));
-    Ok(())
+    Ok(json!({"zones": zones}))
 }
 
 // What: put one zone back to a snapshot.

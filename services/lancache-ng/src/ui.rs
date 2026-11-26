@@ -22,14 +22,14 @@
 
 use crate::config::{self, Settings, process_env};
 use crate::dhcp::{
-    dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_api, kea_state, kea_store,
-    main_subnet,
+    dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_api, kea_snapshots,
+    kea_state, kea_store, main_subnet,
 };
 use crate::dns::{
     answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones, flush_on_transfer,
     hosted_now, lan_domain_action, main_domain_fields, missing_ptrs, ns_change, own_rrsets,
     peer_kit, ptr, ptr_rows, record, rollback, rotate_tsig, secondary_health, secondary_watch,
-    snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots_cli,
+    snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
 };
 use crate::shared::dhcp::Mode as DhcpMode;
 use crate::shared::peer::{self, PeerZone};
@@ -805,26 +805,6 @@ pub(crate) async fn logs_save(
     finish(commit(&app, change).await, &back)
 }
 
-// What: file change time as unix seconds.
-// Why: snapshot age needs a plain number.
-// From: Issue #1683 | PR #1980
-pub(crate) fn created_unix(path: &Path) -> Result<u64, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(crate::shared::fs::modified_secs(&meta))
-}
-
-// What: the snapshots of a store as id and time rows.
-// Why: the DNS and the DHCP page show the same shape.
-// From: Issue #1683 | PR #2017
-pub(crate) fn snapshot_rows(store: &crate::shared::snapshot::Store) -> Result<Vec<Value>, String> {
-    let mut rows = Vec::new();
-    for id in store.list().unwrap_or_default() {
-        let created = created_unix(&store.path(&id))?;
-        rows.push(json!({"id": id, "created_unix": created}));
-    }
-    Ok(rows)
-}
-
 // What: DNS page.
 // Why: records are read live from PowerDNS.
 // From: Issue #1683 | PR #1980
@@ -1314,8 +1294,7 @@ pub(crate) async fn dhcp(State(app): Shared, Extension(csrf): Extension<Csrf>) -
         let rows = state[key].as_array().cloned().unwrap_or_default();
         ctx.insert(key, &rows);
     }
-    let store = kea_store(&s)?;
-    ctx.insert("kea_snapshots", &snapshot_rows(&store)?);
+    ctx.insert("kea_snapshots", &kea_store(&s)?.rows()?);
     app.page("dhcp.html", ctx, &csrf)
 }
 
@@ -2452,6 +2431,20 @@ pub(crate) async fn dhcp_state(State(app): Shared) -> Response {
     json_reply(kea_state(&app.settings()).await, NOT_KEA)
 }
 
+// What: zone snapshots as JSON, as setup.sh reads them.
+// Why: REST diagnosis on the reader of page and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) async fn zone_snapshots_api(State(app): Shared) -> Response {
+    json_reply(zone_snapshots(&app.settings()).map(Some), "")
+}
+
+// What: Kea config snapshots as JSON.
+// Why: REST diagnosis on the reader of page and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) async fn kea_snapshots_api(State(app): Shared) -> Response {
+    json_reply(kea_snapshots(&app.settings()).map(Some), "")
+}
+
 // What: the text when the DHCP mode is not Kea.
 // Why: REST and CLI say the same.
 // From: Issue #1683 | PR #2020
@@ -2822,7 +2815,11 @@ route_ops!(SecondaryOp {
 // From: Issue #1683 | PR #1980
 pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
     match args.first().map(String::as_str) {
-        Some("zone-snapshots") => Some(zone_snapshots_cli(s)),
+        Some("zone-snapshots") => Some(zone_snapshots(s).map(|v| println!("{v}"))),
+        // What: Kea config snapshots as JSON.
+        // Why: same reader as the DHCP page and REST.
+        // From: Issue #1683 | PR #2020
+        Some("kea-snapshots") => Some(kea_snapshots(s).map(|v| println!("{v}"))),
         // What: registration token as the ui resolves it.
         // Why: CI reads the token the register API checks.
         // From: Issue #1683 | PR #2020
@@ -2860,10 +2857,11 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
 // What: every command of the ui role; none = the server.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const COMMANDS: [&str; 9] = [
+const COMMANDS: [&str; 10] = [
     "hash-password",
     "encode-password-hash",
     "zone-snapshots",
+    "kea-snapshots",
     "registration-token",
     "zone-rollback",
     "healthcheck",
@@ -2913,6 +2911,8 @@ pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
         .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
         .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
+        .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
+        .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
         .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
         .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
         .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
