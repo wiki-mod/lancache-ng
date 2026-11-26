@@ -890,15 +890,14 @@ detect_lan_ip() {
     return 1
 }
 
-# What: lists port-53 holders on the chosen listen IP
+# What: listeners of port $2 on IP $1 (or on all IPs)
 # Why: a busy port would fail silently at container start
 # From: Issue #1683 | PR #1858
-secondary_listen_ip_conflicts() {
-    local listen_ip="$1" sockets dns_port
+port_holders() {
+    local listen_ip="$1" port="$2" sockets
 
-    dns_port=$(prod_env_default DNS_PORT) || exit $?
-    sockets=$(ss -H -ltnup "( sport = :${dns_port} )") \
-        || die "Failed to list the port ${dns_port} listeners of this host (exit $?)."
+    sockets=$(ss -H -ltnup "( sport = :${port} )") \
+        || die "Failed to list the port ${port} listeners of this host (exit $?)."
     awk -v ip="$listen_ip" '
         {
             local = $5
@@ -912,29 +911,33 @@ secondary_listen_ip_conflicts() {
     ' <<< "$sockets"
 }
 
-# What: a free DNS-port IP: LAN first, then loopback IPs
+# What: a free IP for port $2: LAN, then loopback if $3 = 1
 # Why: 1 = none free, 2 = listing failed; never swallowed
 # From: Issue #1683 | PR #1858
-secondary_suggest_alternate_listen_ip() {
-    local current="$1" candidate addrs conflicts loopback_ip n count
+free_bind_ip_suggestion() {
+    local current="$1" port="$2" loopback="${3:-0}" candidate addrs conflicts loopback_ip n count
 
     addrs=$(host_lan_addresses) \
         || { print_host_addresses_failed "$?"; return 2; }
     while read -r candidate _; do
         [[ -n "$candidate" ]] || continue
         [[ "$candidate" = "$current" ]] && continue
-        conflicts=$(secondary_listen_ip_conflicts "$candidate") || return 2
+        conflicts=$(port_holders "$candidate" "$port") || return 2
         [[ -z "$conflicts" ]] || continue
         printf '%s\n' "$candidate"
         return 0
     done <<< "$addrs"
 
+    # What: loopback IPs only where the caller allows them
+    # Why: primary clients reach the stack over the LAN only
+    # From: Issue #1683 | PR #2017
+    [[ "$loopback" = 1 ]] || return 1
     loopback_ip=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
     count=$(prod_env_default SECONDARY_LOOPBACK_CANDIDATES) || exit $?
     for (( n = 1; n <= count; n++ )); do
         candidate="${loopback_ip%.*}.${n}"
         [[ "$candidate" = "$current" ]] && continue
-        conflicts=$(secondary_listen_ip_conflicts "$candidate") || return 2
+        conflicts=$(port_holders "$candidate" "$port") || return 2
         [[ -z "$conflicts" ]] || continue
         printf '%s\n' "$candidate"
         return 0
@@ -943,33 +946,32 @@ secondary_suggest_alternate_listen_ip() {
     return 1
 }
 
-# What: port 53 on the IP in variable $1; else ask again
+# What: port $2 free on the IP in variable $1; else ask
 # Why: a nameref: in $(...) the prompt has no terminal
 # From: Issue #1683 | PR #1858
-secondary_choose_listen_ip() {
+choose_bind_ip() {
     local -n _bind_ref="$1"
-    local keep="${2:-}" conflicts suggestion dns_port
+    local port="$2" keep="${3:-}" loopback="${4:-0}" conflicts suggestion
 
-    dns_port=$(prod_env_default DNS_PORT) || exit $?
     while true; do
-        # What: --rotate keeps its own bind IP unchecked
-        # Why: the running secondary holds that port itself
+        # What: the stack's own bind IP is kept unchecked
+        # Why: its running container holds that port
         # From: Issue #1683
         [[ -n "$keep" && "$_bind_ref" = "$keep" ]] && return 0
-        conflicts="$(secondary_listen_ip_conflicts "$_bind_ref")" || exit $?
+        conflicts="$(port_holders "$_bind_ref" "$port")" || exit $?
         [[ -z "$conflicts" ]] && return 0
 
-        print_warn "Port ${dns_port} is already in use for bind IP ${_bind_ref}."
+        print_warn "Port ${port} is already in use for bind IP ${_bind_ref}."
         {
             printf '%s\n' "$conflicts" | sed 's/^/    /'
-            # What: port-53 holder details, raw output
+            # What: port holder details, raw output
             # Why: diagnostics only; exit code is no result
             # From: Issue #1683 | PR #1858
             if command_available fuser; then
-                fuser -v "${dns_port}/tcp" "${dns_port}/udp" 2>&1 | sed 's/^/    /' || printf '    (fuser exit %s)\n' "$?"
+                fuser -v "${port}/tcp" "${port}/udp" 2>&1 | sed 's/^/    /' || printf '    (fuser exit %s)\n' "$?"
             fi
             if command_available lsof; then
-                lsof -nP "-iTCP:${dns_port}" "-iUDP:${dns_port}" -sTCP:LISTEN 2>&1 | sed 's/^/    /' || printf '    (lsof exit %s)\n' "$?"
+                lsof -nP "-iTCP:${port}" "-iUDP:${port}" -sTCP:LISTEN 2>&1 | sed 's/^/    /' || printf '    (lsof exit %s)\n' "$?"
             fi
         } >&2
 
@@ -980,9 +982,9 @@ secondary_choose_listen_ip() {
             return 1
         fi
 
-        suggestion=$(secondary_suggest_alternate_listen_ip "$_bind_ref") \
+        suggestion=$(free_bind_ip_suggestion "$_bind_ref" "$port" "$loopback") \
             || (( $? == 1 )) || exit 2
-        ask_checked "$1" "Use another Secondary bind IP" "${suggestion:-$_bind_ref}" is_valid_ipv4 "Invalid IPv4 address"
+        ask_checked "$1" "Use another bind IP" "${suggestion:-$_bind_ref}" is_valid_ipv4 "Invalid IPv4 address"
     done
 }
 
@@ -3970,7 +3972,7 @@ secondary_https_bind() {
     local -n _hb_ref="$1"
     local http_bind="$2" keep="$3" dns_port
     dns_port=$(prod_env_default DNS_PORT) || exit $?
-    secondary_choose_listen_ip "$1" "$keep" \
+    choose_bind_ip "$1" "$dns_port" "$keep" 1 \
         || die "No usable secondary https bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip-https <ip> after freeing the port."
     require_separate_lan_ips "$http_bind" "$_hb_ref" "the http bind IP" "the https bind IP"
     print_ok "Secondary https DNS bind IP: ${_hb_ref}"
@@ -9070,6 +9072,16 @@ cmd_update_ip() {
     ask_checked new_ip_https "New HTTPS mode IP" "$current_ip_https" is_valid_ipv4 "Invalid IPv4 address"
 
     require_separate_lan_ips "$new_ip_http" "$new_ip_https"
+    # What: port 53 free on both new IPs; the old ones kept
+    # Why: dns binds 53 on both; a busy one fails at start
+    # From: Issue #1683 | PR #2017
+    local dns_port
+    dns_port=$(prod_env_default DNS_PORT) || exit $?
+    choose_bind_ip new_ip_http "$dns_port" "$current_ip_http" \
+        || die "Port ${dns_port} is busy on ${new_ip_http} (see above); nothing was changed."
+    choose_bind_ip new_ip_https "$dns_port" "$current_ip_https" \
+        || die "Port ${dns_port} is busy on ${new_ip_https} (see above); nothing was changed."
+    require_separate_lan_ips "$new_ip_http" "$new_ip_https"
 
     printf "\n"
     printf '  %sNew configuration:%s\n' "${BOLD}" "${RESET}"
@@ -9590,7 +9602,7 @@ cmd_secondary() {
         keep_listen="$stored_listen"
         keep_listen_https="$stored_listen_https"
     fi
-    secondary_choose_listen_ip listen_ip "$keep_listen" \
+    choose_bind_ip listen_ip "$dns_port" "$keep_listen" 1 \
         || die "No usable secondary bind IP on port ${dns_port} (exit $?; see above). Re-run with --listen-ip <ip> after freeing the port."
     print_ok "Secondary DNS bind IP: ${listen_ip}"
     if [[ -n "$ip_https" || -n "$listen_ip_https" ]]; then
@@ -10160,7 +10172,22 @@ printf '  %sSecond LAN IP%s: the HTTPS DNS/proxy address, always required.\n\n' 
 suggested_https=$(next_ipv4 "$IP_HTTP")
 ask_checked IP_HTTPS "Second LAN IP (HTTPS mode)" "$suggested_https" is_valid_ipv4 "Invalid IPv4 address"
 require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
-ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
+# What: port 53 free on both IPs; the stack's own kept
+# Why: dns binds port 53 on both; a busy one fails at start
+# From: Issue #1683 | PR #2017
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    keep_ip_http="" keep_ip_https=""
+    if [[ -f "$ENV_FILE" ]]; then
+        keep_ip_http=$(get_env_var IP_HTTP "$ENV_FILE") || exit $?
+        keep_ip_https=$(get_env_var IP_HTTPS "$ENV_FILE") || exit $?
+    fi
+    dns_port=$(prod_env_default DNS_PORT) || exit $?
+    choose_bind_ip IP_HTTP "$dns_port" "$keep_ip_http" \
+        || die "Port ${dns_port} is busy on ${IP_HTTP} (see above); nothing was changed."
+    choose_bind_ip IP_HTTPS "$dns_port" "$keep_ip_https" \
+        || die "Port ${dns_port} is busy on ${IP_HTTPS} (see above); nothing was changed."
+    require_separate_lan_ips "$IP_HTTP" "$IP_HTTPS"
+fi
 
 printf "\n"
 printf '  %sHTTPS mode%s: also caches HTTPS downloads (Epic, EA, Blizzard…)\n' "${BOLD}" "${RESET}"
@@ -10531,6 +10558,11 @@ else
     print_warn "The Admin-UI then needs a password; the question comes again."
 fi
 done
+
+# What: a missing second IP is offered after all answers
+# Why: no host change before every question is answered
+# From: Issue #1683 | PR #2017
+ensure_host_ipv4 "$IP_HTTPS" "$IP_HTTP"
 
 # What: writes .env in one atomic step
 # Why: a half-written .env must never exist
