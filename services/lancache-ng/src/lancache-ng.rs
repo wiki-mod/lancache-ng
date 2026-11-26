@@ -5678,6 +5678,12 @@ mod shared {
             if !status.is_success() {
                 return Err(format!("ui {}: {text}", status.as_u16()));
             }
+            // What: an empty answer (204) is JSON null.
+            // Why: start, stop and restart answer no body.
+            // From: Issue #1683 | PR #2020
+            if text.trim().is_empty() {
+                return Ok(serde_json::Value::Null);
+            }
             serde_json::from_str(&text).map_err(|e| format!("ui answer: {e}"))
         }
 
@@ -6975,15 +6981,45 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub async fn system_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
-            if args.first().map(String::as_str) != Some("status") {
-                return Err("commands: status".into());
-            }
-            let v = status_json(&Api::new(&s.text("DOCKER_ENDPOINT")?)?, &s).await;
-            println!("{v}");
-            match v["state"].as_str() {
-                Some("ok") => Ok(()),
-                _ => Err(v["error"].as_str().unwrap_or("unavailable").to_string()),
-            }
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            // What: start/stop/restart/reload go to the ui.
+            // Why: the ui keeps SERVICES_STOPPED.
+            // From: Issue #1683 | PR #2020
+            let (route, body) = match words.as_slice() {
+                ["status"] => {
+                    let v = status_json(&Api::new(&s.text("DOCKER_ENDPOINT")?)?, &s).await;
+                    println!("{v}");
+                    return match v["state"].as_str() {
+                        Some("ok") => Ok(()),
+                        _ => Err(v["error"].as_str().unwrap_or("unavailable").to_string()),
+                    };
+                }
+                ["container", svc, word @ ("start" | "stop")] => {
+                    let state = if *word == "start" {
+                        "running"
+                    } else {
+                        "stopped"
+                    };
+                    let r = s.text("UI_ROUTE_DESIRED_STATE")?.replace("{service}", svc);
+                    (r, json!({"state": state}))
+                }
+                ["service", c, p, a @ ("restart" | "reload")] => {
+                    let r = s
+                        .text("UI_ROUTE_SERVICE_ACTION")?
+                        .replace("{container}", c)
+                        .replace("{program}", p)
+                        .replace("{action}", a);
+                    (r, Value::Null)
+                }
+                _ => {
+                    return Err("commands: status | container <service> start|stop | \
+                                service <container> <program> restart|reload"
+                        .into());
+                }
+            };
+            let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+            println!("{}", json!({"done": route, "answer": v}));
+            Ok(())
         }
 
         // What: compose label of a "compose run" container.
@@ -12466,7 +12502,11 @@ mod ui {
         // Why: each POST changes state.
         // From: Issue #1683 | PR #1980
         fn check(&self, form: &Fields) -> Result<(), Fail> {
-            match form.get(CSRF_FIELD) {
+            match form
+                .get(CSRF_FIELD)
+                .map(String::as_str)
+                .or(self.1.then_some(""))
+            {
                 Some(t) if self.matches(t) => Ok(()),
                 _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
             }
@@ -14944,10 +14984,7 @@ mod ui {
             .route(&p("UI_PAGE_DHCP")?, get(dhcp))
             .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
             .route(&p("UI_PAGE_STATS")?, get(stats))
-            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
-            .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
-            .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
-            .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action));
+            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph));
         // What: one route per action, tagged with SOT key.
         // Why: handlers match the key, never a path text.
         // From: Issue #1683
@@ -15017,7 +15054,10 @@ mod ui {
             .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
             .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
             .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
-            .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview)))
+            .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
+            .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
+            .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
+            .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action)))
     }
 
     // What: the REST routes on the CLI socket.
