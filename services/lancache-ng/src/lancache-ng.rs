@@ -3888,6 +3888,17 @@ mod dns {
                 println!("{}", dnssec_status(&Settings::from_process()?).await?);
                 Ok(())
             }
+            // What: PowerDNS APIs reachable; stats counts.
+            // Why: reads; they need no running ui.
+            // From: Issue #1683 | PR #2020
+            Some(cmd @ ("api-check" | "stats")) => {
+                let v = peer::api_report(&Settings::from_process()?, cmd == "stats").await?;
+                println!("{v}");
+                match v["ok"].as_bool() {
+                    Some(true) => Ok(()),
+                    _ => Err(format!("{cmd}: a PowerDNS API did not answer")),
+                }
+            }
             // What: empty recursor caches; no zone = all.
             // Why: a repair must work while the ui is down.
             // From: Issue #1683 | PR #2020
@@ -3943,7 +3954,7 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 7] = [
+    const COMMANDS: [&str; 9] = [
         "daemon",
         "follow-once",
         "sync-check",
@@ -3951,6 +3962,8 @@ mod dns {
         "secondary",
         "flush",
         "dnssec",
+        "api-check",
+        "stats",
     ];
 
     // What: serials of managed zones on all servers.
@@ -6158,6 +6171,15 @@ mod shared {
             key: String,
         }
 
+        impl Api {
+            // What: the API base URL, never the key.
+            // Why: reports name the server they asked.
+            // From: Issue #1683 | PR #2020
+            pub fn base(&self) -> &str {
+                &self.base
+            }
+        }
+
         // What: name with exactly one final dot.
         // Why: the API wants canonical names.
         // From: Issue #1683 | PR #1980
@@ -6408,6 +6430,24 @@ mod shared {
             pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
                 let path = format!("{}/axfr-retrieve", zone_path(zone));
                 self.call(Method::PUT, &path, None).await.map(drop)
+            }
+
+            // What: numbers of a statistics list, summed.
+            // Why: values come as text; prefix: the server.
+            // From: Issue #1683 | PR #1980
+            pub fn add_stats(
+                out: &mut std::collections::BTreeMap<String, String>,
+                prefix: &str,
+                rows: Vec<(String, String)>,
+            ) {
+                for (name, value) in rows {
+                    let Ok(n) = value.parse::<u64>() else {
+                        continue;
+                    };
+                    let key = format!("{prefix}:{name}");
+                    let old = out.get(&key).and_then(|v| v.parse::<u64>().ok());
+                    out.insert(key, old.unwrap_or(0).saturating_add(n).to_string());
+                }
             }
 
             // What: name and value of each server counter.
@@ -9026,6 +9066,47 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 r.flush(zone, true).await?;
             }
             Ok(())
+        }
+
+        // What: each PowerDNS API: reachable, counters.
+        // Why: shows a wrong key or a down server at once.
+        // From: Issue #1683 | PR #2020
+        pub async fn api_report(
+            s: &Settings,
+            with_stats: bool,
+        ) -> Result<serde_json::Value, String> {
+            use serde_json::json;
+            let mut apis = vec![("auth", own_api(s)?)];
+            apis.extend(recursor_apis(s)?.into_iter().map(|a| ("recursor", a)));
+            let mut out = Vec::new();
+            for (server, api) in apis {
+                let mut row = json!({"server": server, "url": api.base()});
+                // What: the recursor key proven by a write.
+                // Why: its GET answers without the key.
+                // From: Issue #1683 | PR #2020
+                let key = match server {
+                    "recursor" => api.flush("key-check.invalid", false).await,
+                    _ => Ok(()),
+                };
+                match key.and(api.statistics().await) {
+                    Ok(rows) => {
+                        row["ok"] = json!(true);
+                        row["counters"] = json!(rows.len());
+                        if with_stats {
+                            let mut map = BTreeMap::new();
+                            crate::shared::pdns::Api::add_stats(&mut map, server, rows);
+                            row["statistics"] = json!(map);
+                        }
+                    }
+                    Err(e) => {
+                        row["ok"] = json!(false);
+                        row["error"] = json!(e);
+                    }
+                }
+                out.push(row);
+            }
+            let ok = out.iter().all(|r| r["ok"] == json!(true));
+            Ok(json!({"ok": ok, "apis": out}))
         }
 
         // What: pdns API of this node, primary or secondary
@@ -13299,6 +13380,30 @@ mod ui {
         adopt(app, &old, new).await
     }
 
+    // What: GET PowerDNS API check without counters.
+    // Why: REST read on the report of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_api_check(State(app): Shared) -> Response {
+        json_reply(
+            crate::shared::peer::api_report(&app.settings(), false)
+                .await
+                .map(Some),
+            "",
+        )
+    }
+
+    // What: GET PowerDNS API check with all counters.
+    // Why: REST read on the report of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_stats_api(State(app): Shared) -> Response {
+        json_reply(
+            crate::shared::peer::api_report(&app.settings(), true)
+                .await
+                .map(Some),
+            "",
+        )
+    }
+
     // What: GET DNSSEC anchors, proven zones and NTAs.
     // Why: REST read on the reader of the CLI.
     // From: Issue #1683 | PR #2020
@@ -14214,24 +14319,6 @@ mod ui {
         errs
     }
 
-    // What: numbers of a PowerDNS statistics list.
-    // Why: values come as text; prefix names the server.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn add_stats(
-        out: &mut BTreeMap<String, String>,
-        prefix: &str,
-        rows: Vec<(String, String)>,
-    ) {
-        for (name, value) in rows {
-            let Ok(n) = value.parse::<u64>() else {
-                continue;
-            };
-            let key = format!("{prefix}:{name}");
-            let old = out.get(&key).and_then(|v| v.parse::<u64>().ok());
-            out.insert(key, old.unwrap_or(0).saturating_add(n).to_string());
-        }
-    }
-
     // What: program values one sample round reads.
     // Why: a program that is off leaves its values unknown.
     // From: Issue #1683 | PR #1980
@@ -14254,7 +14341,7 @@ mod ui {
         {
             for r in apis {
                 if let Ok(rows) = r.statistics().await {
-                    add_stats(&mut out, "recursor", rows);
+                    crate::shared::pdns::Api::add_stats(&mut out, "recursor", rows);
                 }
             }
         }
@@ -14262,7 +14349,7 @@ mod ui {
             && let Ok(api) = peer::own_api(s)
             && let Ok(rows) = api.statistics().await
         {
-            add_stats(&mut out, "auth", rows);
+            crate::shared::pdns::Api::add_stats(&mut out, "auth", rows);
         }
         if has("kea")
             && let Ok(Some(map)) = crate::dhcp::kea_stats(s).await
@@ -15691,6 +15778,8 @@ mod ui {
             .route(&p("UI_ROUTE_SETTINGS_SCHEMA")?, get(settings_schema_api))
             .route(&p("UI_ROUTE_DNS_FLUSH")?, post(dns_flush_api))
             .route(&p("UI_ROUTE_DNSSEC")?, get(dnssec_api))
+            .route(&p("UI_ROUTE_DNS_API_CHECK")?, get(dns_api_check))
+            .route(&p("UI_ROUTE_DNS_STATS")?, get(dns_stats_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
