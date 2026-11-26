@@ -3049,7 +3049,8 @@ mod config {
                     body.insert(k.to_string(), v.into());
                 }
                 let route = s.text("UI_ROUTE_SETTINGS")?;
-                let v = crate::shared::http::ui_socket(&s, &route, body.into()).await?;
+                let body = crate::shared::http::Body::Json(body.into());
+                let v = crate::shared::http::ui_socket(&s, &route, body).await?;
                 println!("{v}");
             }
             _ => return Err("usage: config show [KEY] | config set KEY=VALUE ...".into()),
@@ -3288,7 +3289,11 @@ mod dhcp {
                 }
                 _ => return Err("usage: kea-rollback <snapshot-id>".into()),
             },
-            _ => return Err("commands: state kea-snapshots stats kea-rollback".into()),
+            // What: a DHCP page action via the ui socket.
+            // Why: the ui checks, saves and applies it.
+            // From: Issue #1683 | PR #2020
+            Some("do") => page_action(&s, &args[1..]).await?,
+            _ => return Err("commands: state kea-snapshots stats kea-rollback do".into()),
         };
         println!("{v}");
         Ok(())
@@ -3299,6 +3304,43 @@ mod dhcp {
     // From: Issue #1683 | PR #2020
     pub(crate) fn kea_snapshots(s: &Settings) -> Result<Value, String> {
         Ok(json!({"snapshots": kea_store(s)?.rows()?}))
+    }
+
+    // What: "do <action> field=value": the page form.
+    // Why: the word is the route key without UI_ROUTE_.
+    // From: Issue #1683 | PR #2020
+    async fn page_action(s: &Settings, args: &[String]) -> Result<Value, String> {
+        use crate::ui::DhcpOp;
+        let word = |op: DhcpOp| {
+            op.key()["UI_ROUTE_".len()..]
+                .to_lowercase()
+                .replace('_', "-")
+        };
+        // What: rollback has its own word without the ui.
+        // Why: one CLI way per job.
+        // From: Issue #1683 | PR #2020
+        let ops = DhcpOp::ALL
+            .iter()
+            .copied()
+            .filter(|o| !matches!(o, DhcpOp::KeaRollback));
+        let words: Vec<String> = ops.clone().map(word).collect();
+        let usage = || format!("usage: do <{}> field=value ...", words.join("|"));
+        let (name, pairs) = args.split_first().ok_or_else(usage)?;
+        let op = ops
+            .into_iter()
+            .find(|o| word(*o) == *name)
+            .ok_or_else(usage)?;
+        let mut form = Vec::new();
+        for pair in pairs {
+            let (k, v) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("{pair}: needs field=value"))?;
+            form.push((k.to_string(), v.to_string()));
+        }
+        let route = s.text(op.key())?;
+        let body = crate::shared::http::Body::Form(form);
+        crate::shared::http::ui_socket(s, &route, body).await?;
+        Ok(json!({"done": name}))
     }
 
     // What: put the Kea config back to a snapshot.
@@ -5668,28 +5710,36 @@ mod shared {
         use futures_util::StreamExt as _;
         use std::time::Duration;
 
-        // What: POST JSON to the ui over its CLI socket.
+        // What: what a CLI write sends: JSON or form.
+        // Why: REST routes take JSON, page actions forms.
+        // From: Issue #1683 | PR #2020
+        pub enum Body {
+            Json(serde_json::Value),
+            Form(Vec<(String, String)>),
+        }
+
+        // What: POST to the ui over its CLI socket.
         // Why: CLI writes run in the ui, one state owner.
         // From: Issue #1683 | PR #2020
         pub async fn ui_socket(
             s: &Settings,
             route: &str,
-            body: serde_json::Value,
+            body: Body,
         ) -> Result<serde_json::Value, String> {
             let path = s.text("UI_CLI_SOCKET")?;
+            // What: a redirect is read, never followed.
+            // Why: a page form answers 303 when it is done.
+            // From: Issue #1683 | PR #2020
             let client = reqwest::Client::builder()
                 .unix_socket(std::path::PathBuf::from(&path))
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(s.uint("UI_CLI_WRITE_TIMEOUT_SECONDS")?))
                 .build()
                 .map_err(|e| format!("{path}: {e}"))?;
             let req = client.post(format!("http://ui{route}"));
-            // What: no body goes as an empty form.
-            // Why: form routes refuse a JSON null.
-            // From: Issue #1683 | PR #2020
-            let req = if body.is_null() {
-                req.form(&[("", ""); 0])
-            } else {
-                req.json(&body)
+            let req = match &body {
+                Body::Json(v) => req.json(v),
+                Body::Form(f) => req.form(f),
             };
             let resp = req
                 .send()
@@ -5697,11 +5747,11 @@ mod shared {
                 .map_err(|e| format!("{path}: is the ui running? {e}"))?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| format!("{path}: {e}"))?;
-            if !status.is_success() {
+            if !status.is_success() && !status.is_redirection() {
                 return Err(format!("ui {}: {text}", status.as_u16()));
             }
-            // What: an empty answer (204) is JSON null.
-            // Why: start, stop and restart answer no body.
+            // What: an empty answer (204, 303) is null.
+            // Why: start, stop and forms send no body.
             // From: Issue #1683 | PR #2020
             if text.trim().is_empty() {
                 return Ok(serde_json::Value::Null);
@@ -7003,6 +7053,7 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub async fn system_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
+            use crate::shared::http::Body;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             // What: start/stop/restart/reload go to the ui.
             // Why: the ui keeps SERVICES_STOPPED.
@@ -7023,16 +7074,16 @@ mod shared {
                         "stopped"
                     };
                     let r = s.text("UI_ROUTE_DESIRED_STATE")?.replace("{service}", svc);
-                    (r, json!({"state": state}))
+                    (r, Body::Json(json!({"state": state})))
                 }
-                ["ui", "restart"] => (s.text("UI_ROUTE_RESTART_UI")?, Value::Null),
+                ["ui", "restart"] => (s.text("UI_ROUTE_RESTART_UI")?, Body::Form(vec![])),
                 ["service", c, p, a @ ("restart" | "reload")] => {
                     let r = s
                         .text("UI_ROUTE_SERVICE_ACTION")?
                         .replace("{container}", c)
                         .replace("{program}", p)
                         .replace("{action}", a);
-                    (r, Value::Null)
+                    (r, Body::Form(vec![]))
                 }
                 _ => {
                     return Err("commands: status | container <service> start|stop | \
@@ -11919,7 +11970,8 @@ end
                 // From: Issue #1683 | PR #2020
                 Some("wipe") => {
                     let r = s.text("UI_ROUTE_HAMSTER_API")?.replace("{op}", "wipe");
-                    let v = crate::shared::http::ui_socket(&s, &r, serde_json::Value::Null).await?;
+                    let body = crate::shared::http::Body::Form(vec![]);
+                    let v = crate::shared::http::ui_socket(&s, &r, body).await?;
                     println!("{v}");
                     Ok(())
                 }
@@ -14878,8 +14930,8 @@ mod ui {
         #[derive(Clone, Copy)]
         pub(crate) enum $name { $($var),+ }
         impl $name {
-            const ALL: &'static [$name] = &[$($name::$var),+];
-            fn key(self) -> &'static str {
+            pub(crate) const ALL: &'static [$name] = &[$($name::$var),+];
+            pub(crate) fn key(self) -> &'static str {
                 match self { $($name::$var => $key),+ }
             }
         }
@@ -15025,9 +15077,6 @@ mod ui {
         for &op in DnsOp::ALL {
             pages = pages.route(&p(op.key())?, post(dns_action).layer(Extension(Op(op))));
         }
-        for &op in DhcpOp::ALL {
-            pages = pages.route(&p(op.key())?, post(dhcp_action).layer(Extension(Op(op))));
-        }
         for &op in HamsterOp::ALL {
             pages = pages.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
         }
@@ -15072,8 +15121,14 @@ mod ui {
     // From: Issue #1683 | PR #2020
     fn api_routes(s: &Settings) -> Result<Router<Arc<App>>, String> {
         let p = |key: &str| s.text(key);
-        Ok(Router::new()
-            .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
+        let mut r = Router::new();
+        // What: DHCP page actions, one route per action.
+        // Why: page, REST and CLI post the same form.
+        // From: Issue #1683 | PR #2020
+        for &op in DhcpOp::ALL {
+            r = r.route(&p(op.key())?, post(dhcp_action).layer(Extension(Op(op))));
+        }
+        Ok(r.route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
             .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
             .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
             .route(
