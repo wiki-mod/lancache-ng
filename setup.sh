@@ -5832,14 +5832,23 @@ record_image_revisions() {
 # Why: bash waits for both ends; no half-written archive
 # From: Issue #1683 | PR #1858
 write_compressed_tar() {
-    local ext="$1" archive="$2" parent="$3" entry="$4" rows
+    local ext="$1" archive="$2" parent="$3" entry="$4" rows rc=0
     local -a row compressor=()
     rows=$(lancache_sot_list archive_compressors runtime) || exit $?
     while read -r -a row; do
         [[ "${row[0]}" != "$ext" ]] || compressor=("${row[@]:1}")
     done <<< "$rows"
     [[ ${#compressor[@]} -gt 0 ]] || die "No compressor for .$ext archives in runtime.archive_compressors."
-    tar -C "$parent" -cf - "$entry" | "${compressor[@]}" > "$archive"
+    # What: written as .partial, mode 600, then renamed
+    # Why: only a whole archive carries the final name
+    # From: Issue #1683 | PR #1858
+    tar -C "$parent" -cf - "$entry" | "${compressor[@]}" > "$archive.partial" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        rm -f "$archive.partial" || print_error "Failed to remove $archive.partial (exit $?)."
+        return "$rc"
+    fi
+    chmod 600 "$archive.partial" || die "Failed to restrict $archive.partial (exit $?)."
+    mv "$archive.partial" "$archive" || die "Failed to finish $archive (exit $?)."
 }
 
 # What: config or full backup; the body is a subshell
@@ -5944,13 +5953,8 @@ The cache volume is always excluded from config backups, since it can be very la
 Full backups additionally include cache directories and the cache volume, which can be very large.
 Restore with: ./setup.sh restore $archive $install_dir
 EOF
-    # What: archive is written as .partial, then renamed
-    # Why: rollback takes the newest complete archive
-    # From: Issue #1683 | PR #1858
-    write_compressed_tar "$archive_ext" "$archive.partial" "$backup_root" "$stamp" \
+    write_compressed_tar "$archive_ext" "$archive" "$backup_root" "$stamp" \
         || die "Failed to write $archive (exit $?)."
-    chmod 600 "$archive.partial" || die "Failed to restrict $archive.partial (exit $?)."
-    mv "$archive.partial" "$archive" || die "Failed to finish $archive (exit $?)."
     print_ok "Backup written: $archive"
     backup_cleanup
 )
@@ -8358,13 +8362,8 @@ EOF
 
     ext=$(logbundle_select_compressor)
     archive="$dest_root/lancache-ng-issue-logs-${stamp}.tar.${ext}"
-    local tar_rc=0
-    write_compressed_tar "$ext" "$archive" "$dest_root" "$(basename "$dest")" || tar_rc=$?
-    if [[ "$tar_rc" -ne 0 ]]; then
-        rm -f "$archive" || print_error "Failed to remove the partial archive $archive (exit $?)."
-        die "Failed to write $archive (exit $tar_rc)."
-    fi
-    chmod 600 "$archive" || die "Failed to restrict $archive (exit $?)."
+    write_compressed_tar "$ext" "$archive" "$dest_root" "$(basename "$dest")" \
+        || die "Failed to write $archive (exit $?)."
 
     logbundle_cleanup
     print_ok "Diagnostic bundle written: $archive"
