@@ -94,6 +94,10 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # Why: built from this checkout; no other binary here.
 # From: Issue #1683 | PR #1980
 COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
+# What: old name as a symlink to the one binary.
+# Why: callers run lancache-ui; argv0 picks the ui role.
+# From: Issue #1683
+RUN ln -s lancache-ng /usr/local/bin/lancache-ui
 
 # What: the SOT ui port, documented for Docker.
 # Why: compose maps it; the value comes from ci.sh.

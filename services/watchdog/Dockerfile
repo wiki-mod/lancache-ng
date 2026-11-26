@@ -94,6 +94,11 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # Why: built in the builder stage from this checkout.
 # From: Issue #1683 | PR #1980
 COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
+# What: old names as symlinks to the one binary.
+# Why: argv0 picks the watchdog and cachehamster roles.
+# From: Issue #1683
+RUN ln -s lancache-ng /usr/local/bin/lancache-watchdog \
+ && ln -s lancache-ng /usr/local/bin/lancache-cachehamster
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.

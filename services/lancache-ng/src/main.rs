@@ -2,7 +2,7 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 
-// What: entry of the all-in-one; first arg picks the role.
+// What: entry of the all-in-one; the role picks the code.
 // Why: one binary runs every role and command of the stack.
 // From: Issue #1683
 mod cachehamster;
@@ -15,16 +15,28 @@ mod watchdog;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    let (role, rest) = match argv.split_first() {
-        Some((r, rest)) => (r.as_str(), rest.to_vec()),
-        None => ("", Vec::new()),
+    // What: the program name may name the role (busybox style).
+    // Why: old callers run lancache-ui/-dns/... unchanged.
+    // From: Issue #1683
+    let exe = std::env::args().next().unwrap_or_default();
+    let exe = std::path::Path::new(&exe)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    let role: String = match exe {
+        "lancache-ui" => "ui".into(),
+        "lancache-dns" => "dns".into(),
+        "lancache-watchdog" => "watchdog".into(),
+        "lancache-cachehamster" => "cachehamster".into(),
+        _ if !argv.is_empty() => argv.remove(0),
+        _ => String::new(),
     };
-    match role {
-        "ui" => code(ui::run(&rest).await),
-        "watchdog" => code(watchdog::run(&rest).await),
-        "dns" => code(dns::run(&rest).await),
-        "cachehamster" => cachehamster::run(&rest).await,
+    match role.as_str() {
+        "ui" => code(ui::run(&argv).await),
+        "watchdog" => code(watchdog::run(&argv).await),
+        "dns" => code(dns::run(&argv).await),
+        "cachehamster" => cachehamster::run(&argv).await,
         other => {
             eprintln!("lancache-ng: unknown role {other:?}; use ui|watchdog|dns|cachehamster");
             std::process::ExitCode::from(2)
