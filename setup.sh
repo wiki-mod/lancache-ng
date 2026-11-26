@@ -135,6 +135,21 @@ print_result_banner() {
     printf '%s%s%s%s\n\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
 }
 
+# What: the lines of text $2 as one line, joined by $1
+# Why: one owner for every list shown in a message or hint
+# From: Issue #1683 | PR #2017
+lines_joined() {
+    local sep="$1" out="" line first=1
+    while IFS= read -r line; do
+        if (( first )); then
+            out="$line" first=0
+        else
+            out+="${sep}${line}"
+        fi
+    done <<< "$2"
+    printf '%s\n' "$out"
+}
+
 # What: true if $1 equals an item; one text item = its lines
 # Why: one membership owner for arrays, words and lines
 # From: Issue #1683 | PR #2017
@@ -1140,7 +1155,7 @@ choose_lancache_channel() {
         fi
     done <<< "$selectable"
     printf "\n"
-    channel_hint=$(paste -sd/ <<< "$selectable")
+    channel_hint=$(lines_joined / "$selectable")
     while true; do
         ask "Release channel [$channel_hint]" "$default"
         if list_has "${REPLY,,}" "$selectable"; then
@@ -1857,7 +1872,7 @@ the Compose v2 plugin, and on Alpine the GNU tools setup.sh uses"
 # From: Issue #1683
 cmd_install_requirements() {
     ensure_stack_requirements_installed
-    print_ok "Requirements installed (${REQUIREMENTS_TEXT//$'\n'/ }). Next: ./setup.sh install (primary) or ./setup.sh secondary."
+    print_ok "Requirements installed ($(lines_joined ' ' "$REQUIREMENTS_TEXT")). Next: ./setup.sh install (primary) or ./setup.sh secondary."
 }
 
 # What: strips quotes and unquoted inline comments
@@ -2554,7 +2569,7 @@ note_env_overrides() {
     local env_file="$1" keys
     [[ -f "$env_file.local" ]] || return 0
     keys=$(env_file_keys "$env_file.local") || exit $?
-    keys="${keys//$'\n'/ }"
+    keys=$(lines_joined ' ' "$keys")
     print_warn "$env_file.local overrides ${keys:-no key} of $env_file; delete it to run with $env_file alone."
 }
 
@@ -3821,7 +3836,7 @@ adopt_moved_config_prod_keys() {
         [[ -f "$file" ]] || continue
         left=$(env_file_keys "$file") || exit $?
         if [[ -n "$left" ]]; then
-            print_warn "Kept ${file##*/}: it still sets ${left//$'\n'/, }, which no container reads. Move them into ${env_file##*/} or delete the file."
+            print_warn "Kept ${file##*/}: it still sets $(lines_joined ', ' "$left"), which no container reads. Move them into ${env_file##*/} or delete the file."
             continue
         fi
         rm -f -- "$file" || die "Failed to delete $file (exit $?)."
@@ -4492,7 +4507,7 @@ validate_lancache_image_channel() {
     pinned=$(lancache_release_rows pinned) || exit $?
     accepted=$(printf '%s\n%s\n' "$accepted" "$pinned")
     [[ -z "$channel" ]] || ! list_has "$channel" "$accepted" || return 0
-    valid=$(paste -sd' ' <<< "$accepted")
+    valid=$(lines_joined ' ' "$accepted")
     retired=$(lancache_release_rows retired) || exit $?
     reason=$(awk -v c="$channel" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
     [[ -z "$reason" ]] \
@@ -4545,11 +4560,11 @@ derive_release_archive_image_tag() {
                 is_release_tag "$line" && tag+="${tag:+$'\n'}$line"
             done <<< "$tags"
             if [[ -z "$tag" ]]; then
-                printf 'Invalid release tag from git checkout: %s\n' "${tags//$'\n'/ }" >&2
+                printf 'Invalid release tag from git checkout: %s\n' "$(lines_joined ' ' "$tags")" >&2
                 return 2
             fi
             if [[ "$tag" == *$'\n'* ]]; then
-                printf 'Several release tags point at HEAD: %s\n' "${tag//$'\n'/ }" >&2
+                printf 'Several release tags point at HEAD: %s\n' "$(lines_joined ' ' "$tag")" >&2
                 return 2
             fi
             printf '%s\n' "$tag"
@@ -4707,10 +4722,10 @@ is_channel_branch() {
 # Why: a text shows the SOT pairs; it names no branch
 # From: Issue #1683 | PR #2017
 lancache_channel_branch_words() {
-    local pairs
+    local pairs words
     pairs=$(lancache_channel_source_branches) || exit $?
-    awk '{ printf "%s%s (%s)", (NR > 1 ? " or " : ""), $2, $1 }
-        END { print "" }' <<< "$pairs"
+    words=$(awk '{ print $2 " (" $1 ")" }' <<< "$pairs") || die "Failed to format the channel branches (exit $?)."
+    lines_joined ' or ' "$words"
 }
 
 # What: git branch, tag or commit of a channel's code
@@ -6111,7 +6126,7 @@ cmd_restore() (
     archive="${1:-}"
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
-    [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive ($(archive_compressor exts | paste -sd" "))> [install-dir]"
+    [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive ($(lines_joined ' ' "$(archive_compressor exts)"))> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # What: tools of the restore and its convergence step
     # Why: fails before restore mutations on minimal hosts
@@ -6363,7 +6378,7 @@ print_command_help() {
 Usage: ./setup.sh install [<channel>]
 
 Runs the guided LanCache-NG installer. The optional channel word
-(one of: $(lancache_release_rows channel | paste -sd" ")) skips the channel prompt.
+(one of: $(lines_joined ' ' "$(lancache_release_rows channel)")) skips the channel prompt.
 setup.sh does nothing without a command, so the curl | bash one-liner
 passes it: ... | sudo bash -s -- install [<channel>]
 
@@ -6551,7 +6566,7 @@ EOF
             ;;
         restore)
             cat <<EOF
-Usage: ./setup.sh restore <backup archive ($(archive_compressor exts | paste -sd" "))> [install-dir]
+Usage: ./setup.sh restore <backup archive ($(lines_joined ' ' "$(archive_compressor exts)"))> [install-dir]
 
 Restores a setup-script backup. Files from the archived install directory are
 remapped to [install-dir] when it differs from the original path. After
@@ -7622,7 +7637,7 @@ perform_stack_update_flow() {
                 print_ok "Nothing to update: code, image pins and containers are current; the stack keeps running."
                 return 0
             fi
-            print_ok "Update needed: ${pending//$'\n'/; }"
+            print_ok "Update needed: $(lines_joined '; ' "$pending")"
         fi
         # What: health baseline before sync, backup, restart
         # Why: a later restart bakes regressions into it
@@ -9978,7 +9993,7 @@ case "$setup_command" in
         # From: Issue #1683
         if [[ -n "${2:-}" ]]; then
             list_has "$2" "$(lancache_release_rows channel)" \
-                || die "Unknown channel '$2'; use one of: $(lancache_release_rows channel | paste -sd" ")."
+                || die "Unknown channel '$2'; use one of: $(lines_joined ' ' "$(lancache_release_rows channel)")."
             export LANCACHE_IMAGE_CHANNEL="$2"
         fi
         ;;
