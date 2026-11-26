@@ -5069,18 +5069,29 @@ pub mod render {
         h.max(1)
     }
 
-    // What: the files of services and dns.
-    // Why: the full and the DNS-only render share it.
-    // From: Issue #1683 | PR #2004
-    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)], chain: &Chain) {
+    // What: the files of the services container.
+    // Why: chronyd, syslog-ng and snmpd run there.
+    // From: Issue #1683 | PR #2020
+    fn services_files(o: &mut Out) {
         let s = o.s;
         o.add_file("SERVICES_SERVICE", "CHRONY_CONF_FILE", chrony::render(s));
         o.add_file("SERVICES_SERVICE", "SYSLOG_CONF_FILE", log::render(s));
-        o.add_file(
-            "SERVICES_SERVICE",
-            "SNMPD_CONF_FILE",
-            crate::shared::snmp::render(s, &[], &[]),
-        );
+        snmpd_file(o);
+    }
+
+    // What: the snmpd.conf the snmpd of each image reads.
+    // Why: a secondary needs it; snmpd waits for it.
+    // From: Issue #1683 | PR #2020
+    fn snmpd_file(o: &mut Out) {
+        let body = crate::shared::snmp::render(o.s, &[], &[]);
+        o.add_file("SERVICES_SERVICE", "SNMPD_CONF_FILE", body);
+    }
+
+    // What: the files of the dns container.
+    // Why: the full and the secondary render share it.
+    // From: Issue #1683 | PR #2004
+    fn dns_files(o: &mut Out, sec: &Secrets, names: &[(String, bool)], chain: &Chain) {
+        let s = o.s;
         o.add_file(
             "DNS_SERVICE",
             "PDNS_CONF_FILE",
@@ -5411,6 +5422,7 @@ pub mod render {
                 String::new()
             }
         };
+        services_files(&mut o);
         dns_files(&mut o, sec, &cdn_names(&domains), chain);
         dhcp_files(&mut o, sec);
         if let Err(e) = nginx_files(&mut o, &domains) {
@@ -5419,7 +5431,7 @@ pub mod render {
         o.finish()
     }
 
-    // What: only the dns files, for a secondary.
+    // What: the dns files and snmpd.conf, for a secondary.
     // Why: a secondary runs only the dns container.
     // From: Issue #1683 | PR #1980
     pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
@@ -5429,13 +5441,7 @@ pub mod render {
         // Why: it keeps the NTA until the zone list.
         // From: Issue #1683 | PR #2019
         dns_files(&mut o, sec, &cdn_names(&domains), &Chain::default());
-        // What: dns files and the snmpd.conf.
-        // Why: snmpd waits for its file and blocks a stop.
-        // From: Issue #1683
-        let snmpd = s.text("SNMPD_CONF_FILE").map(PathBuf::from).ok();
-        let dns = s.text("DNS_SERVICE").map_err(|e| vec![e])?;
-        o.files
-            .retain(|f| f.owner == dns || Some(&f.path) == snmpd.as_ref());
+        snmpd_file(&mut o);
         o.finish()
     }
 }
