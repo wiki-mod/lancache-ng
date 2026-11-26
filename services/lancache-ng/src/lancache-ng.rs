@@ -16154,10 +16154,10 @@ mod ui {
         }
     }
 
-    // What: compile the mounted templates at start.
-    // Why: a broken template stops the start.
-    // From: Issue #1683 | PR #1991
-    pub(crate) fn templates(dir: &str) -> Result<Tera, String> {
+    // What: compile every mounted template.
+    // Why: start and check read one loader.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn compile(dir: &str) -> Result<(Tera, Vec<String>, Vec<String>), String> {
         let mut t = Tera::default();
         t.autoescape_on(vec!["html"]);
         register_image_functions(&mut t);
@@ -16168,11 +16168,67 @@ mod ui {
             "filesizeformat",
             |v: u64, _: tera::Kwargs, _: &tera::State| human::bytes(v),
         );
+        let (mut names, mut errors) = (Vec::new(), Vec::new());
         for (name, body) in folder(dir, "html")? {
-            t.add_raw_template(&name, &body)
-                .map_err(|e| format!("template {name}: {e}"))?;
+            if let Err(e) = t.add_raw_template(&name, &body) {
+                errors.push(format!("template {name}: {e}"));
+            }
+            names.push(name);
         }
-        Ok(t)
+        Ok((t, names, errors))
+    }
+
+    // What: compile the mounted templates at start.
+    // Why: a broken template stops the start.
+    // From: Issue #1683 | PR #1991
+    pub(crate) fn templates(dir: &str) -> Result<Tera, String> {
+        let (t, _, errors) = compile(dir)?;
+        match errors.is_empty() {
+            true => Ok(t),
+            false => Err(errors.join("; ")),
+        }
+    }
+
+    // What: short names after routes. or pages.
+    // Why: a name without SOT key fails on render.
+    // From: Issue #1683 | PR #2020
+    fn short_names<'a>(body: &'a str, prefix: &str) -> Vec<&'a str> {
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut out = Vec::new();
+        for (at, _) in body.match_indices(prefix) {
+            if body[..at].chars().next_back().is_some_and(word) {
+                continue;
+            }
+            let rest = &body[at + prefix.len()..];
+            let end = rest.find(|c: char| !word(c)).unwrap_or(rest.len());
+            if end > 0 {
+                out.push(&rest[..end]);
+            }
+        }
+        out
+    }
+
+    // What: template check: parse and SOT names.
+    // Why: CLI and REST see what breaks a page.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn template_report(s: &Settings) -> Result<Value, String> {
+        let dir = s.text("TEMPLATE_DIR")?;
+        let (_, names, errors) = compile(&dir)?;
+        let keys: std::collections::BTreeSet<&String> = s.texts().map(|(k, _)| k).collect();
+        let mut unknown = std::collections::BTreeSet::new();
+        for (name, body) in folder(&dir, "html")? {
+            for (prefix, sot) in [("routes.", "UI_ROUTE_"), ("pages.", "UI_PAGE_")] {
+                for n in short_names(&body, prefix) {
+                    let key = format!("{sot}{}", n.to_ascii_uppercase());
+                    if !keys.contains(&key) {
+                        unknown.insert(format!("{name}: {prefix}{n} ({key})"));
+                    }
+                }
+            }
+        }
+        let ok = errors.is_empty() && unknown.is_empty();
+        Ok(json!({"dir": dir, "templates": names, "errors": errors,
+            "unknown_names": unknown, "ok": ok}))
     }
 
     // What: read the language files at start.
@@ -16356,6 +16412,17 @@ mod ui {
                         }
                     }),
             ),
+            // What: route list and template check.
+            // Why: the router's table, the start's loader.
+            // From: Issue #1683 | PR #2020
+            Some("routes") => Some(route_list(s).map(|v| println!("{v}"))),
+            Some("templates") => Some(template_report(s).and_then(|v| {
+                println!("{v}");
+                match v["ok"].as_bool() {
+                    Some(true) => Ok(()),
+                    _ => Err("templates: errors or unknown names".into()),
+                }
+            })),
             Some("zone-rollback") => Some(match &args[1..] {
                 [zone, id] => rollback(s, zone, id).await.map(|()| {
                     println!("{}", json!({"restored": zone, "snapshot": id}));
@@ -16378,12 +16445,14 @@ mod ui {
     // What: every command of ui role; none = the server.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 9] = [
+    const COMMANDS: [&str; 11] = [
         "hash-password",
         "encode-password-hash",
         "zone-snapshots",
         "registration-token",
         "lang",
+        "routes",
+        "templates",
         "zone-rollback",
         "healthcheck",
         DHCP_PROBE_CMD,
@@ -16404,44 +16473,223 @@ mod ui {
         http::probe(&url, None, limit).await
     }
 
-    // What: all ui routes plus auth and headers.
+    // What: who may reach a ui route.
+    // Why: router, socket and route list read it.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Access {
+        Open,
+        Page,
+        Api,
+    }
+
+    // What: the method of a ui route.
+    // Why: one value for the router and the list.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy)]
+    pub(crate) enum Verb {
+        Get,
+        Post,
+    }
+
+    // What: one ui route: SOT key, method, access.
+    // Why: the router and the route list read one table.
+    // From: Issue #1683 | PR #2020
+    pub(crate) struct Route {
+        key: String,
+        verb: Verb,
+        access: Access,
+        handler: axum::routing::MethodRouter<Arc<App>>,
+    }
+
+    // What: a table row for a plain handler.
+    // Why: the verb picks the method filter.
+    // From: Issue #1683 | PR #2020
+    fn route<H, T>(key: &str, verb: Verb, access: Access, h: H) -> Route
+    where
+        H: axum::handler::Handler<T, Arc<App>>,
+        T: 'static,
+    {
+        let handler = match verb {
+            Verb::Get => get(h),
+            Verb::Post => post(h),
+        };
+        let key = key.to_string();
+        Route {
+            key,
+            verb,
+            access,
+            handler,
+        }
+    }
+
+    // What: a POST row of one action enum value.
+    // Why: page, REST and CLI post the same form.
+    // From: Issue #1683 | PR #2020
+    fn op_route<H, T, O>(key: &str, h: H, op: O) -> Route
+    where
+        H: axum::handler::Handler<T, Arc<App>>,
+        T: 'static,
+        O: Clone + Send + Sync + 'static,
+    {
+        let mut r = route(key, Verb::Post, Access::Api, h);
+        r.handler = r.handler.layer(Extension(Op(op)));
+        r
+    }
+
+    // What: every ui route with key, verb and access.
     // Why: paths come from the SOT; one place maps them.
-    // From: Issue #1683
-    pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
-        let s = app.settings();
-        let p = |key: &str| s.text(key);
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn table(s: &Settings) -> Result<Vec<Route>, String> {
+        use Access::{Api, Open, Page};
+        use Verb::{Get, Post};
         let dir = s.text("STATIC_DIR")?;
         let css = static_file(&dir, "admin.css")?;
         let icon = static_file(&dir, "favicon.ico")?;
         let logo = static_file(&dir, "logo-icon.png")?;
-        let pages = Router::new()
-            .route(&p("UI_PAGE_DASHBOARD")?, get(dashboard))
-            .route(&p("UI_PAGE_SETUP")?, get(setup))
-            .route(&p("UI_ROUTE_SETUP_SAVE")?, post(save))
-            .route(&p("UI_ROUTE_PASSWORD")?, post(password))
-            .route(&p("UI_PAGE_LOGS")?, get(logs))
-            .route(&p("UI_PAGE_CACHEHAMSTER")?, get(cachehamster))
-            .route(&p("UI_PAGE_DOMAINS")?, get(domains))
-            .route(&p("UI_PAGE_DHCP")?, get(dhcp))
-            .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
-            .route(&p("UI_PAGE_STATS")?, get(stats))
-            .merge(api_routes(&s)?)
+        let mut t = vec![
+            route("UI_ROUTE_HEALTH", Get, Open, health),
+            route("UI_ROUTE_SECONDARY_REGISTER", Post, Open, register),
+            route("UI_ROUTE_ADMIN_CSS", Get, Open, move || async move {
+                asset("text/css", css)
+            }),
+            route("UI_ROUTE_FAVICON", Get, Open, move || async move {
+                asset("image/x-icon", icon)
+            }),
+            route("UI_ROUTE_LOGO_ICON", Get, Open, move || async move {
+                asset("image/png", logo)
+            }),
+            route("UI_PAGE_DASHBOARD", Get, Page, dashboard),
+            route("UI_PAGE_SETUP", Get, Page, setup),
+            route("UI_ROUTE_SETUP_SAVE", Post, Page, save),
+            route("UI_ROUTE_PASSWORD", Post, Page, password),
+            route("UI_PAGE_LOGS", Get, Page, logs),
+            route("UI_PAGE_CACHEHAMSTER", Get, Page, cachehamster),
+            route("UI_PAGE_DOMAINS", Get, Page, domains),
+            route("UI_PAGE_DHCP", Get, Page, dhcp),
+            route("UI_ROUTE_DHCP_CHECK", Post, Page, dhcp_check),
+            route("UI_PAGE_STATS", Get, Page, stats),
+        ];
+        t.extend(
+            DhcpOp::ALL
+                .iter()
+                .map(|&o| op_route(o.key(), dhcp_action, o)),
+        );
+        t.extend(DnsOp::ALL.iter().map(|&o| op_route(o.key(), dns_action, o)));
+        t.extend(
+            SecondaryOp::ALL
+                .iter()
+                .map(|&o| op_route(o.key(), secondary_action, o)),
+        );
+        t.extend(
+            HamsterOp::ALL
+                .iter()
+                .map(|&o| op_route(o.key(), hamster_action, o)),
+        );
+        t.extend([
+            route("UI_ROUTE_CONTAINER_STATUS", Get, Api, status),
+            route("UI_ROUTE_ALARMS", Get, Api, alarms),
+            route("UI_ROUTE_DHCP_STATE", Get, Api, dhcp_state),
+            route("UI_ROUTE_SETTINGS", Get, Api, settings_api),
+            route("UI_ROUTE_SETTINGS", Post, Api, settings_set),
+            route("UI_ROUTE_ZONE_SNAPSHOTS", Get, Api, zone_snapshots_api),
+            route("UI_ROUTE_KEA_SNAPSHOTS", Get, Api, kea_snapshots_api),
+            route("UI_ROUTE_DHCP_STATS", Get, Api, dhcp_stats_api),
+            route("UI_ROUTE_PROXY_STATUS", Get, Api, proxy_status_api),
+            route("UI_ROUTE_NTP", Get, Api, ntp_api),
+            route("UI_ROUTE_PROXY_LOG", Get, Api, proxy_log_api),
+            route("UI_ROUTE_SECRETS", Get, Api, secrets_api),
+            route("UI_ROUTE_CACHE", Get, Api, cache_api),
+            route("UI_ROUTE_CDN", Get, Api, cdn_api),
+            route("UI_ROUTE_SETTINGS_SCHEMA", Get, Api, settings_schema_api),
+            route("UI_ROUTE_DNS_FLUSH", Post, Api, dns_flush_api),
+            route("UI_ROUTE_DNSSEC", Get, Api, dnssec_api),
+            route("UI_ROUTE_DNS_API_CHECK", Get, Api, dns_api_check),
+            route("UI_ROUTE_DNS_STATS", Get, Api, dns_stats_api),
+            route("UI_ROUTE_DNS_QUERY", Get, Api, dns_query_api),
+            route("UI_ROUTE_DNS_ZONES_ENSURE", Post, Api, zones_ensure_api),
+            route("UI_ROUTE_APPLY_PLAN", Get, Api, apply_plan_api),
+            route("UI_ROUTE_APPLY", Post, Api, apply_api),
+            route("UI_ROUTE_APPLY_PREVIEW", Get, Api, apply_preview_api),
+            route("UI_ROUTE_PROXY_PSL", Get, Api, proxy_psl_api),
+            route("UI_ROUTE_DOCKER", Get, Api, docker_api),
+            route("UI_ROUTE_STATS_GRAPH", Get, Api, graph),
+            route("UI_ROUTE_STATS_LIST", Get, Api, stats_list_api),
+            route("UI_ROUTE_STATS_SAMPLE", Post, Api, stats_sample_api),
+            route("UI_ROUTE_LOGS_SAVE", Post, Api, logs_save),
+            route("UI_ROUTE_LOGS", Get, Api, logs_api),
+            route("UI_ROUTE_LANG", Get, Api, lang_api),
+            route("UI_ROUTE_UI_ROUTES", Get, Api, routes_api),
+            route("UI_ROUTE_UI_TEMPLATES", Get, Api, templates_api),
+            route("UI_ROUTE_WATCHDOG_TIDY", Post, Api, watchdog_tidy),
+            route("UI_ROUTE_ZONE_OVERVIEW", Get, Api, zone_overview),
+            route("UI_ROUTE_DESIRED_STATE", Post, Api, container_state),
+            route("UI_ROUTE_RESTART_UI", Post, Api, restart_ui),
+            route("UI_ROUTE_SERVICE_ACTION", Post, Api, service_action),
+            route("UI_ROUTE_HAMSTER_API", Post, Api, hamster_api),
+        ]);
+        Ok(t)
+    }
+
+    // What: a router of the rows one access allows.
+    // Why: TCP and socket take rows of one table.
+    // From: Issue #1683 | PR #2020
+    fn routes_of(
+        s: &Settings,
+        rows: &mut Vec<Route>,
+        keep: &[Access],
+    ) -> Result<Router<Arc<App>>, String> {
+        let mut r = Router::new();
+        for row in rows.extract_if(.., |x| keep.contains(&x.access)) {
+            r = r.route(&s.text(&row.key)?, row.handler);
+        }
+        Ok(r)
+    }
+
+    // What: the route list: path, method, access.
+    // Why: CLI and REST read the router's table.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn route_list(s: &Settings) -> Result<Value, String> {
+        let mut out = Vec::new();
+        for r in table(s)? {
+            let verb = match r.verb {
+                Verb::Get => "GET",
+                Verb::Post => "POST",
+            };
+            let access = match r.access {
+                Access::Open => "open",
+                Access::Page => "login",
+                Access::Api => "login or socket",
+            };
+            out.push(json!({"key": r.key, "path": s.text(&r.key)?,
+                "method": verb, "access": access}));
+        }
+        Ok(Value::Array(out))
+    }
+
+    // What: GET UI_ROUTE_UI_ROUTES: the route list.
+    // Why: REST reads what the CLI reads.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn routes_api(State(app): Shared) -> Page {
+        Ok(axum::Json(route_list(&app.settings())?).into_response())
+    }
+
+    // What: GET UI_ROUTE_UI_TEMPLATES: the check.
+    // Why: REST reads what the CLI reads.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn templates_api(State(app): Shared) -> Page {
+        Ok(axum::Json(template_report(&app.settings())?).into_response())
+    }
+
+    // What: all ui routes plus auth and headers.
+    // Why: rows of the one table, by access.
+    // From: Issue #1683
+    pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
+        let s = app.settings();
+        let mut rows = table(&s)?;
+        let pages = routes_of(&s, &mut rows, &[Access::Page, Access::Api])?
             .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
-        Ok(Router::new()
-            .route(&p("UI_ROUTE_HEALTH")?, get(health))
-            .route(&p("UI_ROUTE_SECONDARY_REGISTER")?, post(register))
-            .route(
-                &p("UI_ROUTE_ADMIN_CSS")?,
-                get(move || async move { asset("text/css", css) }),
-            )
-            .route(
-                &p("UI_ROUTE_FAVICON")?,
-                get(move || async move { asset("image/x-icon", icon) }),
-            )
-            .route(
-                &p("UI_ROUTE_LOGO_ICON")?,
-                get(move || async move { asset("image/png", logo) }),
-            )
+        Ok(routes_of(&s, &mut rows, &[Access::Open])?
             .merge(pages)
             // What: one size limit for every request body.
             // Why: the SOT owns it, not a library default.
@@ -16454,78 +16702,12 @@ mod ui {
             .with_state(app))
     }
 
-    // What: the REST routes, for TCP and the CLI socket.
-    // Why: both ways reach the same handlers.
-    // From: Issue #1683 | PR #2020
-    fn api_routes(s: &Settings) -> Result<Router<Arc<App>>, String> {
-        let p = |key: &str| s.text(key);
-        let mut r = Router::new();
-        // What: DHCP, DNS, hamster actions, one route each.
-        // Why: page, REST and CLI post the same form.
-        // From: Issue #1683 | PR #2020
-        for &op in DhcpOp::ALL {
-            r = r.route(&p(op.key())?, post(dhcp_action).layer(Extension(Op(op))));
-        }
-        for &op in DnsOp::ALL {
-            r = r.route(&p(op.key())?, post(dns_action).layer(Extension(Op(op))));
-        }
-        for &op in SecondaryOp::ALL {
-            r = r.route(
-                &p(op.key())?,
-                post(secondary_action).layer(Extension(Op(op))),
-            );
-        }
-        for &op in HamsterOp::ALL {
-            r = r.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
-        }
-        Ok(r.route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
-            .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
-            .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
-            .route(
-                &p("UI_ROUTE_SETTINGS")?,
-                get(settings_api).post(settings_set),
-            )
-            .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
-            .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
-            .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
-            .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
-            .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
-            .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
-            .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
-            .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
-            .route(&p("UI_ROUTE_CDN")?, get(cdn_api))
-            .route(&p("UI_ROUTE_SETTINGS_SCHEMA")?, get(settings_schema_api))
-            .route(&p("UI_ROUTE_DNS_FLUSH")?, post(dns_flush_api))
-            .route(&p("UI_ROUTE_DNSSEC")?, get(dnssec_api))
-            .route(&p("UI_ROUTE_DNS_API_CHECK")?, get(dns_api_check))
-            .route(&p("UI_ROUTE_DNS_STATS")?, get(dns_stats_api))
-            .route(&p("UI_ROUTE_DNS_QUERY")?, get(dns_query_api))
-            .route(&p("UI_ROUTE_DNS_ZONES_ENSURE")?, post(zones_ensure_api))
-            .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
-            .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
-            .route(&p("UI_ROUTE_APPLY_PREVIEW")?, get(apply_preview_api))
-            .route(&p("UI_ROUTE_PROXY_PSL")?, get(proxy_psl_api))
-            .route(&p("UI_ROUTE_DOCKER")?, get(docker_api))
-            .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
-            .route(&p("UI_ROUTE_STATS_LIST")?, get(stats_list_api))
-            .route(&p("UI_ROUTE_STATS_SAMPLE")?, post(stats_sample_api))
-            .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
-            .route(&p("UI_ROUTE_LOGS")?, get(logs_api))
-            .route(&p("UI_ROUTE_LANG")?, get(lang_api))
-            .route(&p("UI_ROUTE_WATCHDOG_TIDY")?, post(watchdog_tidy))
-            .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
-            .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
-            .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
-            .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action))
-            .route(&p("UI_ROUTE_HAMSTER_API")?, post(hamster_api)))
-    }
-
     // What: the REST routes on the CLI socket.
     // Why: no login there; the socket mode guards it.
     // From: Issue #1683 | PR #2020
     fn socket_router(app: Arc<App>) -> Result<Router, String> {
         let s = app.settings();
-        Ok(api_routes(&s)?
+        Ok(routes_of(&s, &mut table(&s)?, &[Access::Api])?
             .layer(Extension(Csrf::local()))
             .layer(axum::extract::DefaultBodyLimit::max(
                 s.num::<usize>("UI_REQUEST_BODY_MAX_BYTES")?,
