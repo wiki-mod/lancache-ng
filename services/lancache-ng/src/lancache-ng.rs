@@ -2844,6 +2844,13 @@ mod config {
             values
         }
 
+        // What: {"values":{..},"warnings":[..]} as JSON.
+        // Why: REST and CLI show one shape.
+        // From: Issue #1683 | PR #2020
+        pub fn view_json(&self) -> serde_json::Value {
+            serde_json::json!({"values": self.view(), "warnings": self.warnings})
+        }
+
         // What: value as text; missing is an error.
         // Why: the error names the key.
         // From: Issue #1683 | PR #1980
@@ -3017,6 +3024,22 @@ mod config {
             channel: process_env("LANCACHE_IMAGE_CHANNEL").unwrap_or_default(),
             tag: process_env("LANCACHE_IMAGE_TAG").unwrap_or_default(),
         }
+    }
+
+    // What: lancache-ng config show [KEY].
+    // Why: settings reads have their CLI with their owner.
+    // From: Issue #1683 | PR #2020
+    pub fn run(args: &[String]) -> Result<(), String> {
+        let s = Settings::from_process()?;
+        match args {
+            [cmd] if cmd == "show" => println!("{}", s.view_json()),
+            [cmd, key] if cmd == "show" => match s.view().get(key) {
+                Some(v) => println!("{v}"),
+                None => return Err(format!("{key}: no such setting or a secret")),
+            },
+            _ => return Err("usage: config show [KEY]".into()),
+        }
+        Ok(())
     }
 }
 
@@ -3208,6 +3231,25 @@ mod dhcp {
         }
         f.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
         commit(app, f).await
+    }
+
+    // What: the text when the DHCP mode is not Kea.
+    // Why: REST and CLI say the same.
+    // From: Issue #1683 | PR #2020
+    pub(crate) const NOT_KEA: &str = "DHCP mode is not kea";
+
+    // What: lancache-ng dhcp <command>: JSON on stdout.
+    // Why: DHCP reads have their CLI with their owner.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn run(args: &[String]) -> Result<(), String> {
+        let s = Settings::from_process()?;
+        let v = match args.first().map(String::as_str) {
+            Some("state") => kea_state(&s).await?.ok_or(NOT_KEA)?,
+            Some("kea-snapshots") => kea_snapshots(&s)?,
+            _ => return Err("commands: state kea-snapshots".into()),
+        };
+        println!("{v}");
+        Ok(())
     }
 
     // What: {"snapshots":[{id,created_unix}]} of Kea.
@@ -6711,6 +6753,54 @@ mod shared {
                 });
             }
             Ok(out)
+        }
+
+        // What: {"state","services":[..]} of the stack.
+        // Why: the beambar, REST and CLI read one shape.
+        // From: Issue #1683 | PR #2020
+        pub async fn status_json(api: &Api, s: &crate::config::Settings) -> Value {
+            let list = match members(api, s).await {
+                Ok(list) => list,
+                Err(e) => return json!({"state": "unavailable", "error": e}),
+            };
+            let mut rows: Vec<Value> = Vec::new();
+            for m in list {
+                // What: an inspect error reads as no state.
+                // Why: the bar still shows the others.
+                // From: Issue #1683 | PR #2020
+                let inspect = m.inspect.clone().unwrap_or_default();
+                let health = Health::from_inspect(&inspect);
+                let colour = health.colour(m.wanted());
+                // What: last health output when not green.
+                // Why: a fail count names no reason.
+                // From: Issue #1683 | PR #1980
+                let reason = match colour {
+                    "red" | "yellow" | "amber" => last_check(&inspect).trim().to_string(),
+                    _ => String::new(),
+                };
+                rows.push(
+                    json!({"name": m.service, "status": colour, "health": m.status,
+                    "reason": reason, "mode_off": m.mode_off,
+                    "stopped_by_user": m.stopped_by_user}),
+                );
+            }
+            json!({"state": "ok", "services": rows})
+        }
+
+        // What: lancache-ng system status: stack as JSON.
+        // Why: stack reads have their CLI with their owner.
+        // From: Issue #1683 | PR #2020
+        pub async fn system_run(args: &[String]) -> Result<(), String> {
+            let s = crate::config::Settings::from_process()?;
+            if args.first().map(String::as_str) != Some("status") {
+                return Err("commands: status".into());
+            }
+            let v = status_json(&Api::new(&s.text("DOCKER_ENDPOINT")?)?, &s).await;
+            println!("{v}");
+            match v["state"].as_str() {
+                Some("ok") => Ok(()),
+                _ => Err(v["error"].as_str().unwrap_or("unavailable").to_string()),
+            }
         }
 
         // What: compose label of a "compose run" container.
@@ -14132,7 +14222,7 @@ mod ui {
     // Why: REST diagnosis on the reader of page and CLI.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn dhcp_state(State(app): Shared) -> Response {
-        json_reply(kea_state(&app.settings()).await, NOT_KEA)
+        json_reply(kea_state(&app.settings()).await, crate::dhcp::NOT_KEA)
     }
 
     // What: zone snapshots as JSON, as setup.sh reads them.
@@ -14153,33 +14243,8 @@ mod ui {
     // Why: REST diagnosis on the reader of pages and CLI.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn settings_api(State(app): Shared) -> Response {
-        json_reply(Ok(Some(settings_json(&app.settings()))), "")
+        json_reply(Ok(Some(app.settings().view_json())), "")
     }
-
-    // What: {"values":{..},"warnings":[..]} of settings.
-    // Why: REST and CLI print the same shape.
-    // From: Issue #1683 | PR #2020
-    fn settings_json(s: &Settings) -> Value {
-        json!({"values": s.view(), "warnings": s.warnings})
-    }
-
-    // What: print the stack states; rc 1 if unavailable.
-    // Why: same reader as the beambar and REST.
-    // From: Issue #1683 | PR #2020
-    async fn status_cli(s: &Settings) -> Result<(), String> {
-        let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
-        let v = status_json(&api, s).await;
-        println!("{v}");
-        match v["state"].as_str() {
-            Some("ok") => Ok(()),
-            _ => Err(v["error"].as_str().unwrap_or("unavailable").to_string()),
-        }
-    }
-
-    // What: the text when the DHCP mode is not Kea.
-    // Why: REST and CLI say the same.
-    // From: Issue #1683 | PR #2020
-    const NOT_KEA: &str = "DHCP mode is not kea";
 
     // What: 200 value, 503 not available, 500 error.
     // Why: every REST reader answers the same way.
@@ -14204,39 +14269,7 @@ mod ui {
     // Why: Docker is the source; no status files.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn status(State(app): Shared) -> Response {
-        axum::Json(status_json(&app.docker, &app.settings()).await).into_response()
-    }
-
-    // What: {"state","services":[..]} of the stack.
-    // Why: the beambar, REST and CLI read one shape.
-    // From: Issue #1683 | PR #2020
-    async fn status_json(api: &docker::Api, s: &Settings) -> Value {
-        let list = match docker::members(api, s).await {
-            Ok(list) => list,
-            Err(e) => return json!({"state": "unavailable", "error": e}),
-        };
-        let mut rows: Vec<Value> = Vec::new();
-        for m in list {
-            // What: an inspect error reads as no state.
-            // Why: the bar still shows other containers.
-            // From: Issue #1683 | PR #2020
-            let inspect = m.inspect.clone().unwrap_or_default();
-            let health = docker::Health::from_inspect(&inspect);
-            let colour = health.colour(m.wanted());
-            // What: last health check output when not green
-            // Why: a failure count alone names no reason.
-            // From: Issue #1683 | PR #1980
-            let reason = match colour {
-                "red" | "yellow" | "amber" => docker::last_check(&inspect).trim().to_string(),
-                _ => String::new(),
-            };
-            rows.push(
-                json!({"name": m.service, "status": colour, "health": m.status,
-               "reason": reason, "mode_off": m.mode_off,
-               "stopped_by_user": m.stopped_by_user}),
-            );
-        }
-        json!({"state": "ok", "services": rows})
+        axum::Json(docker::status_json(&app.docker, &app.settings()).await).into_response()
     }
 
     // What: wish from the beambar button.
@@ -14541,10 +14574,6 @@ mod ui {
     pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
         match args.first().map(String::as_str) {
             Some("zone-snapshots") => Some(zone_snapshots(s).map(|v| println!("{v}"))),
-            // What: Kea config snapshots as JSON.
-            // Why: same reader as the DHCP page and REST.
-            // From: Issue #1683 | PR #2020
-            Some("kea-snapshots") => Some(kea_snapshots(s).map(|v| println!("{v}"))),
             // What: registration token as ui resolves it.
             // Why: CI reads token the register API checks.
             // From: Issue #1683 | PR #2020
@@ -14556,36 +14585,6 @@ mod ui {
                 _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
             }),
             Some("healthcheck") => Some(healthcheck(s).await),
-            // What: the stack container states as JSON.
-            // Why: same reader as the beambar and REST.
-            // From: Issue #1683 | PR #2020
-            Some("status") => Some(status_cli(s).await),
-            // What: the masked settings, or one value.
-            // Why: same view as the pages and REST.
-            // From: Issue #1683 | PR #2020
-            Some("settings") => Some(match &args[1..] {
-                [] => {
-                    println!("{}", settings_json(s));
-                    Ok(())
-                }
-                [key] => s
-                    .view()
-                    .get(key)
-                    .map(|v| println!("{v}"))
-                    .ok_or_else(|| format!("{key}: no such setting or a secret")),
-                _ => Err("usage: settings [KEY]".into()),
-            }),
-            // What: Kea subnets, reservations, leases: JSON
-            // Why: same reader as the DHCP page and REST.
-            // From: Issue #1683 | PR #2020
-            Some("dhcp-state") => Some(match kea_state(s).await {
-                Ok(Some(v)) => {
-                    println!("{v}");
-                    Ok(())
-                }
-                Ok(None) => Err(NOT_KEA.into()),
-                Err(e) => Err(e),
-            }),
             // What: one DHCP probe as JSON on stdout.
             // Why: setup.sh and the DHCP page run it.
             // From: Issue #1683 | PR #1985
@@ -14601,17 +14600,13 @@ mod ui {
     // What: every command of ui role; none = the server.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 12] = [
+    const COMMANDS: [&str; 8] = [
         "hash-password",
         "encode-password-hash",
         "zone-snapshots",
-        "kea-snapshots",
         "registration-token",
         "zone-rollback",
         "healthcheck",
-        "status",
-        "settings",
-        "dhcp-state",
         DHCP_PROBE_CMD,
         "(none: web server)",
     ];
@@ -15344,10 +15339,17 @@ async fn main() -> std::process::ExitCode {
         "watchdog" => code(watchdog::run(&argv).await),
         "dns" => code(dns::run(&argv).await),
         "cachehamster" => cachehamster::run(&argv).await,
+        // What: command groups; each runs at its owner.
+        // Why: a CLI command lives with its capability.
+        // From: Issue #1683 | PR #2020
+        "dhcp" => code(dhcp::run(&argv).await),
+        "config" => code(config::run(&argv)),
+        "system" => code(shared::docker::system_run(&argv).await),
         other => {
             eprintln!(
-                "lancache-ng: unknown role {other:?}; use {}",
-                ROLES.join("|")
+                "lancache-ng: unknown role {other:?}; use {} or {}",
+                ROLES.join("|"),
+                GROUPS.join("|")
             );
             std::process::ExitCode::from(2)
         }
@@ -15358,6 +15360,11 @@ async fn main() -> std::process::ExitCode {
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
 const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
+
+// What: the command groups that are no daemon role.
+// Why: the help names the same set as the match.
+// From: Issue #1683 | PR #2020
+const GROUPS: [&str; 3] = ["dhcp", "config", "system"];
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
