@@ -3607,6 +3607,17 @@ mod dns {
                 println!("{}", json!({"round": "ok"}));
                 Ok(())
             }
+            // What: zone serials and states as JSON.
+            // Why: same reader as the DNS page and REST.
+            // From: Issue #1683 | PR #2020
+            Some("sync-check") => {
+                let v = zone_overview(&Settings::from_process()?).await?;
+                println!("{v}");
+                match out_of_sync(&v) {
+                    0 => Ok(()),
+                    n => Err(format!("sync-check: {n} zone or server not in sync")),
+                }
+            }
             _ => Err(format!("commands: {}", COMMANDS.join(" "))),
         }
     }
@@ -3614,7 +3625,61 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 2] = ["daemon", "follow-once"];
+    const COMMANDS: [&str; 3] = ["daemon", "follow-once", "sync-check"];
+
+    // What: serials of managed zones on all servers.
+    // Why: one overview for the DNS page, REST and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn zone_overview(s: &Settings) -> Result<Value, String> {
+        let ours = peer::own_api(s)?.zones().await?;
+        let mut columns = vec![json!({"name": "primary", "error": Value::Null})];
+        let mut pairs: Vec<Option<Vec<PeerZone>>> = Vec::new();
+        for (name, address) in crate::shared::pdns_conf::secondaries(s) {
+            match peer::zones_at(s, &address).await {
+                Ok(theirs) => {
+                    columns.push(json!({"name": name, "error": Value::Null}));
+                    pairs.push(Some(peer::peer_zones(s, &ours, &theirs)?));
+                }
+                Err(e) => {
+                    columns.push(json!({"name": name, "error": e}));
+                    pairs.push(None);
+                }
+            }
+        }
+        // What: primary serials; no secondary list given.
+        // Why: peer_zones pairs the managed zones once.
+        // From: Issue #1683 | PR #2020
+        let base = peer::peer_zones(s, &ours, &[])?;
+        let rows: Vec<Value> = base
+            .iter()
+            .enumerate()
+            .map(|(i, z)| {
+                let mut serials = vec![z.primary];
+                let mut states: Vec<Option<&str>> = Vec::new();
+                for pair in &pairs {
+                    let cell = pair.as_ref().map(|p| &p[i]);
+                    serials.push(cell.and_then(|c| c.secondary));
+                    states.push(cell.map(|c| peer::zone_state(c).word()));
+                }
+                json!({"zone": z.zone, "serials": serials, "states": states})
+            })
+            .collect();
+        Ok(json!({"columns": columns, "rows": rows}))
+    }
+
+    // What: cells not in sync plus servers that failed.
+    // Why: the CLI check exits 1 on any of them.
+    // From: Issue #1683 | PR #2020
+    fn out_of_sync(v: &Value) -> usize {
+        let cols = v["columns"].as_array().into_iter().flatten();
+        let down = cols.filter(|c| !c["error"].is_null()).count();
+        let rows = v["rows"].as_array().into_iter().flatten();
+        let cells = rows.flat_map(|r| r["states"].as_array().into_iter().flatten());
+        let off = cells
+            .filter(|c| c.as_str().is_some_and(|w| w != ZoneState::InSync.word()))
+            .count();
+        down + off
+    }
 
     // What: idle on a primary, else rounds forever.
     // Why: OpenRC keeps process; the primary's ui renders.
@@ -11809,7 +11874,7 @@ mod ui {
         valid_peer_name, zone_snapshots,
     };
     use crate::shared::dhcp::Mode as DhcpMode;
-    use crate::shared::peer::{self, PeerZone};
+    use crate::shared::peer;
     use crate::shared::{access, apply, docker, fs, http, human, render, secret};
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
     use axum::extract::{Form, Request, State};
@@ -12953,52 +13018,13 @@ mod ui {
         pub(crate) count: u64,
     }
 
-    // What: serials: managed zones, primary, secondaries
-    // Why: one overview of loaded serial on each server.
-    // From: Issue #1683
+    // What: zone serial overview with the page label.
+    // Why: the page shows a translated primary column.
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn zone_overview(State(app): Shared) -> Page {
-        let s = app.settings();
-        let mut columns = vec![json!({"name": tr("zone_col_primary"), "error": Value::Null})];
-        let mut lists = vec![peer::own_api(&s)?.zones().await?];
-        for (name, address) in crate::shared::pdns_conf::secondaries(&s) {
-            match peer::zones_at(&s, &address).await {
-                Ok(z) => {
-                    columns.push(json!({"name": name, "error": Value::Null}));
-                    lists.push(z);
-                }
-                Err(e) => {
-                    columns.push(json!({"name": name, "error": e}));
-                    lists.push(Vec::new());
-                }
-            }
-        }
-        let rows: Vec<Value> = crate::shared::dns::managed_zones(&s)?
-            .into_iter()
-            .map(|zone| {
-                let serials: Vec<Option<u32>> =
-                    lists.iter().map(|l| peer::serial_of(l, &zone)).collect();
-                // What: state word of each secondary's cell
-                // Why: table, status line share zone_state.
-                // From: Issue #1683 | PR #2019
-                let states: Vec<Option<&str>> = serials
-                    .iter()
-                    .zip(&columns)
-                    .skip(1)
-                    .map(|(theirs, column)| {
-                        column["error"].is_null().then(|| {
-                            let row = PeerZone {
-                                zone: zone.clone(),
-                                primary: serials[0],
-                                secondary: *theirs,
-                            };
-                            peer::zone_state(&row).word()
-                        })
-                    })
-                    .collect();
-                json!({"zone": zone, "serials": serials, "states": states})
-            })
-            .collect();
-        Ok(axum::Json(json!({"columns": columns, "rows": rows})).into_response())
+        let mut v = crate::dns::zone_overview(&app.settings()).await?;
+        v["columns"][0]["name"] = json!(tr("zone_col_primary"));
+        Ok(axum::Json(v).into_response())
     }
 
     // What: DHCP page.
