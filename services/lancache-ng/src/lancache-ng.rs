@@ -5667,9 +5667,16 @@ mod shared {
                 .timeout(Duration::from_secs(s.uint("UI_CLI_WRITE_TIMEOUT_SECONDS")?))
                 .build()
                 .map_err(|e| format!("{path}: {e}"))?;
-            let resp = client
-                .post(format!("http://ui{route}"))
-                .json(&body)
+            let req = client.post(format!("http://ui{route}"));
+            // What: no body goes as an empty form.
+            // Why: form routes refuse a JSON null.
+            // From: Issue #1683 | PR #2020
+            let req = if body.is_null() {
+                req.form(&[("", ""); 0])
+            } else {
+                req.json(&body)
+            };
+            let resp = req
                 .send()
                 .await
                 .map_err(|e| format!("{path}: is the ui running? {e}"))?;
@@ -7003,6 +7010,7 @@ mod shared {
                     let r = s.text("UI_ROUTE_DESIRED_STATE")?.replace("{service}", svc);
                     (r, json!({"state": state}))
                 }
+                ["ui", "restart"] => (s.text("UI_ROUTE_RESTART_UI")?, Value::Null),
                 ["service", c, p, a @ ("restart" | "reload")] => {
                     let r = s
                         .text("UI_ROUTE_SERVICE_ACTION")?
@@ -7013,6 +7021,7 @@ mod shared {
                 }
                 _ => {
                     return Err("commands: status | container <service> start|stop | \
+                                ui restart | \
                                 service <container> <program> restart|reload"
                         .into());
                 }
