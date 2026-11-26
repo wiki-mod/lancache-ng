@@ -2295,13 +2295,23 @@ env_key_fill() {
     set_env_assignment "$key" "$value" "$env_file"
 }
 
-# What: renamed .env keys: add = new beside old, move
+# What: renamed .env keys: add, move, or read (no write)
 # Why: add keeps a rollback's old compose working
 # From: Issue #1683 | PR #1912
-env_renamed_keys() {
-    local env_file="$1" mode="$2" pair
+env_key_or_old_name() {
+    local env_file="$1" mode="$2" pair value
     for pair in IP_HTTP:IP_STANDARD IP_HTTPS:IP_SSL HTTPS_ENABLED:SSL_ENABLED \
         PDNS_DIR:PDNS_STANDARD_DIR; do
+        # What: "read KEY": KEY, else its old name; no write
+        # Why: an old install's .env must stay as it is
+        # From: Issue #1683 | PR #1912
+        if [[ "$mode" = read ]]; then
+            [[ "${pair%%:*}" = "$3" ]] || continue
+            value=$(get_env_var "$3" "$env_file") || exit $?
+            [[ -n "$value" ]] || value=$(get_env_var "${pair#*:}" "$env_file") || exit $?
+            printf '%s\n' "$value"
+            return 0
+        fi
         env_key_fill "${pair%%:*}" "$env_file" absent "" "${pair#*:}"
         [[ "$mode" = add ]] || remove_env_key "${pair#*:}" "$env_file"
     done
@@ -2917,9 +2927,8 @@ migrate_quickstart_install() (
     # What: a one-IP quickstart stops before any change
     # Why: prod always binds a second LAN IP (IP_HTTPS)
     # From: Issue #1683 | PR #1858
-    https_ip=$(get_env_var IP_HTTPS "$old_env") || die "Cannot read IP_HTTPS from $old_env (exit $?)."
-    [[ -n "$https_ip" ]] || https_ip=$(get_env_var IP_SSL "$old_env") \
-        || die "Cannot read IP_SSL from $old_env (exit $?)."
+    https_ip=$(env_key_or_old_name "$old_env" read IP_HTTPS) \
+        || die "Cannot read IP_HTTPS from $old_env (exit $?)."
     [[ -n "$https_ip" ]] \
         || die "The install at $old_dir has no second LAN IP (IP_HTTPS or IP_SSL in $old_env). LanCache-NG now needs one for HTTPS DNS and proxy: add a free LAN IP to this host, set IP_HTTPS=<that IP> in $old_env, then rerun setup.sh update. Nothing was changed."
     print_step "Migrating the quickstart install at $old_dir to $stack_dir"
@@ -5093,7 +5102,7 @@ migrate_env_for_update() (
 
     print_step "Checking runtime .env"
 
-    env_renamed_keys "$env_file" move
+    env_key_or_old_name "$env_file" move
     # What: drops every NATS and Netdata key on update.
     # Why: NATS and Netdata are gone from the stack.
     # From: Issue #1683 | PR #1980
@@ -5180,7 +5189,7 @@ migrate_env_for_update() (
     # What: config/prod may bring back SSL_ENABLED
     # Why: the adopted old name moves like any other
     # From: Issue #1683 | PR #1912
-    env_renamed_keys "$env_file" move
+    env_key_or_old_name "$env_file" move
     # What: old ui settings merge once names and pins exist
     # Why: the merge asks compose, which needs a full .env
     # From: Issue #1683 | PR #2017
@@ -7468,7 +7477,7 @@ perform_stack_update_flow() {
     # What: new key names join before the first compose call
     # Why: after git pull the new compose needs them at once
     # From: Issue #1683 | PR #1912
-    env_renamed_keys "$_UPDATE_ENV_FILE" add
+    env_key_or_old_name "$_UPDATE_ENV_FILE" add
     UPDATE_CONVERGENCE_COMPLETED=0
     if [[ "${LANCACHE_UPDATE_RESUMED:-0}" = 1 ]]; then
         update_resume_handoff
