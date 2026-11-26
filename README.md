@@ -69,7 +69,7 @@ It can:
 - clone the code of that channel to `/opt/lancache-ng/latest` or
   `/opt/lancache-ng/nightly`
 - ask for the cache server IP
-- ask for a second LAN IP (always required) and HTTPS caching (default: on)
+- ask whether to enable HTTPS caching (default: on); only then ask for a second LAN IP
 - ask for cache directory and cache size
 - optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
@@ -243,7 +243,7 @@ You need:
 - port `443` free on both LAN IPs
 - port `5300` free on the HTTP IP (zone transfer to secondary DNS nodes of older versions)
 - port `8080` for the Admin UI
-- a second LAN IP (always required; HTTPS mode answers on it)
+- a second LAN IP, only for HTTPS mode (HTTPS mode answers on it)
 - optional port `67/udp` if using the built in DHCP server
 
 Recommended storage:
@@ -942,7 +942,7 @@ Recommended:
 - use enough disk space
 - enable nesting
 - keep the container inside your LAN
-- give the container a static IP and a second static IP (always required)
+- give the container a static IP, and a second static IP if you use HTTPS mode
 
 Example LXC config on the Proxmox host:
 
