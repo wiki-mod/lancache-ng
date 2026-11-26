@@ -11891,14 +11891,25 @@ end
         // What: lancache-ng cache usage: counts, then JSON.
         // Why: cache reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
-        pub fn cache_run(args: &[String]) -> Result<(), String> {
-            if args.first().map(String::as_str) != Some("usage") {
-                return Err("commands: usage".into());
-            }
+        pub async fn cache_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
-            let used = cache_bytes(&cache_root(&s)?);
-            println!("{}", usage(&s, Some(used))?);
-            Ok(())
+            match args.first().map(String::as_str) {
+                Some("usage") => {
+                    let used = cache_bytes(&cache_root(&s)?);
+                    println!("{}", usage(&s, Some(used))?);
+                    Ok(())
+                }
+                // What: wipe goes to the ui, as the button.
+                // Why: the ui lowers the shown sum at once.
+                // From: Issue #1683 | PR #2020
+                Some("wipe") => {
+                    let r = s.text("UI_ROUTE_HAMSTER_API")?.replace("{op}", "wipe");
+                    let v = crate::shared::http::ui_socket(&s, &r, serde_json::Value::Null).await?;
+                    println!("{v}");
+                    Ok(())
+                }
+                _ => Err("commands: usage | wipe".into()),
+            }
         }
 
         // What: one regular file with its facts.
@@ -14988,7 +14999,6 @@ mod ui {
             .route(&p("UI_PAGE_LOGS")?, get(logs))
             .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
             .route(&p("UI_PAGE_CACHEHAMSTER")?, get(cachehamster))
-            .route(&p("UI_ROUTE_HAMSTER_API")?, post(hamster_api))
             .route(&p("UI_PAGE_DOMAINS")?, get(domains))
             .route(&p("UI_PAGE_DHCP")?, get(dhcp))
             .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
@@ -15066,7 +15076,8 @@ mod ui {
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
-            .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action)))
+            .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action))
+            .route(&p("UI_ROUTE_HAMSTER_API")?, post(hamster_api)))
     }
 
     // What: the REST routes on the CLI socket.
@@ -15764,7 +15775,7 @@ async fn main() -> std::process::ExitCode {
         "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
         "ntp" => code(shared::ntp::ntp_run(&argv).await),
         "secret" => code(shared::secret::secret_run(&argv)),
-        "cache" => code(shared::tidy::cache_run(&argv)),
+        "cache" => code(shared::tidy::cache_run(&argv).await),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
