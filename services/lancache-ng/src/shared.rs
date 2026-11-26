@@ -3110,13 +3110,9 @@ pub mod peer {
     pub async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
         let name = s.text("DDNS_TSIG_NAME")?;
         let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
-        own_api(
-            s,
-            crate::shared::http::client(s)?,
-            &crate::shared::secret::get(s, "PDNS_API_KEY")?,
-        )?
-        .set_tsigkey(&name, &algorithm, &crate::shared::secret::tsig_secret(s)?)
-        .await?;
+        own_api(s)?
+            .set_tsigkey(&name, &algorithm, &crate::shared::secret::tsig_secret(s)?)
+            .await?;
         Ok(name)
     }
 
@@ -3124,11 +3120,7 @@ pub mod peer {
     // Why: zones of older versions were created without it.
     // From: Issue #1683 | PR #1858
     pub async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
-        let api = own_api(
-            s,
-            crate::shared::http::client(s)?,
-            &crate::shared::secret::get(s, "PDNS_API_KEY")?,
-        )?;
+        let api = own_api(s)?;
         let secondary =
             crate::shared::dns::Role::from_settings(s)? == crate::shared::dns::Role::Secondary;
         let key = vec![key.to_string()];
@@ -3155,19 +3147,7 @@ pub mod peer {
         // What: no removal; the primary's check prunes.
         // Why: this list is from setup and may be older.
         // From: Issue #1683
-        match_zones(
-            &own_api(
-                s,
-                crate::shared::http::client(s)?,
-                &crate::shared::secret::get(s, "PDNS_API_KEY")?,
-            )?,
-            &zones,
-            &masters,
-            key,
-            false,
-            "secondary",
-        )
-        .await
+        match_zones(&own_api(s)?, &zones, &masters, key, false, "secondary").await
     }
 
     // What: a secondary holds exactly the wanted zones.
@@ -3259,10 +3239,7 @@ pub mod peer {
         s: &Settings,
         address: &str,
     ) -> Result<Vec<crate::shared::pdns::Zone>, String> {
-        let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
-        api_at(s, crate::shared::http::client(s)?, address, &key)?
-            .zones()
-            .await
+        api_at(s, address)?.zones().await
     }
 
     // What: one API client per recursor.
@@ -3320,30 +3297,26 @@ pub mod peer {
     // What: pdns API of this node, primary or secondary.
     // Why: records and zones live only in PowerDNS.
     // From: Issue #1683 | PR #2019
-    pub fn own_api(
-        s: &Settings,
-        client: reqwest::Client,
-        key: &str,
-    ) -> Result<crate::shared::pdns::Api, String> {
+    pub fn own_api(s: &Settings) -> Result<crate::shared::pdns::Api, String> {
         Ok(crate::shared::pdns::Api::new(
-            client,
+            crate::shared::http::client(s)?,
             &s.text("PDNS_PRIMARY_API_URL")?,
-            key,
+            &crate::shared::secret::get(s, "PDNS_API_KEY")?,
         ))
     }
 
     // What: pdns API of one peer by its address.
     // Why: zone list, AXFR request and sync use it.
     // From: Issue #1683 | PR #2019
-    pub fn api_at(
-        s: &Settings,
-        client: reqwest::Client,
-        address: &str,
-        key: &str,
-    ) -> Result<crate::shared::pdns::Api, String> {
+    pub fn api_at(s: &Settings, address: &str) -> Result<crate::shared::pdns::Api, String> {
         let host = crate::shared::dns::host_port(address, s.uint("PDNS_AUTH_API_PORT")?);
         let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
-        Ok(crate::shared::pdns::Api::new(client, &url, key))
+        let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
+        Ok(crate::shared::pdns::Api::new(
+            crate::shared::http::client(s)?,
+            &url,
+            &key,
+        ))
     }
 
     // What: state of one zone and the worst-of rule.

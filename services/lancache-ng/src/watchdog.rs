@@ -22,7 +22,7 @@
 
 use crate::config::Settings;
 use crate::shared::docker::Health;
-use crate::shared::{cert, clock, docker, fs, http, tidy};
+use crate::shared::{cert, clock, docker, fs, tidy};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -350,9 +350,7 @@ async fn dns_sync(s: &Settings, f: &mut Findings) -> Result<(), String> {
     if peers.is_empty() {
         return Ok(());
     }
-    let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
-    let client = http::client(s)?;
-    let ours = peer::own_api(s, client.clone(), &key)?
+    let ours = peer::own_api(s)?
         .zones()
         .await
         .map_err(|e| format!("primary: {e}"))?;

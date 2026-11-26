@@ -24,7 +24,7 @@ use crate::config::{self, Settings};
 use crate::shared::dns::Role;
 use crate::shared::peer::{self, PeerZone, ZoneState};
 use crate::shared::tool;
-use crate::shared::{apply, fs, http, render, secret};
+use crate::shared::{apply, fs, render, secret};
 use crate::ui::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -36,8 +36,7 @@ use std::time::Duration;
 // Why: the primary sets them; the recursors follow.
 // From: Issue #1683
 async fn own_zones(s: &Settings) -> Result<BTreeMap<String, u32>, String> {
-    let key = secret::get(s, "PDNS_API_KEY")?;
-    let api = peer::own_api(s, http::client(s)?, &key)?;
+    let api = peer::own_api(s)?;
     Ok(api
         .zones()
         .await?
@@ -179,7 +178,7 @@ async fn follow() -> Result<(), String> {
 // Why: an old zone would keep answering its names.
 // From: Issue #1683 | PR #1980
 pub(crate) async fn drop_old_zones(s: &Settings, before: &[String]) {
-    let read = (hosted_now(s), Role::from_settings(s), pdns_api(s));
+    let read = (hosted_now(s), Role::from_settings(s), peer::own_api(s));
     let (now, role, api) = match read {
         (Ok(now), Ok(role), Ok(api)) => (now, role, api),
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
@@ -209,13 +208,6 @@ pub(crate) async fn drop_old_zones(s: &Settings, before: &[String]) {
         }
     }
     peers_follow(s);
-}
-
-// What: PowerDNS API of this node.
-// Why: records live only in PowerDNS.
-// From: Issue #1683 | PR #1980
-pub(crate) fn pdns_api(s: &Settings) -> Result<crate::shared::pdns::Api, String> {
-    peer::own_api(s, http::client(s)?, &secret::get(s, "PDNS_API_KEY")?)
 }
 
 // What: reverse DNS name of an address.
@@ -399,7 +391,7 @@ pub(crate) async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), S
         return Err(tr("err_zone_no_snapshots").replace("{zone}", zone));
     }
     let rows: Vec<Value> = zone_store(s, zone)?.read(id)?;
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     api.restore(zone, &rows).await?;
     snapshot(s, &api, zone).await?;
     peer::flush_zone(s, zone).await
@@ -495,7 +487,7 @@ pub(crate) async fn lan_domain_action(
             // What: a domain with own records stays.
             // Why: removing it would drop names from DNS.
             // From: Issue #1683
-            let own = own_rrsets(&pdns_api(s)?.rrsets(&zone).await?).len();
+            let own = own_rrsets(&peer::own_api(s)?.rrsets(&zone).await?).len();
             if own > 0 {
                 return Err(tr("err_domain_has_records")
                     .replace("{x}", &name)
@@ -577,7 +569,7 @@ pub(crate) async fn record(
             .collect();
         ttl = form_ttl(s, get)?;
     }
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     let host = crate::shared::pdns::zone_id(&name);
     // What: the place of each wanted PTR, checked first.
     // Why: no A is saved when its PTR cannot follow.
@@ -686,7 +678,7 @@ pub(crate) async fn ptr(
         ttl = form_ttl(s, get)?;
         contents.push(crate::shared::pdns::zone_id(&get("hostname")));
     }
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
     snapshot(s, &api, &zone).await?;
     peer::flush_zone(s, &zone).await
@@ -751,21 +743,9 @@ pub(crate) fn ns_change(s: &Settings, name: &str, entered: Option<bool>) -> Fiel
 // Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
 // From: Issue #1683 | PR #1858
 pub(crate) async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
-    let ours = pdns_api(s)?.zones().await?;
+    let ours = peer::own_api(s)?.zones().await?;
     let theirs = peer::zones_at(s, address).await?;
     peer::peer_zones(s, &ours, &theirs)
-}
-
-// What: pdns API of one peer by its address.
-// Why: zone list, AXFR request and sync use it.
-// From: Issue #1683
-pub(crate) fn remote_api(s: &Settings, address: &str) -> Result<crate::shared::pdns::Api, String> {
-    peer::api_at(
-        s,
-        http::client(s)?,
-        address,
-        &secret::get(s, "PDNS_API_KEY")?,
-    )
 }
 
 // What: check every secondary; again after a wait.
@@ -801,7 +781,7 @@ pub(crate) async fn watch_round(
     s: &Settings,
     failing: &mut BTreeMap<String, Failing>,
 ) -> Result<(), String> {
-    let ours = pdns_api(s)?.zones().await?;
+    let ours = peer::own_api(s)?.zones().await?;
     let peers = crate::shared::pdns_conf::secondaries(s);
     failing.retain(|n, _| peers.iter().any(|(p, _)| p == n));
     let enabled = s.flag("DNS_SECONDARY_NS_ENABLED")?;
@@ -886,7 +866,7 @@ pub(crate) fn peers_follow(s: &Settings) {
     let s = s.clone();
     tokio::spawn(async move {
         for (name, address) in crate::shared::pdns_conf::secondaries(&s) {
-            let done = match remote_api(&s, &address) {
+            let done = match peer::api_at(&s, &address) {
                 Ok(api) => peer_follows(&s, &api, &address).await,
                 Err(e) => Err(e),
             };
@@ -906,7 +886,7 @@ pub(crate) async fn check_peer(
     address: &str,
 ) -> Result<Result<(), String>, String> {
     let aa = answers_aa(s, address, &crate::shared::dns::lan_zone(s)?).await;
-    let api = remote_api(s, address)?;
+    let api = peer::api_at(s, address)?;
     peer_follows(s, &api, address).await?;
     let theirs = api.zones().await?;
     for z in peer::peer_zones(s, ours, &theirs)? {
@@ -1002,7 +982,7 @@ pub(crate) async fn flush_on_transfer(app: Arc<App>) {
 // Why: recursors would serve old answers until TTL.
 // From: Issue #1683 | PR #1980
 pub(crate) async fn flush_round(s: &Settings, seen: &mut peer::Flushed) -> Result<(), String> {
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     let peers = !crate::shared::pdns_conf::secondaries(s).is_empty();
     let zones: BTreeMap<String, u32> = api
         .zones()
@@ -1050,7 +1030,7 @@ pub(crate) async fn read_chain(
     if tops.is_empty() {
         return Ok(chain);
     }
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     for top in &tops {
         let ds = api.ds(top).await.unwrap_or_default();
         if !ds.is_empty() {
@@ -1097,7 +1077,7 @@ pub(crate) async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Resul
 // Why: no other step creates the zones in pdns.
 // From: Issue #1683 | PR #1980
 pub(crate) async fn ensure_primary_zones(s: &Settings, key: &str) -> Result<(), String> {
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     let have = zone_names(&api).await?;
     let edit = vec![s.text("PDNS_SOA_EDIT")?];
     let signed = if s.flag("DDNS_ALLOW_UNSIGNED")? {
@@ -1359,7 +1339,7 @@ pub(crate) async fn drop_peer_records(
     name: &str,
     address: &str,
 ) -> Result<(), String> {
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     let host = peer_host(s, name)?;
     let kind = crate::shared::dns::address_kind(address);
     api.set_rrset(&crate::shared::dns::lan_zone(s)?, &host, kind, 0, &[])
@@ -1453,7 +1433,7 @@ pub(crate) async fn ensure_soa_names(
 // Why: a restore sets it back; AXFR wants a higher one.
 // From: Issue #1683 | PR #2017
 pub(crate) async fn raise_serial(s: &Settings, zone: &str, past: u32) -> Result<(), String> {
-    let api = pdns_api(s)?;
+    let api = peer::own_api(s)?;
     let Some((ttl, mut f)) = soa_fields(&api, zone).await? else {
         return Err(format!("{zone} has no SOA"));
     };

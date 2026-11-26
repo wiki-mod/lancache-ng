@@ -830,7 +830,7 @@ pub(crate) async fn domains(State(app): Shared, Extension(csrf): Extension<Csrf>
     ctx.insert("lan_zone", lan.trim_end_matches('.'));
     let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut ptr = Vec::new();
-    match pdns_api(&s) {
+    match peer::own_api(&s) {
         // What: other zones only if the main one answers.
         // Why: an unreachable API would time out 20 times.
         // From: Issue #1683 | PR #1980
@@ -1187,7 +1187,7 @@ pub(crate) struct Failing {
 pub(crate) async fn zone_overview(State(app): Shared) -> Page {
     let s = app.settings();
     let mut columns = vec![json!({"name": tr("zone_col_primary"), "error": Value::Null})];
-    let mut lists = vec![pdns_api(&s)?.zones().await?];
+    let mut lists = vec![peer::own_api(&s)?.zones().await?];
     for (name, address) in crate::shared::pdns_conf::secondaries(&s) {
         match peer::zones_at(&s, &address).await {
             Ok(z) => {
@@ -1587,7 +1587,7 @@ pub(crate) async fn service_values(
         }
     }
     if has("auth")
-        && let Ok(api) = pdns_api(s)
+        && let Ok(api) = peer::own_api(s)
         && let Ok(rows) = api.statistics().await
     {
         add_stats(&mut out, "auth", rows);
