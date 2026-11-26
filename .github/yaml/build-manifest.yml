@@ -954,18 +954,33 @@ runtime:
     # Why: the ui renders them; package examples go
     # From: Issue #1683 | PR #2017
     - NGINX_LINK_PARTS=conf.d stream.d proxy-params.conf
+    # What: CA and leaf cert dirs below NGINX_DIR.
+    # Why: the ui writes them; the proxy reads them.
+    # From: Issue #1683 | PR #2020
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
+    # What: stack CA files, subject, key type, lifetime.
+    # Why: the ui creates the CA once, then reuses it.
+    # From: Issue #1683 | PR #2020
     - CA_CERT_FILE=ca.crt
     - CA_KEY_FILE=ca.key
     - CA_SERIAL_FILE=ca.srl
     - CA_SUBJECT=/CN=LanCache-NG CA/O=LanCache-NG/C=DE
     - CA_KEY_TYPE=rsa:4096
     - CA_DAYS=3650
+    # What: leaf cert key type, subject and lifetime.
+    # Why: the ui signs one leaf per covered host.
+    # From: Issue #1683 | PR #2020
     - LEAF_KEY_TYPE=rsa:2048
     - LEAF_SUBJECT=/CN=lancache-ng
     - LEAF_DAYS=3650
+    # What: old name of the default leaf cert.
+    # Why: deprecated; NGINX_DEFAULT_CERT names it.
+    # From: Issue #1683 | PR #2020
     - DEFAULT_CERT_NAME=default
+    # What: DNS name in the default leaf cert.
+    # Why: clients without SNI or by IP get this cert.
+    # From: Issue #1683 | PR #2020
     - DEFAULT_CERT_DNS=lancache-default
     # What: cert file modes and the CA stamp file name.
     # Why: nginx workers read keys by the shared gid.
@@ -975,10 +990,19 @@ runtime:
     - CERT_FILE_MODE=0644
     - CA_KEY_MODE=0600
     - CA_STAMP_FILE=.ca-fingerprint
+    # What: cache dir of the proxy nginx.
+    # Why: proxy_cache_path and the dashboard read it.
+    # From: Issue #1683 | PR #2020
     - NGINX_CACHE_DIR=/var/cache/nginx/lancache
+    # What: proxy health path and its http/https URLs.
+    # Why: compose healthchecks and CI probe them.
+    # From: Issue #1683 | PR #2020
     - PROXY_HEALTH_PATH=/healthz
     - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@:@PROXY_HTTP_PORT@@PROXY_HEALTH_PATH@
     - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:@NGINX_HEALTH_HTTPS_PORT@@PROXY_HEALTH_PATH@
+    # What: proxy ports: http, https and internal listens.
+    # Why: the ui renders stream and https files from them.
+    # From: Issue #1683 | PR #2020
     - PROXY_HTTP_PORT=80
     - PROXY_HTTPS_PORT=443
     - NGINX_HEALTH_HTTPS_PORT=8445
@@ -987,14 +1011,20 @@ runtime:
     - NGINX_PASSTHROUGH_RELAY_PORT=9446
     - NGINX_PASSTHROUGH_PORT=8443
     - NGINX_ORIGIN_HTTPS_PORT=443
+    # What: upstream timeouts and the cache lock wait.
+    # Why: proxy-params.conf and the relays read them.
+    # From: Issue #1683 | PR #2020
     - NGINX_UPSTREAM_CONNECT_TIMEOUT=30
     - NGINX_UPSTREAM_IDLE_TIMEOUT=3600
     - NGINX_CACHE_LOCK_TIMEOUT=2h
-    - NGINX_SSL_VERIFY_DEPTH=2
-    # What: CA bundle nginx trusts for origin https.
+    # What: verify depth and CA bundle for origin https.
     # Why: one owner for the path; Alpine default.
     # From: Issue #1683 | PR #1980
+    - NGINX_SSL_VERIFY_DEPTH=2
     - NGINX_SSL_TRUSTED_CA=/etc/ssl/certs/ca-certificates.crt
+    # What: TLS protocols, ciphers, session cache of MITM.
+    # Why: https.conf reads them for the MITM server.
+    # From: Issue #1683 | PR #2020
     - NGINX_SSL_PROTOCOLS=TLSv1.2 TLSv1.3
     - NGINX_SSL_CIPHERS=HIGH:!aNULL:!MD5
     - NGINX_SSL_SESSION_CACHE=shared:SSL:10m
@@ -1003,22 +1033,43 @@ runtime:
     # Why: kTLS lowers the CPU load of nginx.
     # From: Issue #1683 | PR #1985
     - NGINX_SSL_CONF_OPTIONS=KTLS
+    # What: proxy temp file limits for large downloads.
+    # Why: proxy-params.conf reads them.
+    # From: Issue #1683 | PR #2020
     - NGINX_MAX_TEMP_FILE_SIZE=51200m
     - NGINX_TEMP_FILE_WRITE_SIZE=8m
+    # What: nginx worker, thread pool and map limits.
+    # Why: nginx.conf reads them; many parallel clients.
+    # From: Issue #1683 | PR #2020
     - NGINX_WORKER_RLIMIT_NOFILE=65535
     - NGINX_THREAD_POOL_THREADS=32
     - NGINX_THREAD_POOL_MAX_QUEUE=65536
     - NGINX_WORKER_CONNECTIONS=4096
     - NGINX_MAP_HASH_BUCKET_SIZE=512
     - NGINX_MAP_HASH_MAX_SIZE=2048
+    # What: keepalive, directio and resolver timings.
+    # Why: nginx.conf reads them for http and stream.
+    # From: Issue #1683 | PR #2020
     - NGINX_KEEPALIVE_TIMEOUT=65
     - NGINX_DIRECTIO=4m
     - NGINX_RESOLVER_VALID=300s
     - NGINX_RESOLVER_TIMEOUT=5s
+    # What: old Kea NCR port; KEA_DDNS_PORT is used.
+    # Why: deprecated; no release has read it.
+    # From: Issue #1683 | PR #2020
     - KEA_NCR_PORT=53001
+    # What: rendered https listen file below NGINX_DIR.
+    # Why: the ui writes it; https.conf includes it.
+    # From: Issue #1683 | PR #2020
     - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
+    # What: healthz body file and its text.
+    # Why: the ui writes it; proxy-params.conf serves it.
+    # From: Issue #1683 | PR #2020
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
     - NGINX_HEALTHZ_BODY=ok
+    # What: PSL file name and its download URL.
+    # Why: setup.sh and CI fetch it; the ui reads it.
+    # From: Issue #1683 | PR #2020
     - NGINX_PSL_FILE=public_suffix_list.dat
     - NGINX_PSL_URL=https://publicsuffix.org/list/public_suffix_list.dat
     # What: PSL place in the checkout, checks, backups.
@@ -1028,53 +1079,110 @@ runtime:
     - NGINX_PSL_MARKERS===BEGIN ICANN DOMAINS===,===END ICANN DOMAINS===,===BEGIN PRIVATE DOMAINS===,===END PRIVATE DOMAINS===
     - NGINX_PSL_BACKUP_SUBDIR=psl
     - NGINX_PSL_BACKUP_KEEP=3
+    # What: loopback ports that refuse uncovered TLS hosts.
+    # Why: the ui renders the refuse relay of the stream.
+    # From: Issue #1683 | PR #2020
     - NGINX_DISCARD_PORT=9
     - NGINX_REFUSE_RELAY_PORT=9447
+    # What: rendered stream, https map and dispatch files.
+    # Why: the ui writes them; nginx includes them.
+    # From: Issue #1683 | PR #2020
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
     - NGINX_HTTPS_MAP_FILE=conf.d/00-https-map.conf
     - NGINX_HTTPS_DISPATCH_FILE=stream.d/01-https-dispatch.conf
+    # What: ports of DNS, DNS for HTTPS, pdns auth and NTP.
+    # Why: compose and the rendered configs use them.
+    # From: Issue #1683 | PR #2020
     - DNS_PORT=53
     - DNS_HTTPS_PORT=1053
     - PDNS_AUTH_PORT=5300
     - NTP_PORT=123
+    # What: bind addresses: loopback and all interfaces.
+    # Why: other SOT values and renders build on them.
+    # From: Issue #1683 | PR #2020
     - LOOPBACK_BIND_IP=127.0.0.1
     - ANY_BIND_IP=0.0.0.0
+    # What: address setup.sh asks the route table about.
+    # Why: it finds the LAN IP; nothing is sent.
+    # From: Issue #1683 | PR #2020
     - ROUTE_PROBE_TARGET=1.1.1.1:53
+    # What: upper bound of UI_SESSION_TTL_SECONDS.
+    # Why: setup.sh rejects a longer session.
+    # From: Issue #1683 | PR #2020
     - UI_SESSION_TTL_MAX_SECONDS=31536000
+    # What: state subdirs setup.sh makes for syslog-ng, NTP.
+    # Why: setup.sh reads them when it lays out the host.
+    # From: Issue #1683 | PR #2020
     - STATE_SUBDIR_SYSLOG_NG=syslog-ng
     - STATE_SUBDIR_NTP=ntp
+    # What: more state subdir names below the install dir.
+    # Why: unread in every release; setup.sh has own names.
+    # From: Issue #1683 | PR #2020
     - STATE_SUBDIR_CACHEHAMSTER=cachehamster
     - STATE_SUBDIR_PDNS=pdns
     - STATE_SUBDIR_PDNS_FILTER=pdns-filter-state
     - STATE_SUBDIR_KEA=kea
     - STATE_SUBDIR_CACHE=cache
     - STATE_SUBDIR_CA=ca
+    # What: cachehamster poll gap, program, queues, service.
+    # Why: cachehamster and the ui read them.
+    # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_POLL_INTERVAL=5
     - CACHEHAMSTER_PROGRAM=lancache-ng
     - CACHEHAMSTER_QUEUES=2
     - CACHEHAMSTER_SERVICE=@SERVICES_SERVICE@
+    # What: cache domains: own, default list file, disabled.
+    # Why: the ui edits them; the renders read them.
+    # From: Issue #1683 | PR #2020
     - CDN_CUSTOM_DOMAINS=
     - CDN_DEFAULT_DOMAINS_FILE=@CDN_DOMAINS_FILE@
     - CDN_DISABLED_DOMAINS=
+    # What: compose project name of the stack.
+    # Why: Docker calls pick the stack containers by it.
+    # From: Issue #1683 | PR #2020
     - COMPOSE_PROJECT=lancache-ng
+    # What: accept DDNS updates without a TSIG key.
+    # Why: dns render and the ui read it; off by default.
+    # From: Issue #1683 | PR #2020
     - DDNS_ALLOW_UNSIGNED=0
+    # What: Kea options: custom, DDNS, DNS servers, logging.
+    # Why: the Kea render and the DHCP page read them.
+    # From: Issue #1683 | PR #2020
     - DHCP_CUSTOM_OPTIONS=
     - DHCP_DDNS=0
     - DHCP_DNS_SERVERS=
     - DHCP_LOG_PACKETS=0
     - DHCP_OPTION_DATA_MAX=255
+    # What: dhcp-probe ACK wait, sends and listen window.
+    # Why: the probe for a second DHCP server uses them.
+    # From: Issue #1683 | PR #2020
     - DHCP_PROBE_ACK_WAIT_MS=2000
     - DHCP_PROBE_SENDS=3
     - DHCP_PROBE_WINDOW_MS=5000
+    # What: proxy interface, relay address, subnet start.
+    # Why: the DHCP modes and setup.sh read them.
+    # From: Issue #1683 | PR #2020
     - DHCP_PROXY_INTERFACE=
     - DHCP_RELAY_LOCAL_ADDR=
-    - DHCP_SERVICE=dhcp
     - DHCP_SUBNET_START=
+    # What: compose service name of the dhcp container.
+    # Why: the ui and setup.sh find the container by it.
+    # From: Issue #1683 | PR #2020
+    - DHCP_SERVICE=dhcp
+    # What: AAAA filter of the recursors; off by default.
+    # Why: the dns render adds the filter script when on.
+    # From: Issue #1683 | PR #2020
     - DNS_FILTER_AAAA=0
+    # What: LAN record types, TTL and limits of the editor.
+    # Why: the DNS page and the record checks read them.
+    # From: Issue #1683 | PR #2020
     - DNS_LAN_RECORD_TYPES=A AAAA CNAME MX TXT SRV CAA HTTPS SVCB NAPTR SSHFP TLSA
     - DNS_RECORD_TTL=300
     - DNS_RECORD_TTL_MAX=86400
     - DNS_TXT_MAX_BYTES=255
+    # What: registered secondaries and the zones they hold.
+    # Why: the ui keeps them; the secondary reads its zones.
+    # From: Issue #1683 | PR #2020
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
     # What: secondaries as NS records; off by default.
