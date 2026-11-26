@@ -135,22 +135,16 @@ print_result_banner() {
     printf '%s%s%s%s\n\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
 }
 
-# What: true if a whole line of the list equals the needle
-# Why: one membership owner; no grep exit code to misread
-# From: Issue #1683 | PR #1858
-list_has_line() {
-    local -a lines=()
-    mapfile -t lines <<< "$2"
-    array_has "$1" "${lines[@]}"
-}
-
-# What: true if $1 equals one of the further arguments
-# Why: one membership test for arrays, words and lines
+# What: true if $1 equals an item; one text item = its lines
+# Why: one membership owner for arrays, words and lines
 # From: Issue #1683 | PR #2017
-array_has() {
+list_has() {
     local needle="$1" item
-    shift
-    for item in "$@"; do
+    local -a items=("${@:2}")
+    if (( ${#items[@]} == 1 )) && [[ "${items[0]}" == *$'\n'* ]]; then
+        mapfile -t items <<< "${items[0]}"
+    fi
+    for item in "${items[@]}"; do
         [[ "$item" != "$needle" ]] || return 0
     done
     return 1
@@ -287,7 +281,7 @@ ask_list() {
             # Why: a list names each server or domain once
             # From: Issue #1683
             key=$(dns_name_normalized "$entry")
-            [[ -n "$problem" ]] || ! array_has "$key" "${seen[@]}" || problem="'${entry}' is listed twice"
+            [[ -n "$problem" ]] || ! list_has "$key" "${seen[@]}" || problem="'${entry}' is listed twice"
             seen+=("$key")
             [[ -z "$problem" ]] || bad="$problem"
         done
@@ -1128,14 +1122,14 @@ choose_lancache_channel() {
         # Why: same warning and second yes as the prompt
         # From: Issue #1683
         if [[ "$role" = install && "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]] \
-            && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$selectable" \
+            && list_has "$LANCACHE_IMAGE_CHANNEL" "$selectable" \
             && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
             confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" \
                 || die "Install cancelled; nothing was changed."
         fi
         return 0
     fi
-    list_has_line "$default" "$selectable" \
+    list_has "$default" "$selectable" \
         || die "The default channel '$default' is not a channel setup.sh offers."
     retired=$(lancache_release_rows retired) || exit $?
     while IFS= read -r offered; do
@@ -1149,7 +1143,7 @@ choose_lancache_channel() {
     channel_hint=$(paste -sd/ <<< "$selectable")
     while true; do
         ask "Release channel [$channel_hint]" "$default"
-        if list_has_line "${REPLY,,}" "$selectable"; then
+        if list_has "${REPLY,,}" "$selectable"; then
             LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
             # What: install: another channel, a second yes
             # Why: untested builds never install unwarned
@@ -1515,7 +1509,7 @@ rpm_installed_package_list() {
     installed=$(rpm -qa --qf '%{NAME}\n') \
         || die "Failed to read the rpm package database (exit $?)."
     for package in "$@"; do
-        if list_has_line "$package" "$installed"; then
+        if list_has "$package" "$installed"; then
             printf '%s\n' "$package"
         fi
     done
@@ -1619,7 +1613,7 @@ install_docker_rpm() {
     # Why: a plugin alone joins a Docker that already runs
     # From: Issue #1683
     for package in "${packages[@]}"; do
-        if array_has "$package" "${DOCKER_CE_PACKAGES[@]}"; then
+        if list_has "$package" "${DOCKER_CE_PACKAGES[@]}"; then
             needs_engine=1
         fi
     done
@@ -2042,7 +2036,7 @@ generate_secret_value() {
     # Why: an unlisted key would ship unredacted in bundles
     # From: Issue #1683 | PR #1858
     managed=$(managed_secret_env_keys)
-    list_has_line "$name" "$managed" \
+    list_has "$name" "$managed" \
         || die "Secret $name is not in managed_secret_env_keys; add it there so log bundles redact it."
 
     case "$kind" in
@@ -2590,7 +2584,7 @@ docker_volume_exists() {
         print_error "Failed to list Docker volumes (exit $?)."
         return 2
     }
-    list_has_line "$1" "$names"
+    list_has "$1" "$names"
 }
 
 # What: fills an array with the compose -f arguments
@@ -3030,7 +3024,7 @@ migrate_quickstart_install() (
     keys=$(env_file_keys "$old_env") || exit $?
     while IFS= read -r key; do
         [[ -n "$key" ]] || continue
-        if array_has "$key" "${path_key_list[@]}"; then
+        if list_has "$key" "${path_key_list[@]}"; then
             old_value=$(get_env_var "$key" "$old_env") || die "Cannot read $key from $old_env (exit $?)."
             new_raw=$(get_env_var "$key" "$new_env") || die "Cannot read $key from $new_env (exit $?)."
             [[ -z "$old_value" || "$old_value" == /* ]] || old_value=$(realpath -m "$old_dir/$old_value")
@@ -3063,12 +3057,12 @@ migrate_quickstart_install() (
     missing="" kept=""
     while IFS= read -r volume; do
         [[ -n "$volume" ]] || continue
-        list_has_line "$volume" "$prod_volumes" && continue
-        awk -v v="$volume" '$1 == v { f = 1 } END { exit !f }' <<< "$rows" && continue
+        list_has "$volume" "$prod_volumes" && continue
+        list_has "$volume" "$(cut -d' ' -f1 <<< "$rows")" && continue
         # What: SOT-listed v0.3 volumes stay, untouched
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
-        if list_has_line "$volume" "$kept_list"; then
+        if list_has "$volume" "$kept_list"; then
             kept+=" $(stack_volume_name "$old_dir" "$old_env" "$volume")" || exit $?
             continue
         fi
@@ -4497,7 +4491,7 @@ validate_lancache_image_channel() {
     accepted=$(lancache_channel_words) || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
     accepted=$(printf '%s\n%s\n' "$accepted" "$pinned")
-    [[ -z "$channel" ]] || ! list_has_line "$channel" "$accepted" || return 0
+    [[ -z "$channel" ]] || ! list_has "$channel" "$accepted" || return 0
     valid=$(paste -sd' ' <<< "$accepted")
     retired=$(lancache_release_rows retired) || exit $?
     reason=$(awk -v c="$channel" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
@@ -4665,7 +4659,7 @@ lancache_tag_kind() {
     local tag="$1" words
     [[ -n "$tag" ]] || return 0
     words=$(lancache_channel_words) || exit $?
-    if list_has_line "$tag" "$words"; then
+    if list_has "$tag" "$words"; then
         printf 'channel\n'
     elif [[ "$tag" == sha-* || "$tag" == v[0-9]* ]]; then
         printf 'fixed\n'
@@ -4706,7 +4700,7 @@ lancache_channel_branches() {
 is_channel_branch() {
     local branches
     branches=$(lancache_channel_branches) || exit $?
-    list_has_line "$1" "$branches"
+    list_has "$1" "$branches"
 }
 
 # What: "<branch> (<channel>)" of each channel, with "or"
@@ -4963,7 +4957,7 @@ lancache_image_refs_fingerprint() {
 lancache_image_refs_for_tag() {
     local env_file="$1" tag="$2" channels registry prefix vars var slug
     channels=$(lancache_release_rows channel) || exit $?
-    if list_has_line "$tag" "$channels"; then
+    if list_has "$tag" "$channels"; then
         lancache_channel_image_refs "$env_file" "$tag"
         return
     fi
@@ -5079,7 +5073,7 @@ resolve_lancache_image_tag() {
 
     channel=$(shell_or_env_value LANCACHE_IMAGE_CHANNEL "$env_file") || exit $?
 
-    if [[ -n "$channel" ]] && list_has_line "$channel" "$words"; then
+    if [[ -n "$channel" ]] && list_has "$channel" "$words"; then
         lancache_stack_pointer_channel_for "$channel"
         return 0
     elif [[ -n "$channel" && "$channel" = "$pinned" ]]; then
@@ -5212,7 +5206,7 @@ migrate_env_for_update() (
         lancache_image_refs=$(lancache_image_refs_for_tag "$env_file" "$lancache_image_tag") \
             || die "Cannot name the images of ${lancache_image_tag} for ${env_file}; it stays unchanged (exit $?)."
     elif [[ "$preserve_image_tag" = "1" && -n "$existing_image_tag" && -n "$archived_refs" ]] \
-        && list_has_line "$existing_image_tag" "$stack_channels"; then
+        && list_has "$existing_image_tag" "$stack_channels"; then
         # What: a restore keeps archived channel pins
         # Why: re-resolving pulls the current stack
         # From: Issue #1683 | PR #1858
@@ -5304,7 +5298,7 @@ migrate_env_for_update() (
             || die "Cannot read the default directory of $state_key (exit $?)."
         [[ "$state_key" != CACHE_DIR ]] || continue
         state_sub_dir="$state_dir/$state_sub"
-        if array_has "$state_sub" "${LEGACY_STATE_CHILDREN[@]}"; then
+        if list_has "$state_sub" "${LEGACY_STATE_CHILDREN[@]}"; then
             legacy_path=$(legacy_state_path "$state_sub") || exit $?
             state_sub_dir=$(legacy_dir_or_default "$legacy_path" "$state_sub_dir") || exit $?
         fi
@@ -6794,9 +6788,9 @@ verify_stack_functional_health() {
     stack_services_into stack_svcs "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
         || die "Failed to list the services in $_UPDATE_STACK_DIR (exit $?)."
 
-    if ! array_has "$proxy_svc" "${stack_svcs[@]}"; then
+    if ! list_has "$proxy_svc" "${stack_svcs[@]}"; then
         print_skip "Proxy probe: this stack has no $proxy_svc"
-    elif ! array_has "$proxy_svc" "${probe[@]}"; then
+    elif ! list_has "$proxy_svc" "${probe[@]}"; then
         print_skip "Proxy probe: $proxy_svc is in SERVICES_STOPPED"
     else
         port=$(prod_env_default PROXY_HTTP_PORT) || exit $?
@@ -6814,9 +6808,9 @@ verify_stack_functional_health() {
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
     test_fqdn=$(prod_env_default SETUP_DNS_PROBE_NAME) || exit $?
-    if ! array_has "$dns_svc" "${stack_svcs[@]}"; then
+    if ! list_has "$dns_svc" "${stack_svcs[@]}"; then
         print_skip "DNS probe: this stack has no $dns_svc"
-    elif ! array_has "$dns_svc" "${probe[@]}"; then
+    elif ! list_has "$dns_svc" "${probe[@]}"; then
         print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
     else
         port=$(prod_env_default DNS_PORT) || exit $?
@@ -6893,7 +6887,7 @@ wanted_stack_services() {
     _wait_ref=()
     for svc in "$@"; do
         [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
-        ! array_has "$svc" "${stopped_list[@]}" || continue
+        ! list_has "$svc" "${stopped_list[@]}" || continue
         _wait_ref+=("$svc")
     done
 }
@@ -7267,7 +7261,7 @@ is_channel_layout_repo() {
     [[ "$repo" != "$root" ]] || return 0
     [[ "${repo%/*}" = "$root" ]] || return 1
     pointers=$(lancache_release_rows channel) || exit $?
-    list_has_line "${repo##*/}" "$pointers"
+    list_has "${repo##*/}" "$pointers"
 }
 
 # What: clones or moves a channel dir to its code ref
@@ -7557,7 +7551,7 @@ stack_container_drift() {
         have=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$id") \
             || { printf '%s: docker inspect failed (exit %s)\n' "$svc" "$?"; continue; }
         [[ "$have" = "$want" ]] || printf '%s runs an older config\n' "$svc"
-        ! array_has "$svc" "${wanted[@]}" || service_container_is_healthy "$svc" \
+        ! list_has "$svc" "${wanted[@]}" || service_container_is_healthy "$svc" \
             || printf '%s is not running healthy\n' "$svc"
     done <<< "$hashes"
 }
@@ -7781,7 +7775,7 @@ stack_up() {
     fi
     wanted_stack_services wanted "$env_file" "${services[@]}"
     for svc in "${services[@]}"; do
-        array_has "$svc" "${wanted[@]}" || idle+=("$svc")
+        list_has "$svc" "${wanted[@]}" || idle+=("$svc")
     done
     # What: created with the current config, not started
     # Why: the ui can only start a container that exists
@@ -7998,7 +7992,7 @@ merge_retired_ui_settings() {
         local i
         while IFS= read -r line; do
             [[ "$line" == *=* ]] || continue
-            list_has_line "$line" "$seen" && continue
+            list_has "$line" "$seen" && continue
             key="${line%%=*}"
             value="${line#*=}"
             # What: old ui key names and the raw PHC hash
@@ -8191,7 +8185,7 @@ generate_managed_secret() {
 env_key_is_secret() {
     local key="$1" managed
     managed=$(managed_secret_env_keys) || exit $?
-    list_has_line "$key" "$managed" && return 0
+    list_has "$key" "$managed" && return 0
     # What: a key naming a property of a secret is plain
     # Why: redacting a value like "none" garbles the bundle
     # From: Issue #1683 | PR #1912
@@ -9539,7 +9533,7 @@ cmd_secondary() {
             channel_default="$release_channel"
             if [[ -n "$stored_channel" ]]; then
                 stored_channel=$(lancache_stack_pointer_channel_for "$stored_channel") || exit $?
-                ! list_has_line "$stored_channel" "$(lancache_selectable_channels)" \
+                ! list_has "$stored_channel" "$(lancache_selectable_channels)" \
                     || channel_default="$stored_channel"
             fi
             printf '\n  %sChannel%s: choose the channel the primary runs.\n' "${BOLD}" "${RESET}"
@@ -9976,7 +9970,7 @@ case "$setup_command" in
         # Why: one-liner needs no env var or prompt
         # From: Issue #1683
         if [[ -n "${2:-}" ]]; then
-            list_has_line "$2" "$(lancache_release_rows channel)" \
+            list_has "$2" "$(lancache_release_rows channel)" \
                 || die "Unknown channel '$2'; use one of: $(lancache_release_rows channel | paste -sd" ")."
             export LANCACHE_IMAGE_CHANNEL="$2"
         fi
