@@ -5479,6 +5479,57 @@ mod shared {
                 .map_err(|e| format!("{key}: {e}"))
         }
 
+        // What: state of each secret file, never a value.
+        // Why: one reader for REST and the CLI check.
+        // From: Issue #1683 | PR #2020
+        pub fn states(s: &crate::config::Settings) -> Result<serde_json::Value, String> {
+            use std::os::unix::fs::PermissionsExt;
+            let d = dir(s)?;
+            let mut rows = Vec::new();
+            let paths = fs::entries_if_present(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+            for path in paths.into_iter().filter(|p| p.is_file()) {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                let key = name.to_ascii_uppercase().replace('-', "_");
+                let meta =
+                    std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let text = text.trim();
+                let mode = meta.permissions().mode() & 0o777;
+                rows.push(serde_json::json!({
+                    "key": key, "file": name, "mode": format!("{mode:o}"),
+                    "private": mode == fs::PRIVATE_MODE, "empty": text.is_empty(),
+                    "placeholder": is_placeholder(text),
+                    "env_overrides": crate::config::env_set(&crate::config::process_env, &key).is_some()
+                }));
+            }
+            Ok(serde_json::json!({"dir": d.display().to_string(), "secrets": rows}))
+        }
+
+        // What: lancache-ng secret list: states as JSON.
+        // Why: the CLI of secret reads sits with them.
+        // From: Issue #1683 | PR #2020
+        pub fn secret_run(args: &[String]) -> Result<(), String> {
+            if args.first().map(String::as_str) != Some("list") {
+                return Err("commands: list".into());
+            }
+            let v = states(&crate::config::Settings::from_process()?)?;
+            println!("{v}");
+            let rows = v["secrets"].as_array().into_iter().flatten();
+            let bad = rows
+                .filter(|r| r["empty"] == true || r["placeholder"] == true || r["private"] == false)
+                .count();
+            match bad {
+                0 => Ok(()),
+                n => Err(format!(
+                    "secret list: {n} file empty, placeholder or not private"
+                )),
+            }
+        }
+
         // What: path of the DDNS TSIG secret file.
         // Why: Kea DDNS and PowerDNS share this key.
         // From: Issue #1683 | PR #1980
@@ -14333,6 +14384,13 @@ mod ui {
         json_reply(zone_snapshots(&app.settings()).map(Some), "")
     }
 
+    // What: secret file states as JSON, no values.
+    // Why: REST diagnosis on the reader of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn secrets_api(State(app): Shared) -> Response {
+        json_reply(secret::states(&app.settings()).map(Some), "")
+    }
+
     // What: own NTP status as JSON.
     // Why: REST diagnosis on the reader of pages and CLI.
     // From: Issue #1683 | PR #2020
@@ -14792,6 +14850,7 @@ mod ui {
             .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
             .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
             .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
+            .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -15484,6 +15543,7 @@ async fn main() -> std::process::ExitCode {
         "system" => code(shared::docker::system_run(&argv).await),
         "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
         "ntp" => code(shared::ntp::ntp_run(&argv).await),
+        "secret" => code(shared::secret::secret_run(&argv)),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -15503,7 +15563,7 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 5] = ["dhcp", "config", "system", "proxy", "ntp"];
+const GROUPS: [&str; 6] = ["dhcp", "config", "system", "proxy", "ntp", "secret"];
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
