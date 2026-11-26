@@ -86,7 +86,7 @@ mod cachehamster {
     }
 
     // What: one prefill job as kept in jobs.json.
-    // Why: survives restarts; the daemon is its only writer.
+    // Why: survives restarts; daemon is its only writer.
     // From: Issue #871 | PR #1980
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Job {
@@ -142,7 +142,7 @@ mod cachehamster {
     }
 
     // What: an inbox entry written by a command.
-    // Why: one writer for jobs.json; no lock across processes.
+    // Why: one writer for jobs.json; no cross-process lock.
     // From: Issue #871 | PR #1980
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case", tag = "op")]
@@ -181,7 +181,7 @@ mod cachehamster {
         account: String,
         steam_id: String,
         refresh_token: String,
-        // What: the access token of the QR poll, sealed too.
+        // What: the access token of QR poll, sealed too.
         // Why: client tokens may not renew by Web API.
         // From: Issue #871 | PR #1980
         #[serde(default)]
@@ -233,7 +233,7 @@ mod cachehamster {
     }
 
     // What: remove a file; a missing file is fine.
-    // Why: logout and login cleanup must not hide IO errors.
+    // Why: logout and login cleanup must not hide IO errors
     // From: Issue #871 | PR #1980
     fn remove(path: &Path) -> Result<(), String> {
         crate::shared::fs::remove_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
@@ -261,14 +261,14 @@ mod cachehamster {
         (!text.is_empty()).then(|| text.into_bytes())
     }
 
-    // What: seal key from session.key plus machine features.
+    // What: seal key: session.key plus machine features.
     // Why: a copied data dir must not open the login.
     // From: Issue #871
     fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], String> {
         let salt = session_key(dir)?;
         let path = dir.join(BIND_FILE);
         // What: a QR login freezes the features found now.
-        // Why: a feature seen later must not change the key.
+        // Why: a feature seen later must not change key.
         // From: Issue #871
         let names: Vec<String> = if fresh {
             let names: Vec<String> = bind
@@ -282,7 +282,7 @@ mod cachehamster {
             names
         } else {
             // What: no bind file means a login from before.
-            // Why: only a new QR login may freeze the features.
+            // Why: only new QR login may freeze features.
             // From: Issue #871
             read_json(&path)?
                 .ok_or("Steam login predates the machine binding; log in again by QR")?
@@ -335,7 +335,7 @@ mod cachehamster {
     }
 
     // What: one Steam Web API call; its "response" part.
-    // Why: one owner for URL, error text and the response key.
+    // Why: one owner for URL, error text and response key.
     // From: Issue #871 | PR #1980
     async fn steam_api(
         client: &reqwest::Client,
@@ -480,7 +480,7 @@ mod cachehamster {
             return Ok(json!({"state": "done", "account": session.account}));
         }
         // What: Steam rotates the QR after a while.
-        // Why: the UI must show the new code, not a dead one.
+        // Why: the UI must show new code, not a dead one.
         // From: Issue #871 | PR #1980
         if let Some(new_id) = field(&r, "new_client_id") {
             p.client_id = new_id;
@@ -502,15 +502,15 @@ mod cachehamster {
     }
 
     // What: a short-lived access token from the session.
-    // Why: Web API calls need it; a renewed one is not kept.
+    // Why: Web API calls need it; renewed one is not kept.
     // From: Issue #871 | PR #1980
     async fn access_token(
         c: &Ctx,
         client: &reqwest::Client,
         s: &Session,
     ) -> Result<String, String> {
-        // What: the sealed token while it lives long enough.
-        // Why: CM login needs a client token; see login_begin.
+        // What: sealed token while it lives long enough.
+        // Why: CM login needs client token; see login_begin
         // From: Issue #871 | PR #1980
         let margin = c.s.uint("STEAM_TOKEN_MARGIN_SECONDS")?;
         let live = jwt_claims(&s.access_token)
@@ -633,7 +633,7 @@ mod cachehamster {
             Err(e) => (None, Some(e)),
         };
         let mut jobs = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
-        // What: orders the daemon has not taken yet, shown too.
+        // What: orders daemon has not taken yet, shown too.
         // Why: a new job was missing until the next round.
         // From: Issue #871 | PR #1980
         let known = jobs.len();
@@ -684,7 +684,7 @@ mod cachehamster {
     }
 
     // What: one order applied to the list.
-    // Why: start lifts a later job; cancel stops a running one.
+    // Why: start lifts later job; cancel stops running one.
     // From: Issue #871 | PR #1980
     fn apply_order(jobs: &mut Vec<Job>, order: Order) {
         match order {
@@ -715,7 +715,7 @@ mod cachehamster {
                 for j in jobs.iter_mut().filter(|j| j.id == id) {
                     j.when = When::Now;
                     // What: a new run counts from zero.
-                    // Why: else a rerun showed "2 of 1 done".
+                    // Why: else rerun showed "2 of 1 done".
                     // From: Issue #871 | PR #1980
                     if j.state != State::Running {
                         (j.done, j.failed, j.bytes) = (0, 0, 0);
@@ -743,7 +743,7 @@ mod cachehamster {
     }
 
     impl Pace {
-        // What: each file books its time after the last one.
+        // What: each file books its time after last one.
         // Why: idle time must not build up credit.
         // From: Issue #871 | PR #1980
         async fn wait(&self, got: u64) {
@@ -861,13 +861,13 @@ mod cachehamster {
     }
 
     impl Dl {
-        // What: client to the proxy container; trusts our CA.
+        // What: client to proxy container; trusts our CA.
         // Why: a direct client saves the docker-proxy load.
         // From: Issue #871 | PR #2017
         fn load(s: &Settings, connections: usize) -> Result<Self, String> {
             let port = |k: &str| s.num::<u16>(k);
             // What: no total timeout; public roots stay.
-            // Why: a body may stream for hours; others pass.
+            // Why: body may stream for hours; others pass.
             // From: Issue #871 | PR #2017
             let mut builder = reqwest::Client::builder()
                 .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
@@ -881,7 +881,7 @@ mod cachehamster {
                         .map_err(|e| format!("{}: {e}", ca.display()))?;
                     builder = builder.tls_certs_merge([cert]);
                 }
-                // What: no CA yet: logged; https then fails.
+                // What: no CA yet: logged; https then fails
                 // Why: the ui issues it only in HTTPS mode.
                 // From: Issue #871 | PR #2017
                 None => {
@@ -978,7 +978,7 @@ mod cachehamster {
         manifest_api: u64,
         cell: String,
         heartbeat: Duration,
-        // What: logon values: protocol, package, OS, chat mode.
+        // What: logon values: protocol, package, OS, chat.
         // Why: the logon message reads them by index.
         // From: Issue #871 | PR #1980
         logon: [u64; 4],
@@ -1356,7 +1356,7 @@ mod cachehamster {
 
     impl Cm {
         // What: log in with the sealed QR session token.
-        // Why: Steam takes the refresh token as access_token.
+        // Why: Steam takes refresh token as access_token.
         // From: Issue #871 | PR #1980
         async fn login(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Self, String> {
             let s = load_session(&cfg.dir, &cfg.bind)?.ok_or("Steam login missing")?;
@@ -1375,7 +1375,7 @@ mod cachehamster {
                 .ok_or("CM list: no websocket server")?
                 .to_string();
             // What: connect within the SOT request limit.
-            // Why: a silent CM must not hang a lookup forever.
+            // Why: a silent CM must not hang a lookup.
             // From: Issue #871 | PR #2020
             let url = format!("wss://{host}/cmsocket/");
             let (ws, _) = tokio::time::timeout(cfg.limit, tokio_tungstenite::connect_async(url))
@@ -1392,8 +1392,8 @@ mod cachehamster {
                 queue: Default::default(),
                 limit: cfg.limit,
             };
-            // What: a login id of its own per CM connection.
-            // Why: two jobs logged each other off (eresult 34).
+            // What: own login id per CM connection.
+            // Why: jobs logged each other off (eresult 34)
             // From: Issue #871 | PR #1985
             let nanos = u32::try_from(clock::unix_nanos() % 1_000_000_000).unwrap_or(0);
             let ip = PbOut::default().fixed32(1, nanos | 1);
@@ -1428,7 +1428,7 @@ mod cachehamster {
         }
 
         // What: send one protobuf frame with our session.
-        // Why: frame = emsg|flag, header length, header, body.
+        // Why: frame = emsg|flag, header len, header, body.
         // From: Issue #871 | PR #1980
         async fn send(&mut self, emsg: u32, header: PbOut, body: &[u8]) -> Result<(), String> {
             use futures_util::SinkExt as _;
@@ -1466,7 +1466,7 @@ mod cachehamster {
             let word = |b: &[u8], at: usize| le32(b, at, "CM frame");
             let raw_emsg = word(raw, 0)?;
             // What: skip frames without the protobuf flag.
-            // Why: a frame without it is no protobuf message.
+            // Why: frame without it is no protobuf message.
             // From: Issue #871 | PR #1985
             if raw_emsg & PROTO_MASK == 0 {
                 return Ok(());
@@ -1507,7 +1507,7 @@ mod cachehamster {
             Ok(())
         }
 
-        // What: the next frame that matches, within the limit.
+        // What: the next frame that matches, within limit.
         // Why: other frames (notices) are skipped.
         // From: Issue #871 | PR #1980
         async fn wait(&mut self, want: impl Fn(&Frame) -> bool) -> Result<Frame, String> {
@@ -1538,7 +1538,7 @@ mod cachehamster {
         }
 
         // What: send a job and wait for its answer frames.
-        // Why: the answer carries our job id as jobid_target.
+        // Why: reply carries our job id as jobid_target.
         // From: Issue #871 | PR #1980
         async fn job(
             &mut self,
@@ -1637,7 +1637,7 @@ mod cachehamster {
     }
 
     // What: chunk ids from a zipped binary manifest.
-    // Why: chunk SHA-1 names the CDN URL; data stays unread.
+    // Why: chunk SHA-1 names CDN URL; data stays unread.
     // From: Issue #871 | PR #1858
     fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
         use std::io::Read as _;
@@ -1660,7 +1660,7 @@ mod cachehamster {
             for chunk in pb_all(&pb_read(mapping)?, 6) {
                 let c = pb_read(chunk)?;
                 if let Some(sha) = pb_all(&c, 1).next() {
-                    // What: packed size, else the plain size.
+                    // What: packed size, else plain size.
                     // Why: the CDN sends chunks compressed.
                     // From: Issue #871 | PR #1985
                     let n = pb_int(&c, 5).or_else(|| pb_int(&c, 4)).unwrap_or(0);
@@ -1692,7 +1692,7 @@ mod cachehamster {
         let (own, borrowed) = depots_of(&info, cfg);
         let mut list: Vec<(u32, u32, u64)> = own.into_iter().map(|(d, g)| (app, d, g)).collect();
         // What: a borrowed depot takes its owner app gid.
-        // Why: GoldSrc mods share the Half-Life base depots.
+        // Why: GoldSrc mods share Half-Life base depots.
         // From: Issue #871 | PR #1985
         for (from, depot) in borrowed {
             let owner = match app_info(&mut cm, from).await {
@@ -1937,7 +1937,7 @@ mod cachehamster {
     }
 
     impl Runner {
-        // What: one pass: inbox, finished, window, due jobs.
+        // What: one pass: inbox, finished, window, due jobs
         // Why: the job file is saved after every pass.
         // From: Issue #871 | PR #1980
         async fn round(&mut self, c: &Ctx) -> Result<(), String> {
@@ -1959,7 +1959,7 @@ mod cachehamster {
                     }
                 }
             }
-            // What: outside the window jobs pause as waiting.
+            // What: outside window jobs pause as waiting.
             // Why: they start again when the window opens.
             // From: Issue #871 | PR #1980
             if !in_window(self.window) {
@@ -2048,7 +2048,7 @@ mod cachehamster {
         }
         let window = window(&c.s.text("CACHEHAMSTER_WINDOW")?)?;
         // What: the values this start runs with.
-        // Why: the values in use must be visible in the log.
+        // Why: the values in use must be visible in log.
         // From: Issue #871 | PR #1980
         eprintln!(
             "cachehamster: start: {queues} jobs, {connections} downloads each, {mbit} Mbit/s (0 = off), window {:02}:{:02}-{:02}:{:02}",
@@ -2087,8 +2087,8 @@ mod cachehamster {
                     runner.running.len(),
                     bytes * 8 / (now - last).max(1) / 1_000_000,
                 );
-                // What: log while jobs run or state changed.
-                // Why: an idle line per round floods the log.
+                // What: log while jobs run or state changed
+                // Why: an idle line per round floods log.
                 // From: Issue #871 | PR #1984
                 if state.0 > 0 || state != shown {
                     eprintln!("cachehamster: {} jobs running, {} Mbit/s", state.0, state.1);
@@ -2208,7 +2208,7 @@ mod config {
     const ROW_SEP: char = '|';
 
     // What: type of a value.
-    // Why: the schema kind decides parsing and the ui field.
+    // Why: the schema kind decides parsing and ui field.
     // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum Kind {
@@ -2234,7 +2234,7 @@ mod config {
     }
 
     // What: one schema row.
-    // Why: the ui builds fields and the runner plans from it.
+    // Why: the ui builds fields and runner plans from it.
     // From: Issue #1683 | PR #1980
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct Spec {
@@ -2288,7 +2288,7 @@ mod config {
     }
 
     // What: order of texts: longer first, then descending.
-    // Why: a longer number is newer, a longer suffix closer.
+    // Why: a longer number is newer, longer suffix closer.
     // From: Issue #1683 | PR #2017
     pub fn longest_first(a: &str, b: &str) -> std::cmp::Ordering {
         b.len().cmp(&a.len()).then_with(|| b.cmp(a))
@@ -2303,7 +2303,7 @@ mod config {
         }
     }
 
-    // What: not empty; only ASCII letters, digits and extra.
+    // What: not empty; only ASCII letters, digits, extra.
     // Why: such a value cannot leave its place in a config.
     // From: Issue #1683 | PR #2017
     pub fn is_plain(text: &str, extra: &str) -> bool {
@@ -2324,7 +2324,7 @@ mod config {
     }
 
     // What: a bool from its usual words.
-    // Why: env and forms send true/false, 1/0, yes/no, on/off.
+    // Why: env, forms send true/false, 1/0, yes/no, on/off.
     // From: Issue #1683 | PR #1858
     pub fn parse_bool(raw: &str) -> Option<bool> {
         match raw.trim().to_ascii_lowercase().as_str() {
@@ -2362,7 +2362,7 @@ mod config {
 
     impl Spec {
         // What: true for a row of kind secret.
-        // Why: one owner of the test; pages hide such values.
+        // Why: one owner of test; pages hide such values.
         // From: Issue #1683 | PR #2017
         pub fn is_secret(&self) -> bool {
             matches!(self.kind, Kind::Secret)
@@ -2477,7 +2477,7 @@ mod config {
     }
 
     // What: file, else env, else default; fills @KEY@.
-    // Why: KEY= in the file means default; env is a stale copy.
+    // Why: KEY= in file means default; env is a stale copy.
     // From: Issue #1683 | PR #2017
     fn effective(
         key: &str,
@@ -2502,7 +2502,7 @@ mod config {
     }
 
     // What: each @KEY@ of a default replaced by its value.
-    // Why: the SOT names other keys; the image bakes them raw.
+    // Why: the SOT names other keys; image bakes them raw.
     // From: Issue #1683 | PR #2017
     fn expand_default(
         value: &str,
@@ -2538,7 +2538,7 @@ mod config {
     }
 
     // What: key and value of a KEY=VALUE line; else None.
-    // Why: the stack .env holds What/Why/From comment lines.
+    // Why: stack .env holds What/Why/From comment lines.
     // From: Issue #1683 | PR #2017
     fn line_entry(line: &str) -> Option<(&str, &str)> {
         let (key, value) = line.split_once('=')?;
@@ -2566,12 +2566,12 @@ mod config {
             .collect())
     }
 
-    // What: the values of the stack .env; "$" values left out.
+    // What: the values of stack .env; "$" values left out.
     // Why: setup.sh keeps ${VAR} that only Compose expands.
     // From: Issue #1683 | PR #2017
     pub fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
         let mut all = read_raw(path)?;
-        // What: a key of <file>.local replaces the file's one.
+        // What: a key of <file>.local replaces file's one.
         // Why: Compose reads it as the second env file.
         // From: Issue #1683 | PR #2017
         all.extend(read_raw(&override_path(path))?);
@@ -2628,7 +2628,7 @@ mod config {
                 ));
             }
             // What: a container setting is refused here.
-            // Why: in the .env the name is a Compose host path.
+            // Why: in .env the name is a Compose host path.
             // From: Issue #1683 | PR #2017
             if current
                 .spec(key)
@@ -2671,7 +2671,7 @@ mod config {
             match key.filter(|k| updates.contains_key(*k)) {
                 Some(key) => {
                     // What: a second line of it is dropped.
-                    // Why: Compose and setup.sh read one value.
+                    // Why: Compose, setup.sh read one value
                     // From: Issue #1683 | PR #2017
                     if done.insert(key.to_string()) {
                         body.push_str(&format!("{key}={}\n", updates[key]));
@@ -2710,7 +2710,7 @@ mod config {
     }
 
     impl Settings {
-        // What: settings of this process and its saved file.
+        // What: settings of this process and its saved file
         // Why: ui, watchdog and cachehamster start alike.
         // From: Issue #1683 | PR #2019
         pub fn from_process() -> Result<Self, String> {
@@ -2718,7 +2718,7 @@ mod config {
         }
 
         // What: load schema, then file > env > default.
-        // Why: the file is the live .env; env is from start.
+        // Why: the file is live .env; env is from start.
         // From: Issue #1683 | PR #2017
         pub fn load(
             env: &dyn Fn(&str) -> Option<String>,
@@ -2742,8 +2742,8 @@ mod config {
                 Some(path) => read_file(path)?,
                 None => BTreeMap::new(),
             };
-            // What: the file sets ui keys, not container ones.
-            // Why: the .env has host paths under these names.
+            // What: file sets ui keys, not container ones.
+            // Why: .env has host paths under these names.
             // From: Issue #1683 | PR #2017
             let ui_keys: BTreeSet<&str> = specs
                 .iter()
@@ -2772,8 +2772,8 @@ mod config {
                 }
                 set.specs.insert(spec.key.clone(), spec);
             }
-            // What: SOT defaults without a schema row, as text.
-            // Why: templates read fixed keys; env still wins.
+            // What: SOT defaults, no schema row, as text.
+            // Why: templates read fixed keys; env overrides
             // From: Issue #1683 | PR #1980
             for (key, value) in &defaults {
                 if set.specs.contains_key(*key) {
@@ -2848,8 +2848,8 @@ mod config {
         // Why: the error names the key.
         // From: Issue #1683 | PR #1980
         pub fn text(&self, key: &str) -> Result<String, String> {
-            // What: a compose-only key falls back to the env.
-            // Why: operator keys like IP_HTTPS have no SOT row.
+            // What: a compose-only key falls back to env.
+            // Why: operator keys like IP_HTTPS: no SOT row.
             // From: Issue #1683 | PR #1980
             self.get(key)
                 .map(Value::to_string)
@@ -2858,7 +2858,7 @@ mod config {
         }
 
         // What: value as text; empty when it is missing.
-        // Why: pages and optional features read it unguarded.
+        // Why: pages, optional features read it unguarded.
         // From: Issue #1683 | PR #2017
         pub fn text_or_empty(&self, key: &str) -> String {
             self.text(key).unwrap_or_default()
@@ -2870,13 +2870,13 @@ mod config {
         pub fn uint(&self, key: &str) -> Result<u64, String> {
             match self.get(key) {
                 Some(Value::Uint(n)) => Ok(*n),
-                // What: a fixed SOT default is text; parse it.
-                // Why: keys without schema row load as text.
+                // What: fixed SOT default is text; parse it
+                // Why: keys without schema row load as text
                 // From: Issue #1683 | PR #1980
                 Some(Value::Text(t)) => parse_uint(t).ok_or_else(|| format!("{key} is no number")),
                 Some(_) => Err(format!("{key} is no number")),
                 // What: a compose-only key reads the env.
-                // Why: the same rule as text; one rule per key.
+                // Why: same rule as text; one rule per key.
                 // From: Issue #1683 | PR #2020
                 None => match env_set(&process_env, key) {
                     Some(t) => parse_uint(&t).ok_or_else(|| format!("{key} is no number")),
@@ -2892,12 +2892,12 @@ mod config {
             match self.get(key) {
                 Some(Value::Bool(b)) => Ok(*b),
                 // What: text answers only as true or false.
-                // Why: AG-SEC-001 names ALLOW_INSECURE_UI=true.
+                // Why: AG-SEC-001: ALLOW_INSECURE_UI=true.
                 // From: Issue #1683 | PR #2017
                 Some(Value::Text(t)) => t.parse().map_err(|_| format!("{key} is no bool")),
                 Some(_) => Err(format!("{key} is no bool")),
                 // What: a compose-only key reads the env.
-                // Why: the same rule as text; one rule per key.
+                // Why: same rule as text; one rule per key.
                 // From: Issue #1683 | PR #2020
                 None => match env_set(&process_env, key) {
                     Some(t) => t.parse().map_err(|_| format!("{key} is no bool")),
@@ -2928,7 +2928,7 @@ mod config {
                 Some(Value::List(items)) => items.clone(),
                 Some(other) => list_items(&other.to_string()).map(str::to_string).collect(),
                 // What: a compose-only key reads the env.
-                // Why: the same rule as text; one rule per key.
+                // Why: same rule as text; one rule per key.
                 // From: Issue #1683 | PR #2020
                 None => env_set(&process_env, key)
                     .map(|t| list_items(&t).map(str::to_string).collect())
@@ -3039,7 +3039,7 @@ mod dhcp {
     pub(crate) async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         // What: no Kea answer leaves the column empty.
-        // Why: the DNS page must not fail when dhcp is down.
+        // Why: DNS page must not fail when dhcp is down.
         // From: Issue #1683
         let Ok(Some(cfg)) = kea_config(s).await else {
             return out;
@@ -3197,7 +3197,7 @@ mod dhcp {
         ] {
             f.insert(key.into(), get(field));
         }
-        // What: main subnet domain sets the main LAN domain.
+        // What: main subnet domain sets main LAN domain.
         // Why: picking an extra swaps it with the old main.
         // From: Issue #1683
         if !get("domain").is_empty() {
@@ -3490,7 +3490,7 @@ mod dns {
     #[derive(Default)]
     struct Done {
         // What: TSIG key, setup zones and key binding done.
-        // Why: once per start; then the primary keeps zones.
+        // Why: once per start; then primary keeps zones.
         // From: Issue #1683
         seeded: bool,
         // What: a written config not yet reloaded.
@@ -3575,7 +3575,7 @@ mod dns {
     const COMMANDS: [&str; 2] = ["daemon", "follow-once"];
 
     // What: idle on a primary, else rounds forever.
-    // Why: OpenRC keeps the process; the primary's ui renders.
+    // Why: OpenRC keeps process; the primary's ui renders.
     // From: Issue #1683
     async fn follow() -> Result<(), String> {
         let mut done = Done::default();
@@ -3712,7 +3712,7 @@ mod dns {
             .map(plain)
             .collect();
         // What: old main stays as extra only on a swap.
-        // Why: a new name renames the main domain as before.
+        // Why: a new name renames main domain as before.
         // From: Issue #1683
         if want != old && lans.iter().skip(1).any(|z| *z == want) {
             extra.push(plain(&old));
@@ -3904,7 +3904,7 @@ mod dns {
                     return Err(tr("err_not_lan_domain").replace("{x}", &name));
                 }
                 // What: a domain with own records stays.
-                // Why: removing it would drop names from DNS.
+                // Why: removing it drops names from DNS.
                 // From: Issue #1683
                 let own = own_rrsets(&peer::own_api(s)?.rrsets(&zone).await?).len();
                 if own > 0 {
@@ -3955,7 +3955,7 @@ mod dns {
                 None => c.to_string(),
             },
             // What: a DS digest in small hex letters.
-            // Why: pdns and its key list may differ in case.
+            // Why: pdns and its key list may differ in case
             // From: Issue #1683 | PR #2019
             "DS" => c.to_ascii_lowercase(),
             _ => c.to_string(),
@@ -3990,7 +3990,7 @@ mod dns {
         }
         let api = peer::own_api(s)?;
         let host = crate::shared::pdns::zone_id(&name);
-        // What: the place of each wanted PTR, checked first.
+        // What: place of each wanted PTR, checked first.
         // Why: no A is saved when its PTR cannot follow.
         // From: Issue #1683 | PR #2019
         let mut places = Vec::new();
@@ -4008,7 +4008,7 @@ mod dns {
                 places.push((rev, rz));
             }
         }
-        // What: the addresses the name loses with this change.
+        // What: the addresses name loses with this change.
         // Why: their PTR to this name must not stay behind.
         // From: Issue #1683 | PR #2019
         let mut gone = Vec::new();
@@ -4029,8 +4029,8 @@ mod dns {
             let Some((rev, rz)) = served_reverse_place(s, ip)? else {
                 continue;
             };
-            // What: drop the PTR only when it names this host.
-            // Why: a PTR to another name is not ours to drop.
+            // What: drop PTR only when it names this host.
+            // Why: a PTR to another name: not ours to drop
             // From: Issue #1683 | PR #2019
             if rrset_contents(&api, &rz, &rev, "PTR").await? == [host.clone()] {
                 api.set_rrset(&rz, &rev, "PTR", 0, &[]).await?;
@@ -4165,7 +4165,7 @@ mod dns {
     }
 
     // What: serial of each managed zone on both peers.
-    // Why: shows a lost NOTIFY or AXFR in any zone (RFC 1982).
+    // Why: shows lost NOTIFY or AXFR in any zone (RFC 1982)
     // From: Issue #1683 | PR #1858
     pub(crate) async fn peer_serials(s: &Settings, address: &str) -> Result<Vec<PeerZone>, String> {
         let ours = peer::own_api(s)?.zones().await?;
@@ -4183,7 +4183,7 @@ mod dns {
             let key = match watch_round(&app, &s, &mut failing).await {
                 Ok(()) if failing.is_empty() => "DNS_SECONDARY_CHECK_SECONDS",
                 Ok(()) => "DNS_SECONDARY_RECHECK_SECONDS",
-                // What: own pdns down: no secondary is blamed.
+                // What: own pdns down: no secondary blamed.
                 // Why: at ui start the dns may not run yet.
                 // From: Issue #1683
                 Err(e) => {
@@ -4216,7 +4216,7 @@ mod dns {
         let (mut ns, mut off) = (s.list("DNS_SECONDARY_NS"), s.list("DNS_SECONDARY_NS_OFF"));
         for (name, address) in &peers {
             // What: no aa counts as failure only for an NS.
-            // Why: an older secondary syncs but is never NS.
+            // Why: an older secondary syncs but is never NS
             // From: Issue #1683
             let outcome = match check_peer(s, &ours, address).await {
                 Ok(Err(e)) if !ns.contains(name) => {
@@ -4231,7 +4231,7 @@ mod dns {
             match outcome {
                 Ok(aa) => {
                     failing.remove(name);
-                    // What: first entry; never after take out.
+                    // What: first entry; not after take out
                     // Why: re-entry only by hand.
                     // From: Issue #1683
                     if aa && enabled && !ns.contains(name) && !off.contains(name) {
@@ -4317,8 +4317,8 @@ mod dns {
         for z in peer::peer_zones(s, ours, &theirs)? {
             let state = peer::zone_state(&z);
             let word = state.word();
-            // What: ahead: our serial goes past theirs first.
-            // Why: a restore sets ours back; AXFR skips lower.
+            // What: ahead: our serial passes theirs first.
+            // Why: restore sets ours back; AXFR skips lower
             // From: Issue #1683 | PR #2017
             if let (ZoneState::Ahead, Some(theirs)) = (state, z.secondary)
                 && let Err(e) = raise_serial(s, &z.zone, theirs).await
@@ -4326,7 +4326,7 @@ mod dns {
                 eprintln!("ui: secondary {address}: {} ahead, raise: {e}", z.zone);
                 continue;
             }
-            // What: ahead, unknown, behind pulled; missing not.
+            // What: pull ahead/unknown/behind; skip missing
             // Why: a missing zone has no copy to refresh.
             // From: Issue #1683
             if matches!(
@@ -4342,7 +4342,7 @@ mod dns {
         Ok(aa)
     }
 
-    // What: worst state over all zones, each zone in detail.
+    // What: worst state over all zones, each in detail
     // Why: in sync only when every managed zone matches.
     // From: Issue #1683
     pub(crate) async fn secondary_health(s: &Settings, address: &str) -> Value {
@@ -4574,7 +4574,7 @@ mod dns {
             .filter(|z| tops.iter().any(|t| is_within(z, t)))
             .collect();
         // What: parents before their children.
-        // Why: a chain holds only if every link above holds.
+        // Why: a chain holds only if all links above hold.
         // From: Issue #1683 | PR #2019
         signed.sort_by_key(|z| z.matches('.').count());
         let mut parents = tops.to_vec();
@@ -4610,7 +4610,7 @@ mod dns {
             };
             ensure_rrset(api, &parent, zone, "NS", ttl, &ns).await?;
             // What: no DS when it cannot be read.
-            // Why: no DS is unchecked; a wrong DS is SERVFAIL.
+            // Why: no DS: unchecked; wrong DS: SERVFAIL.
             // From: Issue #1683 | PR #2019
             let ds = api.ds(zone).await.unwrap_or_else(|e| {
                 eprintln!("ui: no DS for {zone}: {e}");
@@ -4619,8 +4619,8 @@ mod dns {
             ensure_rrset(api, &parent, zone, "DS", ttl, &ds).await?;
             wanted.push((parent, zone.clone()));
         }
-        // What: drop delegations of gone zones in top zones.
-        // Why: a top zone is ours; a LAN zone keeps all rows.
+        // What: drop delegations of gone zones in top zones
+        // Why: a top zone is ours; LAN zone keeps all rows.
         // From: Issue #1683 | PR #2019
         for top in tops {
             for r in api.rrsets(top).await? {
@@ -4704,7 +4704,7 @@ mod dns {
             ensure_soa_names(api, zone, &names).await?;
         }
         // What: A or AAAA and PTR of each secondary.
-        // Why: an NS name needs an address; logs show names.
+        // Why: an NS name needs address; logs show names.
         // From: Issue #1683
         for (name, address) in crate::shared::pdns_conf::secondaries(s) {
             let host = peer_host(s, &name)?;
@@ -4713,7 +4713,7 @@ mod dns {
             ensure_ptr(s, api, &address, &host, ttl).await?;
         }
         // What: A and PTR only when ns1 is in the LAN zone.
-        // Why: a foreign name has no home in a managed zone.
+        // Why: a foreign name has no home in managed zone.
         // From: Issue #1683
         if crate::shared::dns::is_below(&mname, &lan) {
             let ip = s.text("IP_HTTP")?;
@@ -4721,7 +4721,7 @@ mod dns {
             ensure_ptr(s, api, &ip, &mname, ttl).await?;
         }
         // What: ns2 for the HTTPS IP: A and PTR, never NS.
-        // Why: HTTPS is optional and another resolver answers.
+        // Why: HTTPS is optional; another resolver answers.
         // From: Issue #1683
         let https = primary_https_ip(s)?;
         let ns2 = crate::shared::dns::canonical_zone(&s.text("DNS_NS_HTTPS_NAME")?);
@@ -4772,7 +4772,7 @@ mod dns {
         let Some((rev, zone)) = served_reverse_place(s, address)? else {
             return Ok(());
         };
-        // What: delete the PTR only when it names this host.
+        // What: delete PTR only when it names this host.
         // Why: an own PTR of the admin must stay.
         // From: Issue #1683
         let ours = rrset_contents(&api, &zone, &rev, "PTR")
@@ -4835,7 +4835,7 @@ mod dns {
     }
 
     // What: SOA mname and rname from PDNS_DEFAULT_SOA.
-    // Why: a zone made before a domain change kept the old ns1.
+    // Why: a zone made before domain change kept old ns1.
     // From: Issue #1683 | PR #2017
     pub(crate) async fn ensure_soa_names(
         api: &crate::shared::pdns::Api,
@@ -4911,7 +4911,7 @@ mod dns {
             .find(|r| r["name"] == id.as_str() && r["type"] == kind);
         let same = match found {
             // What: an absent rrset that should be absent.
-            // Why: a DELETE of nothing still raises the serial.
+            // Why: a DELETE of nothing still raises serial.
             // From: Issue #1683 | PR #2019
             None => want.is_empty(),
             Some(r) => {
@@ -4978,7 +4978,7 @@ mod shared {
     pub mod clock {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        // What: nanoseconds since 1970; 0 if the clock is off.
+        // What: nanoseconds since 1970; 0 if clock is off.
         // Why: a clock before 1970 must not panic.
         // From: Issue #1683 | PR #1980
         pub fn unix_nanos() -> u128 {
@@ -5004,13 +5004,13 @@ mod shared {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::path::{Path, PathBuf};
 
-        // What: file mode of a file only its owner may read.
-        // Why: secrets, tokens and snapshots share one mode.
+        // What: file mode of file only its owner may read.
+        // Why: secrets, tokens, snapshots share one mode.
         // From: Issue #1683 | PR #2017
         pub const PRIVATE_MODE: u32 = 0o600;
 
         // What: replace a file, or create it only if new.
-        // Why: secrets are first-writer-wins; configs replace.
+        // Why: secrets: first writer wins; configs replace.
         // From: Issue #1683 | PR #1980
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum Place {
@@ -5027,8 +5027,8 @@ mod shared {
             pub gid: Option<u32>,
         }
 
-        // What: the path with a suffix appended to its name.
-        // Why: one owner of sibling names like .local or .xz.
+        // What: the path with suffix appended to its name.
+        // Why: one owner of sibling names like .local, .xz.
         // From: Issue #1683 | PR #2017
         pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
             let mut name = path.as_os_str().to_owned();
@@ -5056,8 +5056,8 @@ mod shared {
             set_owner(&File::open(path)?, owner, mode)
         }
 
-        // What: temp file beside target, synced, then moved.
-        // Why: readers see the old or the new file, never half.
+        // What: temp file beside target, synced, then moved
+        // Why: readers see old or the new file, never half.
         // From: Issue #1683 | PR #1858
         pub fn write(
             path: &Path,
@@ -5090,8 +5090,8 @@ mod shared {
                 .and_then(|()| match place {
                     Place::Exclusive => fs::hard_link(&tmp, path),
                     Place::Replace => fs::rename(&tmp, path).or_else(|e| {
-                        // What: busy bind mount: write in place
-                        // Why: rename onto a mount is EBUSY.
+                        // What: busy mount: write in place
+                        // Why: rename onto mount is EBUSY.
                         // From: Issue #1683 | PR #1980
                         if e.kind() != io::ErrorKind::ResourceBusy {
                             return Err(e);
@@ -5329,7 +5329,7 @@ mod shared {
         }
 
         // What: env value, else the shared secret file.
-        // Why: the operator may set it; else it is generated.
+        // Why: operator may set it; else it is generated.
         // From: Issue #1683 | PR #1858
         pub fn resolve(
             env: &dyn Fn(&str) -> Option<String>,
@@ -5348,7 +5348,7 @@ mod shared {
         }
 
         // What: one secret by its key: env, else the file.
-        // Why: every program gets the same key the same way.
+        // Why: every program gets same key the same way.
         // From: Issue #1683
         pub fn get(s: &crate::config::Settings, key: &str) -> Result<String, String> {
             resolve(&crate::config::process_env, &dir(s)?, key, Owner::default())
@@ -5425,7 +5425,7 @@ mod shared {
                 .map_err(|_| "sealed data is damaged or the key is wrong".to_string())
         }
 
-        // What: 32 key bytes from a salt and machine features.
+        // What: 32 key bytes from salt, machine features.
         // Why: the key needs the data dir and this machine.
         // From: Issue #871
         pub fn bind_key(salt: &[u8; 32], parts: &[(String, Vec<u8>)]) -> [u8; 32] {
@@ -5531,7 +5531,7 @@ mod shared {
     }
 
     // What: client of the PowerDNS HTTP API.
-    // Why: the ui writes records; no message bus in between.
+    // Why: ui writes records; no message bus between.
     // From: Issue #1683 | PR #1980
     pub mod pdns {
         use reqwest::Method;
@@ -5557,7 +5557,7 @@ mod shared {
         }
 
         // What: one API endpoint with its key.
-        // Why: base is .../api/v1/servers/<id> from the SOT.
+        // Why: base is .../api/v1/servers/<id> from SOT.
         // From: Issue #1683 | PR #1980
         #[derive(Clone)]
         pub struct Api {
@@ -5707,15 +5707,15 @@ mod shared {
             }
 
             // What: remove one zone.
-            // Why: a changed LAN domain leaves its old zones.
+            // Why: changed LAN domain leaves its old zones.
             // From: Issue #1683 | PR #1980
             pub async fn delete_zone(&self, zone: &str) -> Result<(), String> {
                 let path = zone_path(zone);
                 self.call(Method::DELETE, &path, None).await.map(drop)
             }
 
-            // What: add a primary zone; SOA from default-soa.
-            // Why: API writes and DDNS need the zone to exist.
+            // What: add primary zone; SOA from default-soa.
+            // Why: API writes and DDNS need zone to exist.
             // From: Issue #1683 | PR #1980
             pub async fn create_primary(
                 &self,
@@ -5739,7 +5739,7 @@ mod shared {
             }
 
             // What: create or replace one TSIG key.
-            // Why: rotation keeps the name; PUT needs a key.
+            // Why: rotation keeps name; PUT needs a key.
             // From: Issue #1683 | PR #1980
             pub async fn set_tsigkey(
                 &self,
@@ -5794,7 +5794,7 @@ mod shared {
             }
 
             // What: all zones with serial and checks.
-            // Why: sync state compares primary and secondary.
+            // Why: sync state compares primary, secondary.
             // From: Issue #1683 | PR #1980
             pub async fn zones(&self) -> Result<Vec<Zone>, String> {
                 let text = self.call(Method::GET, "/zones", None).await?;
@@ -5811,7 +5811,7 @@ mod shared {
             }
 
             // What: pull a secondary zone now.
-            // Why: a stale secondary resyncs without restart.
+            // Why: stale secondary resyncs without restart.
             // From: Issue #1683 | PR #1980
             pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
                 let path = format!("{}/axfr-retrieve", zone_path(zone));
@@ -5840,7 +5840,7 @@ mod shared {
             }
 
             // What: give a zone a signing key once.
-            // Why: a new key each apply breaks every anchor.
+            // Why: a new key each apply breaks every anchor
             // From: Issue #1683 | PR #2019
             pub async fn secure(&self, zone: &str) -> Result<(), String> {
                 let text = self.call(Method::GET, &zone_path(zone), None).await?;
@@ -5857,7 +5857,7 @@ mod shared {
             }
 
             // What: SHA-256 DS rows of the active keys.
-            // Why: the parent zone and the anchors need them.
+            // Why: the parent zone and anchors need them.
             // From: Issue #1683 | PR #2019
             pub async fn ds(&self, zone: &str) -> Result<Vec<String>, String> {
                 let path = format!("{}/cryptokeys", zone_path(zone));
@@ -5876,7 +5876,7 @@ mod shared {
     }
 
     // What: DNS name rules, zones and serial math.
-    // Why: ui, watchdog and renderers agree on one rule set.
+    // Why: ui, watchdog, renderers agree on one rule set.
     // From: Issue #1683 | PR #1980
     pub mod dns {
         use crate::config::Settings;
@@ -5932,8 +5932,8 @@ mod shared {
                 .collect()
         }
 
-        // What: the two replication roles of the SOT choice.
-        // Why: one owner of the role words; callers compare.
+        // What: the two replication roles of SOT choice.
+        // Why: one owner of role words; callers compare.
         // From: Issue #1683 | PR #2017
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         pub enum Role {
@@ -5983,7 +5983,7 @@ mod shared {
             name.ends_with(&format!(".{zone}"))
         }
 
-        // What: true for the zone itself or a name below it.
+        // What: true for zone itself or a name below it.
         // Why: one rule for "this name lies in that zone".
         // From: Issue #1683 | PR #2019
         pub fn is_within(name: &str, zone: &str) -> bool {
@@ -5991,7 +5991,7 @@ mod shared {
         }
 
         // What: longest zone of a list that holds a name.
-        // Why: a record or a DS goes into exactly that zone.
+        // Why: a record or DS goes into exactly that zone.
         // From: Issue #1683 | PR #2019
         pub fn zone_of(name: &str, zones: &[String]) -> Option<String> {
             zones
@@ -6015,7 +6015,7 @@ mod shared {
             if address.contains(':') { "AAAA" } else { "A" }
         }
 
-        // What: host and port of host, host:port or [v6]:port.
+        // What: host and port of host, host:port, [v6]:port
         // Why: one reader; a bare v6 address has no port.
         // From: Issue #1683 | PR #2020
         pub fn split_host_port(raw: &str) -> Result<(&str, Option<u16>), String> {
@@ -6061,7 +6061,7 @@ mod shared {
         }
 
         // What: checked LAN domains, main domain first.
-        // Why: one rule for zones, DDNS, records and the ui.
+        // Why: one rule for zones, DDNS, records and ui.
         // From: Issue #1683
         pub fn validate_lan_domains(main: &str, extra: &[String]) -> Result<Vec<String>, String> {
             let mut out: Vec<String> = Vec::new();
@@ -6069,13 +6069,13 @@ mod shared {
                 let zone = canonical_zone(raw);
                 let name = zone.trim_end_matches('.');
                 // What: one label like "lan" is allowed.
-                // Why: setup.sh offers it; the NTA covers it.
+                // Why: setup.sh offers it; NTA covers it.
                 // From: Issue #1683
                 if !is_dns_name(name, false, false) {
                     return Err(format!("LAN domain {raw:?} is no domain name"));
                 }
-                // What: reverse and RFC 6761 endings refused.
-                // Why: hosts answer localhost, invalid locally.
+                // What: reverse, RFC 6761 endings refused
+                // Why: localhost, invalid stay local
                 // From: Issue #1683 | PR #2019
                 match ending(name) {
                     "arpa" => return Err(format!("LAN domain {raw:?} is a reverse zone")),
@@ -6101,7 +6101,7 @@ mod shared {
             validate_lan_domains(main, &s.list("DNS_EXTRA_LAN_DOMAINS"))
         }
 
-        // What: the LAN zone, DHCP_DOMAIN in canonical form.
+        // What: LAN zone, DHCP_DOMAIN in canonical form.
         // Why: PowerDNS compares names with a trailing dot.
         // From: Issue #1683 | PR #2017
         pub fn lan_zone(s: &Settings) -> Result<String, String> {
@@ -6155,14 +6155,14 @@ mod shared {
         }
 
         // What: zone of the pre-multi-domain layout.
-        // Why: local.<domain> held no records; it is merged.
+        // Why: local.<domain> held no records; it is merged
         // From: Issue #1683
         pub fn legacy_local_zone(lan: &str) -> String {
             canonical_zone(&format!("local.{}", lan.trim_end_matches('.')))
         }
 
         // What: compare serials by RFC 1982.
-        // Why: serials wrap; half the space apart is unknown.
+        // Why: serials wrap; half space apart is unknown.
         // From: Issue #1683 | PR #1980
         pub fn serial_cmp(a: u32, b: u32) -> Option<Ordering> {
             match b.wrapping_sub(a) {
@@ -6209,7 +6209,7 @@ mod shared {
 
         impl Soa {
             // What: true for an aa answer without an error.
-            // Why: only such a server holds the zone itself.
+            // Why: only such server holds the zone itself.
             // From: Issue #1683 | PR #2017
             pub fn serves_zone(&self) -> bool {
                 self.authoritative && self.rcode == 0
@@ -6286,8 +6286,8 @@ mod shared {
             })
         }
 
-        // What: an unbound UDP socket of one address family.
-        // Why: an IPv4 socket cannot send to an IPv6 address.
+        // What: an unbound UDP socket of one address family
+        // Why: an IPv4 socket cannot send to IPv6 address.
         // From: Issue #1683 | PR #2017
         pub fn udp_for(v6: bool) -> std::io::Result<std::net::UdpSocket> {
             std::net::UdpSocket::bind(if v6 { "[::]:0" } else { "0.0.0.0:0" })
@@ -6337,14 +6337,14 @@ mod shared {
             dns
         }
 
-        // What: own NTP for DHCP: NTP on and NTP_AUTO_DHCP on.
+        // What: own NTP for DHCP: NTP and NTP_AUTO_DHCP on.
         // Why: one rule for the render and the DHCP page.
         // From: Issue #1683
         pub fn own_ntp(s: &Settings) -> Result<bool, String> {
             Ok(s.flag("NTP_ENABLED")? && s.flag("NTP_AUTO_DHCP")?)
         }
 
-        // What: DHCP_NTP_SERVERS as IPv4 text; names resolve.
+        // What: DHCP_NTP_SERVERS: IPv4 text; names resolve
         // Why: option 42 holds IPs; dead names are skipped.
         // From: Issue #1683 | PR #1980
         pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
@@ -6403,7 +6403,7 @@ mod shared {
             }
 
             // What: mode from its SOT word.
-            // Why: a form sends the same word as the setting.
+            // Why: a form sends same word as the setting.
             // From: Issue #1683 | PR #2017
             pub fn from_word(word: &str) -> Result<Self, String> {
                 match word {
@@ -6416,15 +6416,15 @@ mod shared {
             }
 
             // What: true for the two dnsmasq modes.
-            // Why: proxy and relay share one dnsmasq daemon.
+            // Why: proxy, relay share one dnsmasq daemon.
             // From: Issue #1683 | PR #2017
             pub fn is_dnsmasq(self) -> bool {
                 matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
             }
         }
 
-        // What: the dhcp service name while the mode is off.
-        // Why: pages hide it; apply and the watch keep it off.
+        // What: the dhcp service name while mode is off.
+        // Why: pages hide it; apply and watch keep it off.
         // From: Issue #1683 | PR #2017
         pub fn off_service(s: &Settings) -> Result<Option<String>, String> {
             if Mode::from_settings(s)? != Mode::Off {
@@ -6454,7 +6454,7 @@ mod shared {
         ];
 
         // What: each managed option by its own name.
-        // Why: render and ui name an option, never its text.
+        // Why: render and ui name option, never its text.
         // From: Issue #1683 | PR #2017
         pub const ROUTERS: Managed = Managed {
             name: "routers",
@@ -6478,7 +6478,7 @@ mod shared {
         };
 
         // What: value of one Kea option in a subnet.
-        // Why: forms show options by name, Kea stores a list.
+        // Why: forms show options by name, Kea stores list.
         // From: Issue #1683 | PR #1980
         pub fn option_data(subnet: &serde_json::Value, name: &str) -> String {
             let rows = subnet["option-data"].as_array().into_iter().flatten();
@@ -6580,7 +6580,7 @@ mod shared {
 
         impl Health {
             // What: read docker inspect State.
-            // Why: newest check output DEGRADED: refines ok.
+            // Why: newest check output DEGRADED: refines ok
             // From: Issue #1296
             pub fn from_inspect(inspect: &Value) -> Self {
                 let state = inspect.pointer("/State/Status").and_then(Value::as_str);
@@ -6602,7 +6602,7 @@ mod shared {
                 }
             }
 
-            // What: the state word for logs and the alarm file.
+            // What: the state word for logs and alarm file.
             // Why: a stopped one names its Docker state.
             // From: Issue #1683 | PR #1980
             pub fn word(&self) -> String {
@@ -6615,8 +6615,8 @@ mod shared {
                 }
             }
 
-            // What: the one colour rule of bar and watchdog.
-            // Why: a stop the user wanted is gray, else red.
+            // What: the one colour rule of bar and watchdog
+            // Why: a stop user wanted is gray, else red.
             // From: Issue #1683
             pub fn colour(&self, wanted: bool) -> &'static str {
                 match self {
@@ -6676,7 +6676,7 @@ mod shared {
         }
 
         impl Member {
-            // What: false if the user or DHCP off stopped it.
+            // What: false if user or DHCP off stopped it.
             // Why: one wanted rule for bar and watchdog.
             // From: Issue #1683 | PR #2020
             pub fn wanted(&self) -> bool {
@@ -6786,7 +6786,7 @@ mod shared {
 
         impl Api {
             // What: client for a socket path or URL.
-            // Why: no redirects; the engine never sends one.
+            // Why: no redirects; engine never sends one.
             // From: Issue #1683 | PR #1980
             pub fn new(endpoint: &str) -> Result<Self, String> {
                 let endpoint = endpoint.trim();
@@ -6836,7 +6836,7 @@ mod shared {
             }
 
             // What: run a command in a container.
-            // Why: OpenRC rc-service and ui CLIs run this way.
+            // Why: OpenRC rc-service and ui CLIs run so.
             // From: Issue #1683 | PR #1980
             pub async fn exec(
                 &self,
@@ -6873,7 +6873,7 @@ mod shared {
             }
 
             // What: all containers of a compose project.
-            // Why: the ui and watchdog see stopped ones too.
+            // Why: ui and watchdog see stopped ones too.
             // From: Issue #1683 | PR #1980
             pub async fn project(
                 &self,
@@ -6906,7 +6906,7 @@ mod shared {
             }
 
             // What: full state of one container.
-            // Why: health, restarts and state come from here.
+            // Why: health, restarts, state come from here.
             // From: Issue #1683 | PR #1980
             pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
                 decode(
@@ -6922,14 +6922,14 @@ mod shared {
             }
 
             // What: one stats sample of a container.
-            // Why: CPU, memory, network, disk per container.
+            // Why: CPU, memory, network, disk per container
             // From: Issue #1683 | PR #1980
             pub async fn stats(&self, name: &str, limit: Duration) -> Result<Value, Error> {
                 let path = format!("/containers/{name}/stats?stream=false&one-shot=true");
                 decode(&self.call(Method::GET, &path, None, limit).await?)
             }
 
-            // What: start, stop, restart or HUP a container.
+            // What: start, stop, restart or HUP container.
             // Why: grace is the stop timeout in seconds.
             // From: Issue #1683 | PR #1980
             pub async fn act(
@@ -6946,7 +6946,7 @@ mod shared {
                     Action::Reload => "kill?signal=HUP".to_string(),
                 };
                 let path = format!("/containers/{name}/{verb}");
-                // What: 304 is ok here; call() says so already.
+                // What: 304 is ok here; call() says so
                 // Why: stopping a stopped one is no error.
                 // From: Issue #1683 | PR #1980
                 self.call(Method::POST, &path, None, limit).await.map(drop)
@@ -7184,7 +7184,7 @@ mod shared {
                 return Err(format!("openssl date: {day}"));
             };
             // What: days since 1970-01-01 (civil calendar).
-            // Why: no date crate; Hinnant's days_from_civil.
+            // Why: no date crate; Hinnant's days_from_civil
             // From: Issue #1683 | PR #1980
             let y = if m <= 2 { y - 1 } else { y };
             let era = y.div_euclid(400);
@@ -7336,7 +7336,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     }
 
     // What: net-snmp snmpd.conf.
-    // Why: statistics and alarms come from SNMP, not Netdata.
+    // Why: statistics, alarms come from SNMP, not Netdata.
     // From: Issue #1683 | PR #1980
     pub mod snmp {
         use crate::config::Settings;
@@ -7409,7 +7409,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         use std::path::PathBuf;
 
         // What: snapshot dir, keep count, owner, file name.
-        // Why: file set: <dir>/<id>/<file>, as setup.sh reads.
+        // Why: files: <dir>/<id>/<file>, as setup.sh reads
         // From: Issue #1683 | PR #1980
         pub struct Store {
             pub dir: PathBuf,
@@ -7427,7 +7427,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         impl Store {
             // What: the file that holds snapshot id.
-            // Why: flat file, or one dir per id with a name.
+            // Why: flat file, or one dir per id with name.
             // From: Issue #1683 | PR #1980
             pub fn path(&self, id: &str) -> PathBuf {
                 match &self.file {
@@ -7505,8 +7505,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
     }
 
-    // What: on-demand DHCP probe: DISCOVER, REQUEST, RELEASE.
-    // Why: shows every DHCP server on the LAN and a real lease.
+    // What: on-demand DHCP probe: DISCOVER/REQUEST/RELEASE
+    // Why: shows every DHCP server on LAN and a real lease.
     // From: Issue #1683 | PR #1980
     pub mod dhcp_probe {
         use crate::config::Settings;
@@ -7755,7 +7755,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let xid: u32 = rand::random();
             let mut mac: [u8; 6] = rand::random();
             // What: locally administered unicast MAC.
-            // Why: never collides with a real NIC (IEEE 802).
+            // Why: never collides with real NIC (IEEE 802).
             // From: Issue #1683 | PR #1980
             mac[0] = (mac[0] | 0x02) & !0x01;
             let discover = message(
@@ -7976,7 +7976,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                     "also-notify",
                     if primary {
                         // What: NOTIFY to secondary pdns.
-                        // Why: port 53 there is the recursor.
+                        // Why: port 53 there is recursor.
                         // From: Issue #1683
                         let port = s.uint("PDNS_AUTH_PORT")?;
                         let to: Vec<String> = secondary_ips(s)
@@ -7985,8 +7985,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                             .collect();
                         to.join(",")
                     } else {
-                        // What: NOTIFY to the own recursors.
-                        // Why: AXFR ends old cached answers.
+                        // What: NOTIFY to own recursors.
+                        // Why: AXFR ends old cached answers
                         // From: Issue #1683 | PR #2017
                         let mut to = Vec::new();
                         for which in [
@@ -8013,8 +8013,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                     },
                 ),
                 ("allow-axfr-ips", joined("PDNS_AXFR_FROM")),
-                // What: dnsdist passes the client IP by header.
-                // Why: ACLs and logs need the real client IP.
+                // What: dnsdist passes client IP by header.
+                // Why: ACLs and logs need real client IP.
                 // From: Issue #1683
                 (
                     "proxy-protocol-from",
@@ -8066,8 +8066,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             pub secondary: Option<u32>,
         }
 
-        // What: state of one zone on a secondary, mild to bad.
-        // Why: the order picks the worst; callers name a state.
+        // What: state of a zone on a secondary, mild to bad
+        // Why: the order picks worst; callers name a state.
         // From: Issue #1683 | PR #2017
         #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
         pub enum ZoneState {
@@ -8080,8 +8080,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         impl ZoneState {
-            // What: the word of a state in answers and logs.
-            // Why: the page maps this word to label and colour.
+            // What: the word of state in answers and logs.
+            // Why: page maps this word to label, colour.
             // From: Issue #1683 | PR #2017
             pub fn word(self) -> &'static str {
                 match self {
@@ -8142,7 +8142,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             }
         }
 
-        // What: the worst state of the zones; none: in sync.
+        // What: the worst state of zones; none: in sync.
         // Why: one lagging zone decides the peer status.
         // From: Issue #1683 | PR #2017
         pub fn worst_state(zones: &[PeerZone]) -> ZoneState {
@@ -8166,7 +8166,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: bind the TSIG key to every existing zone.
-        // Why: zones of older versions were created without it.
+        // Why: zones of older versions lacked it.
         // From: Issue #1683 | PR #1858
         pub async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
             let api = own_api(s)?;
@@ -8194,13 +8194,13 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 port,
             )];
             // What: no removal; the primary's check prunes.
-            // Why: this list is from setup and may be older.
+            // Why: this list is from setup; may be older.
             // From: Issue #1683
             match_zones(&own_api(s)?, &zones, &masters, key, false, "secondary").await
         }
 
         // What: a secondary holds exactly the wanted zones.
-        // Why: one rule at setup and in the primary's check.
+        // Why: one rule at setup and in primary's check.
         // From: Issue #1683
         pub async fn match_zones(
             api: &crate::shared::pdns::Api,
@@ -8229,8 +8229,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                     eprintln!("{who}: secondary zone {id} added");
                 }
             }
-            // What: drop copies the primary no longer serves.
-            // Why: a removed LAN domain must stop answering.
+            // What: drop copies primary no longer serves.
+            // Why: a removed LAN domain must stop answering
             // From: Issue #1683
             for z in have
                 .iter()
@@ -8243,7 +8243,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: port 53 if the primary answers aa there.
-        // Why: an older primary has its recursor on DNS_PORT.
+        // Why: an older primary has recursor on DNS_PORT.
         // From: Issue #1683
         pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
             let fallback = s.uint("PDNS_AUTH_PORT")?;
@@ -8252,8 +8252,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             };
             let primary = s.text("DNS_XFR_PRIMARY")?;
             let probe = soa_on_dns_port(s, &primary, zone).await;
-            // What: no aa or no answer: stay on PDNS_AUTH_PORT.
-            // Why: a failed probe must not stop the zones step.
+            // What: no aa, no answer: keep PDNS_AUTH_PORT.
+            // Why: a failed probe must not stop zones step.
             // From: Issue #1683
             let chosen = match &probe {
                 Ok(soa) if soa.serves_zone() => s.uint("DNS_PORT")?,
@@ -8263,8 +8263,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Ok(chosen)
         }
 
-        // What: non-RD SOA query to DNS_PORT of one address.
-        // Why: XFR port choice and the NS check ask the same.
+        // What: non-RD SOA query to DNS_PORT of one address
+        // Why: XFR port choice and NS check ask the same.
         // From: Issue #1683
         pub async fn soa_on_dns_port(
             s: &Settings,
@@ -8310,7 +8310,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         pub struct Flushed(Option<BTreeMap<String, u32>>);
 
         impl Flushed {
-            // What: zones whose serial moved since the flush.
+            // What: zones whose serial moved since flush.
             // Why: at start pdns NOTIFY already wiped them.
             // From: Issue #1683
             pub fn due(&mut self, zones: &BTreeMap<String, u32>) -> Vec<(String, u32)> {
@@ -8324,7 +8324,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             }
 
             // What: note a flush that worked.
-            // Why: a failed one stays due for the next round.
+            // Why: a failed one stays due for next round.
             // From: Issue #1683
             pub fn done(&mut self, zone: &str, serial: u32) {
                 self.0
@@ -8343,7 +8343,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Ok(())
         }
 
-        // What: pdns API of this node, primary or secondary.
+        // What: pdns API of this node, primary or secondary
         // Why: records and zones live only in PowerDNS.
         // From: Issue #1683 | PR #2019
         pub fn own_api(s: &Settings) -> Result<crate::shared::pdns::Api, String> {
@@ -8369,7 +8369,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: state of one zone and the worst-of rule.
-        // Why: in sync only when every managed zone matches.
+        // Why: in sync only if every managed zone matches.
         // From: Issue #1683
         #[cfg(test)]
         mod tests {
@@ -8386,7 +8386,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 }
             }
 
-            // What: each serial pair maps to its state word.
+            // What: each serial pair maps to its state word
             // Why: page and alarms show these words.
             // From: Issue #1683
             #[test]
@@ -8422,7 +8422,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         #[derive(Clone, Debug, Default, Eq, PartialEq)]
         pub struct Chain {
             // What: top zone and its DS rows; none = NTA.
-            // Why: a missing DS must never leave it unchecked.
+            // Why: missing DS must never leave it unchecked
             // From: Issue #1683 | PR #2019
             pub anchors: Vec<(String, Vec<String>)>,
             // What: zones whose chain from an anchor holds.
@@ -8441,7 +8441,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         impl Which {
-            // What: SOT key RECURSOR_<MODE>_<name>, in full.
+            // What: SOT key RECURSOR_<MODE>_<name>, in full
             // Why: ci.sh bakes only keys the source names.
             // From: Issue #1683 | PR #1980
             pub fn key(self, name: &str) -> String {
@@ -8501,7 +8501,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 s.uint("RPZ_SOA_MINIMUM")?,
             );
             // What: ".name" = subdomains, "name" = itself.
-            // Why: the apex of a subdomain row must not match.
+            // Why: apex of a subdomain row must not match.
             // From: Issue #1072
             for (d, subtree) in domains {
                 let d = d.trim_end_matches('.');
@@ -8535,7 +8535,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 }
             }
             // What: a top zone is anchored by its own DS.
-            // Why: .lan and .local then validate (POC 25.11.).
+            // Why: .lan, .local then validate (POC 25.11.)
             // From: Issue #1683 | PR #2019
             for (zone, ds) in &chain.anchors {
                 let name = zone.trim_end_matches('.');
@@ -8550,7 +8550,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             }
 
             // What: no DNSSEC check for private domains.
-            // Why: router domains like fritz.box are unsigned.
+            // Why: router domains (fritz.box) are unsigned
             // From: Issue #1683 | PR #1980
             for z in upstream_zones(s, "DNS_UPSTREAM_UNSIGNED_ZONES")? {
                 if z != "." {
@@ -8561,8 +8561,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Ok(lua)
         }
 
-        // What: Lua line that keeps a root zone copy cached.
-        // Why: fewer root queries; none if "." goes upstream.
+        // What: Lua line that keeps root zone copy cached.
+        // Why: fewer root queries; none if "." is forwarded
         // From: Issue #1683 | PR #2019
         fn root_copy(s: &Settings) -> Result<String, String> {
             let all_upstream = !upstream_servers(s)?.is_empty()
@@ -8585,14 +8585,14 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: domain list for upstream forwarding.
-        // Why: empty or "." means all names; bad chars stop.
+        // Why: empty or "." means all names; bad chars stop
         // From: Issue #1683 | PR #1980
         fn upstream_zones(s: &Settings, key: &str) -> Result<Vec<String>, String> {
             let mut out = Vec::new();
             for raw in s.list(key) {
                 let z = raw.trim_end_matches('.').to_ascii_lowercase();
-                // What: a name with "_" allowed; empty is ".".
-                // Why: a..b and -bad- are no names to forward.
+                // What: name with "_" allowed; empty is "."
+                // Why: a..b, -bad- are no names to forward
                 // From: Issue #1918
                 if !z.is_empty() && !crate::shared::dns::is_dns_name(&z, true, false) {
                     return Err(format!("{key}: bad domain {raw}"));
@@ -8602,7 +8602,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             if out.is_empty() && key == "DNS_UPSTREAM_ZONES" {
                 out.push(".".to_string());
             }
-            // What: a local zone or its subzone never goes out.
+            // What: local zone or its subzone never leaves.
             // Why: local names sent out return NXDOMAIN.
             // From: Issue #1683 | PR #1980
             if key == "DNS_UPSTREAM_ZONES" {
@@ -8618,7 +8618,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Ok(out)
         }
 
-        // What: upstream servers; our own address is refused.
+        // What: upstream servers; our own address refused.
         // Why: our own address as upstream loops queries.
         // From: Issue #1683 | PR #1980
         fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
@@ -8692,7 +8692,7 @@ end
             let auth = crate::shared::pdns_conf::auth_endpoint(s)?;
             let mut zones = crate::shared::dns::managed_zones(s)?;
             // What: the top zones go to pdns too.
-            // Why: else the root copy denies them (POC case d).
+            // Why: else root copy denies them (POC case d).
             // From: Issue #1683 | PR #2019
             for (zone, _) in &chain.anchors {
                 crate::config::add_once(&mut zones, zone);
@@ -8713,7 +8713,7 @@ end
                 let list: Vec<String> = upstream.iter().map(|u| format!("\"{u}\"")).collect();
                 let fwd = list.join(", ");
 
-                // What: one forward entry per chosen domain.
+                // What: one forward entry per chosen domain
                 // Why: "domains" mode forwards only those.
                 // From: Issue #1683 | PR #1980
                 let entries: String = upstream_zones(s, "DNS_UPSTREAM_ZONES")?
@@ -8750,7 +8750,7 @@ end
             let proxy = crate::shared::dnsdist_conf::source_of(s)?;
             y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
             // What: NOTIFY from the own pdns wipes a zone.
-            // Why: a secondary has no ui to flush after AXFR.
+            // Why: secondary has no ui to flush after AXFR
             // From: Issue #1683 | PR #2017
             if crate::shared::dns::Role::from_settings(s)? == crate::shared::dns::Role::Secondary {
                 let names: Vec<String> = zones
@@ -8801,8 +8801,8 @@ end
             y += &format!("  port: {}\n  allow_from:\n", u(&which.key("API_PORT"))?);
             y += &yaml_list(&s.list("PDNS_API_ALLOW_FROM"), "    ")?;
             y += &format!("  api_key: \"{api_key}\"\n");
-            // What: query log raises the level and drops quiet.
-            // Why: the admin follows DNS queries in the log.
+            // What: query log raises level and drops quiet.
+            // Why: the admin follows DNS queries in log.
             // From: Issue #1683 | PR #1980
             let (level, quiet) = if s.flag("DNS_QUERY_LOG")? {
                 (u("RECURSOR_LOGLEVEL_QUERIES")?, "  quiet: false\n")
@@ -8820,8 +8820,8 @@ end
     pub mod dnsdist_conf {
         use crate::config::Settings;
 
-        // What: the sender address from the settings, checked.
-        // Why: pdns, recursor and dnsdist name the same one.
+        // What: the sender address from settings, checked.
+        // Why: pdns, recursor and dnsdist name same one.
         // From: Issue #1683 | PR #2017
         pub fn source_of(s: &Settings) -> Result<String, String> {
             source(
@@ -8843,7 +8843,7 @@ end
                 ));
             }
             // What: must differ from LOOPBACK_BIND_IP.
-            // Why: recursor to pdns runs from it, no header.
+            // Why: recursor to pdns runs from it, no header
             // From: Issue #1683
             if raw == loopback {
                 return Err(format!(
@@ -8899,7 +8899,7 @@ end
                 server(l.pool, &l.backend)?;
             }
             // What: NOTIFY, XFR and non-RD queries to pdns.
-            // Why: a secondary asks SOA and AXFR without RD.
+            // Why: a secondary asks SOA and AXFR without RD
             // From: Issue #1683
             out += &format!(
                 "addAction(AndRule({{DSTPortRule({}), OrRule({{OpcodeRule(DNSOpcode.Notify), QTypeRule(DNSQType.AXFR), QTypeRule(DNSQType.IXFR), NotRule(RDRule())}})}}), PoolAction(\"auth\"))\n",
@@ -8999,7 +8999,7 @@ end
                   "socket-name": s.text("KEA_DHCP4_SOCKET")?}))
         }
 
-        // What: domain-name and domain-search of kept subnets.
+        // What: domain-name, domain-search of kept subnets.
         // Why: kept subnets follow a changed LAN domain.
         // From: Issue #1683 | PR #1980
         fn follow_domain(mut subnets: Value, before: Option<&str>, domain: &str) -> Value {
@@ -9026,7 +9026,7 @@ end
         }
 
         // What: ntp-servers of kept subnets follow own NTP.
-        // Why: while on, the toggle owns option 42 everywhere.
+        // Why: while on, toggle owns option 42 everywhere.
         // From: Issue #1683
         pub(crate) fn follow_ntp(mut subnets: Value, auto: bool, own: &str, back: &str) -> Value {
             for sn in subnets.as_array_mut().into_iter().flatten() {
@@ -9055,7 +9055,7 @@ end
         }
 
         // What: true when an IPv4 address lies in a CIDR.
-        // Why: Kea refuses a reservation outside its subnet.
+        // Why: Kea refuses reservation outside its subnet.
         // From: Issue #1683 | PR #2017
         fn in_subnet(ip: &str, cidr: &str) -> bool {
             let Some((net, len)) = cidr.split_once('/') else {
@@ -9100,7 +9100,7 @@ end
         }
 
         // What: the option rows of the SOT subnet.
-        // Why: router, DNS, domain and NTP come from the SOT.
+        // Why: router, DNS, domain and NTP come from SOT.
         // From: Issue #1683 | PR #1980
         fn option_rows(s: &Settings, domain: &str) -> Result<Vec<Value>, String> {
             let dns = crate::shared::dhcp::dns_addrs(s);
@@ -9114,7 +9114,7 @@ end
         }
 
         // What: the named options of one Kea subnet.
-        // Why: settings and the subnet form give the same rows.
+        // Why: settings and subnet form give the same rows.
         // From: Issue #1683
         pub fn named_rows(
             gateway: &str,
@@ -9169,7 +9169,7 @@ end
             let (valid, max) = crate::shared::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
             let pool = pool_text(&s.text("DHCP_RANGE_START")?, &s.text("DHCP_RANGE_END")?);
             // What: last main domain, if no LAN domain now.
-            // Why: kept subnets follow only a dropped domain.
+            // Why: kept subnets follow only dropped domain.
             // From: Issue #1683
             let lans = crate::shared::dns::lan_domains(s)?;
             let before = existing
@@ -9196,8 +9196,8 @@ end
                 "valid-lifetime": valid,
                 "max-valid-lifetime": max
             });
-            // What: old main hosts in subnet, coded options.
-            // Why: ui-made; Kea refuses hosts off its subnet.
+            // What: old main hosts in subnet, coded options
+            // Why: ui-made; Kea refuses hosts off-subnet.
             // From: Issue #1683 | PR #2017
             if let Some(o) = old_main {
                 if let Some(hosts) = o.get("reservations").and_then(Value::as_array) {
@@ -9259,8 +9259,8 @@ end
             }}))
         }
 
-        // What: kea-ctrl-agent.conf with a basic-auth login.
-        // Why: threat model G2: the port was open to the LAN.
+        // What: kea-ctrl-agent.conf with basic-auth login.
+        // Why: threat model G2: port was open to the LAN.
         // From: Issue #1683 | PR #1985
         pub fn ctrl_agent(s: &Settings, token: &str) -> Result<Value, String> {
             Ok(json!({"Control-agent": {
@@ -9286,7 +9286,7 @@ end
             }]);
             let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
             // What: one forward entry per LAN domain.
-            // Why: D2 rejects a name outside every listed zone.
+            // Why: D2 rejects name outside all listed zones
             // From: Issue #1683
             let forward: Vec<Value> = crate::shared::dns::lan_domains(s)?
                 .iter()
@@ -9408,7 +9408,7 @@ end
             let mut c = base(s)?;
             if mode == Mode::DnsmasqRelay {
                 // What: empty relay address = this host IP.
-                // Why: the mode switch needs no further input.
+                // Why: mode switch needs no further input.
                 // From: Issue #1683 | PR #1985
                 let local = s
                     .text("DHCP_RELAY_LOCAL_ADDR")
@@ -9524,8 +9524,8 @@ end
                 best
             }
 
-            // What: registrable root: suffix plus one label.
-            // Why: PSL rule; an unknown TLD counts as suffix.
+            // What: registrable root: suffix plus one label
+            // Why: PSL rule; unknown TLD counts as suffix.
             // From: Issue #1683 | PR #1980
             pub fn root(&self, name: &str) -> Option<String> {
                 let labels: Vec<&str> = name.split('.').collect();
@@ -9758,7 +9758,7 @@ end
             out.push_str(&p.timeouts);
             out.push_str("}\n");
             // What: the refuse target sends a TLS alert.
-            // Why: a closed port would log an error per try.
+            // Why: a closed port would log error per try.
             // From: Issue #1683 | PR #1980
             out.push_str(&format!(
                 "\nserver {{\n    listen {} ssl;\n    ssl_reject_handshake on;\n}}\n",
@@ -9850,8 +9850,8 @@ end
             out.push('\n');
             let to_origin = format!("    ssl_preread on;\n    proxy_pass {};\n", p.origin);
             out.push_str(&relay_server(p, &p.pass_relay, &to_origin));
-            // What: refuse target of the dispatch, with PROXY.
-            // Why: a TLS alert instead of a reset and [error].
+            // What: refuse target of dispatch, with PROXY.
+            // Why: a TLS alert, not a reset and [error].
             // From: Issue #1683 | PR #1980
             out.push_str(&format!(
             "\nserver {{\n    listen {} ssl proxy_protocol;\n    ssl_reject_handshake on;\n}}\n",
@@ -9871,7 +9871,7 @@ end
             let p = plan(s)?;
             let keys = h.keys();
             let fallback = s.text("NGINX_DEFAULT_CERT")?;
-            // What: client, cdn and cert maps, HTTPS off too.
+            // What: client, cdn, cert maps, HTTPS off too.
             // Why: proxy-params.conf reads the first two.
             // From: Issue #1683 | PR #2019
             let mut out = vec![
@@ -9940,7 +9940,7 @@ end
             }
         }
 
-        // What: owner and words of each "owner:cmd+arg" row.
+        // What: owner and words of each "owner:cmd+arg" row
         // Why: one reader of the exec rows of the SOT.
         // From: Issue #1683 | PR #2017
         pub fn exec_rows(exec: &[String]) -> impl Iterator<Item = (&str, Vec<&str>)> {
@@ -9950,7 +9950,7 @@ end
             })
         }
 
-        // What: an owner's reload commands, "owner:cmd+arg".
+        // What: an owner's reload commands, "owner:cmd+arg"
         // Why: RELOAD_EXEC in the SOT; no list in code.
         // From: Issue #1683
         pub fn exec_cmds<'a>(
@@ -9960,7 +9960,7 @@ end
             exec_rows(exec).filter_map(move |(o, cmd)| (o == owner).then_some(cmd))
         }
 
-        // What: run every reload command; stop at the first.
+        // What: run every reload command; stop at first.
         // Why: a failed reload is shown, never hidden.
         // From: Issue #1683
         pub async fn reload_exec(
@@ -10022,7 +10022,7 @@ end
                         let name = container_of(owner);
                         match reload_exec(api, &name, exec, owner, limit).await {
                             // What: failed reload: restart.
-                            // Why: else the old file runs on.
+                            // Why: else old file runs on.
                             // From: Issue #1683 | PR #1985
                             Outcome::Failed(e) => {
                                 eprintln!("apply: {owner}: reload failed ({e}); restart");
@@ -10092,7 +10092,7 @@ end
                 }
             }
 
-            // What: the files, or the errors, each text once.
+            // What: the files, or errors, each text once.
             // Why: two files may hit the same bad value.
             // From: Issue #1683 | PR #1991
             fn finish(mut self) -> Result<Vec<File>, Vec<String>> {
@@ -10105,7 +10105,7 @@ end
                 }
             }
 
-            // What: adds a file of the service a SOT key names.
+            // What: adds file of service a SOT key names.
             // Why: a render reports all errors at once.
             // From: Issue #1683 | PR #1980
             fn add_file(
@@ -10160,7 +10160,7 @@ end
             snmpd_file(o);
         }
 
-        // What: the snmpd.conf the snmpd of each image reads.
+        // What: the snmpd.conf snmpd of each image reads.
         // Why: a secondary needs it; snmpd waits for it.
         // From: Issue #1683 | PR #2020
         fn snmpd_file(o: &mut Out) {
@@ -10188,7 +10188,7 @@ end
                 let rpz_key = which.key("RPZ_FILE");
                 let lua_key = which.key("LUA_FILE");
                 // What: serial from the zone body itself.
-                // Why: a clock serial restarts dns each save.
+                // Why: clock serial restarts dns each save.
                 // From: Issue #1683 | PR #1980
                 let serial = recursor_conf::rpz(s, names, &answer, 0)
                     .map(|b| content_serial(&b))
@@ -10269,13 +10269,13 @@ end
         }
 
         // What: the hosts of a cache domain list.
-        // Why: nginx files and certificates need the same set.
+        // Why: nginx files and certificates need same set.
         // From: Issue #1683 | PR #2017
         fn cache_hosts(s: &Settings, domains: &str) -> Result<nginx_conf::Hosts, String> {
             nginx_conf::hosts(domains, &psl(s)?)
         }
 
-        // What: the Public Suffix List next to the templates.
+        // What: the Public Suffix List next to templates.
         // Why: cache names and own endings read one list.
         // From: Issue #1683 | PR #2019
         pub fn psl(s: &Settings) -> Result<nginx_conf::Psl, String> {
@@ -10292,7 +10292,7 @@ end
             let src = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
             let dst = PathBuf::from(s.text("NGINX_CONF_DIR")?);
             // What: nginx resolvers must not be this host.
-            // Why: threat model G3: own DNS sends CDNs here.
+            // Why: threat model G3: own DNS sends CDNs here
             // From: Issue #1683 | PR #1985
             let own = crate::shared::recursor_conf::own_ips(s);
             for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
@@ -10324,7 +10324,7 @@ end
                 });
             }
             // What: the static health body nginx serves.
-            // Why: proxy-params.conf aliases it; ui owns files.
+            // Why: proxy-params.conf aliases; ui owns files
             // From: Issue #1683 | PR #1980
             o.files.push(File {
                 owner: proxy,
@@ -10358,7 +10358,7 @@ end
         }
 
         // What: folder of the stack CA from SOT keys.
-        // Why: the ui issues the CA; cachehamster trusts it.
+        // Why: the ui issues CA; cachehamster trusts it.
         // From: Issue #871 | PR #2017
         pub fn ca_dir(s: &Settings) -> Result<PathBuf, String> {
             Ok(PathBuf::from(s.text("NGINX_DIR")?).join(s.text("NGINX_SUBDIR_CA")?))
@@ -10388,7 +10388,7 @@ end
                 std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
             }
             // What: group and mode of one cert path.
-            // Why: nginx workers read keys by the shared gid.
+            // Why: nginx workers read keys by shared gid.
             // From: Issue #1683 | PR #2020
             let grant = |p: &Path, gid: Option<u32>, mode: u32| {
                 let owner = crate::shared::fs::Owner { uid: None, gid };
@@ -10414,7 +10414,7 @@ end
             let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
             let mut want = hosts.certs();
             // What: default cert: DNS name and IP_HTTPS.
-            // Why: clients without SNI or by IP get this cert.
+            // Why: no-SNI or by-IP clients get this cert
             // From: Issue #1683 | PR #1980
             let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
             names.extend(s.text("IP_HTTPS").ok());
@@ -10447,7 +10447,7 @@ end
         }
 
         // What: the names of a cache domain list.
-        // Why: all and dns_only feed the dns files with them.
+        // Why: all and dns_only feed dns files with them.
         // From: Issue #1683 | PR #2017
         fn cdn_names(domains: &str) -> Vec<(String, bool)> {
             domains
@@ -10481,7 +10481,7 @@ end
             let mut out = Vec::new();
             for f in files {
                 // What: a first write wakes no owner.
-                // Why: owners read it at start; a HUP kills.
+                // Why: owners read it at start; HUP kills.
                 // From: Issue #1683 | PR #1980
                 let wake = f.path.exists();
                 let owner = crate::shared::fs::Owner::default();
@@ -10519,7 +10519,7 @@ end
             o.finish()
         }
 
-        // What: the dns files and snmpd.conf, for a secondary.
+        // What: dns files and snmpd.conf, for a secondary.
         // Why: a secondary runs only the dns container.
         // From: Issue #1683 | PR #1980
         pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
@@ -10574,7 +10574,7 @@ end
         }
 
         // What: does the stack's own NTP server answer.
-        // Why: one check for the page, a CLI and a REST call.
+        // Why: one check for page, a CLI and a REST call.
         // From: Issue #1683 | PR #2020
         pub async fn own_answers(s: &crate::config::Settings) -> Result<bool, String> {
             if !s.flag("NTP_ENABLED")? {
@@ -10954,7 +10954,7 @@ end
         use std::process::Command;
 
         // What: runs a tool; errors name the tool only.
-        // Why: arguments may hold a secret, as snmpget's do.
+        // Why: arguments may hold secret, as snmpget's do.
         // From: Issue #1683 | PR #2017
         pub fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
             let tool = cmd.get_program().to_string_lossy().into_owned();
@@ -11012,7 +11012,7 @@ end
         // From: Issue #1683 | PR #2017
         pub const UNKNOWN: &str = "U";
 
-        // What: Docker stats fields a container graph reads.
+        // What: Docker stats fields container graph reads.
         // Why: names of the per-container values.
         // From: Issue #1683 | PR #1980
         pub const FIELDS: [&str; 6] = [
@@ -11189,8 +11189,8 @@ end
             if path.exists() {
                 return Ok(());
             }
-            // What: create the stats dir before rrdtool runs.
-            // Why: an existing ui volume may lack the folder.
+            // What: create stats dir before rrdtool runs.
+            // Why: an existing ui volume may lack folder.
             // From: Issue #1683 | PR #1980
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -11204,7 +11204,7 @@ end
                 .arg(step.to_string());
             for src in &g.sources {
                 // What: a gauge may go below zero.
-                // Why: time offsets are negative half the time.
+                // Why: time offsets are negative half time.
                 // From: Issue #1683 | PR #1980
                 let min = if src.kind == "GAUGE" { "U" } else { "0" };
                 cmd.arg(format!("DS:{}:{}:{beat}:{min}:U", src.ds, src.kind));
@@ -11276,7 +11276,7 @@ end
             // From: Issue #1683 | PR #1980
             cmd.arg("--full-size-mode");
             // What: plain numbers when each factor shrinks.
-            // Why: "233.5m" unreadable; kB x1024 keeps units.
+            // Why: "233.5m" illegible; kB x1024 keeps units
             // From: Issue #1683 | PR #1980
             let plain = g.sources.iter().all(|x| x.scale.is_some_and(|k| k < 1.0));
             let unit = if plain { "" } else { "%s" };
@@ -11284,7 +11284,7 @@ end
                 cmd.arg("--units-exponent").arg("0");
             }
 
-            // What: larger fonts for axis, title and legend.
+            // What: larger fonts for axis, title, legend.
             // Why: values stay readable without zoom.
             // From: Issue #1683 | PR #1980
             for f in s.list("STATS_FONTS") {
@@ -11307,15 +11307,15 @@ end
                     path.display()
                 ));
 
-                // What: factor per source, e.g. ns to percent.
-                // Why: Docker counts CPU time in nanoseconds.
+                // What: factor per source, e.g. ns to %
+                // Why: Docker counts CPU time in ns.
                 // From: Issue #1683 | PR #1980
                 let factor = src.scale.unwrap_or(1.0);
                 cmd.arg(format!("CDEF:{0}={0}_raw,{factor},*", src.ds));
                 cmd.arg(format!("LINE2:{0}{colour}:{0:<8}", src.ds));
 
-                // What: now, average and max as text per line.
-                // Why: exact values without reading the axis.
+                // What: now, average, max as text per line.
+                // Why: exact values without reading axis.
                 // From: Issue #1683 | PR #1980
                 cmd.arg(format!("GPRINT:{}:LAST:now %8.2lf{unit}", src.ds));
                 cmd.arg(format!("GPRINT:{}:AVERAGE:avg %8.2lf{unit}", src.ds));
@@ -11388,14 +11388,14 @@ end
         }
 
         // What: the cache dir, checked against its prefix.
-        // Why: every delete in the cache uses this one gate.
+        // Why: every delete in cache uses this one gate.
         // From: Issue #1683 | PR #2020
         pub fn cache_root(s: &crate::config::Settings) -> Result<PathBuf, String> {
             inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)
         }
 
         // What: size and free bytes of the cache volume.
-        // Why: the light and the size check read one figure.
+        // Why: the light and size check read one figure.
         // From: Issue #1683 | PR #2020
         pub fn cache_space(
             s: &crate::config::Settings,
@@ -11478,7 +11478,7 @@ end
                 if f.mtime >= today || f.path.extension().is_some_and(|e| e == "xz") {
                     continue;
                 }
-                // What: late lines join the existing .xz file.
+                // What: late lines join existing .xz file.
                 // Why: xz will not overwrite a file.
                 // From: Issue #1683 | PR #1985
                 let packed = super::fs::with_suffix(&f.path, ".xz");
@@ -11548,8 +11548,8 @@ end
             let mut total = 0;
             for row in text.lines() {
                 let cols: Vec<&str> = row.split(';').collect();
-                // What: old dst.file rows or the d_store row.
-                // Why: syslog-ng 4 shows only the d_store row.
+                // What: old dst.file rows or d_store row.
+                // Why: syslog-ng 4 shows only d_store row.
                 // From: Issue #1683
                 let store = match cols.first() {
                     Some(&"dst.file") => true,
@@ -11925,13 +11925,13 @@ mod ui {
         pub(crate) fn page(&self, name: &str, mut ctx: Context, csrf: &Csrf) -> Page {
             let s = self.settings();
             let page = name.trim_end_matches(".html");
-            // What: every spec key, unset ones as empty text.
+            // What: every spec key, unset as empty text
             // Why: templates read optional keys unguarded.
             // From: Issue #1683 | PR #1980
             let values = s.view();
             let login = !password_hash(&s).is_empty();
             // What: page and route paths by short name.
-            // Why: templates name the SOT key without prefix.
+            // Why: templates name SOT key without prefix.
             // From: Issue #1683
             let paths = |prefix: &str| -> BTreeMap<String, String> {
                 s.texts()
@@ -11955,7 +11955,7 @@ mod ui {
             ctx.insert("status_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
             ctx.insert("warnings", &s.warnings);
             // What: texts of the request language.
-            // Why: templates hold keys; scripts get the same.
+            // Why: templates hold keys; scripts get same.
             // From: Issue #1683 | PR #1980
             let code = LANG
                 .try_with(Clone::clone)
@@ -12313,12 +12313,12 @@ mod ui {
         let check = render::secrets(&new)
             .and_then(|sec| render::all(&new, &sec, &none).map_err(|e| e.join("; ")));
         if let Err(e) = check {
-            // What: a refused save is logged, not only shown.
-            // Why: the error must leave a trace in the logs.
+            // What: refused save is logged, not only shown.
+            // Why: the error must leave trace in the logs.
             // From: Issue #1683 | PR #1991
             eprintln!("ui: save refused: {e}");
-            // What: only the changed keys get their old values.
-            // Why: a whole-file write undoes setup.sh edits.
+            // What: only changed keys get their old values.
+            // Why: a whole-file write undoes setup.sh edits
             // From: Issue #1683 | PR #2017
             let back: Fields = updates
                 .keys()
@@ -12361,7 +12361,7 @@ mod ui {
             app.cache_used.load(Ordering::Relaxed),
         )?;
         // What: a new main domain also updates the extras.
-        // Why: an extra made main must leave the extra list.
+        // Why: an extra made main must leave extra list.
         // From: Issue #1683
         let mut form = form;
         if let Some(d) = form.get("DHCP_DOMAIN").cloned() {
@@ -12391,7 +12391,7 @@ mod ui {
             .filter(|b| b.starts_with('/') && !b.starts_with("//"))
             .cloned()
             .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
-        // What: the zones before the save; none if unreadable.
+        // What: the zones before save; none if unreadable.
         // Why: a save may repair the settings; it must run.
         // From: Issue #1683 | PR #2017
         let before = hosted_now(&app.settings())
@@ -12444,7 +12444,7 @@ mod ui {
         let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
         let programs = s.list("SYSLOG_PROGRAMS");
         let muted = s.list("SYSLOG_MUTED");
-        // What: every folder the store holds, plus the list.
+        // What: every folder store holds, plus the list.
         // Why: the store may name folders the list lacks.
         // From: Issue #1683 | PR #1980
         let mut names = programs.clone();
@@ -12509,8 +12509,8 @@ mod ui {
         let mut records: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         let mut ptr = Vec::new();
         match peer::own_api(&s) {
-            // What: other zones only if the main one answers.
-            // Why: an unreachable API would time out 20 times.
+            // What: other zones only if main one answers.
+            // Why: unreachable API would time out 20 times.
             // From: Issue #1683 | PR #1980
             Ok(api) => match api.rrsets(&lan).await {
                 Ok(rows) => {
@@ -12569,7 +12569,7 @@ mod ui {
         ctx.insert("dhcp_mode", &s.text("DHCP_MODE")?);
         ctx.insert("txt_max_bytes", &s.uint("DNS_TXT_MAX_BYTES")?);
         // What: NS state of each secondary: in, off or new.
-        // Why: the row shows it and offers the matching button.
+        // Why: the row shows it and offers matching button.
         // From: Issue #1683
         let (ns, off) = (s.list("DNS_SECONDARY_NS"), s.list("DNS_SECONDARY_NS_OFF"));
         let peers: Vec<Value> = crate::shared::pdns_conf::secondaries(&s)
@@ -12622,7 +12622,7 @@ mod ui {
         ctx.insert("setup_git_ref", &s.text(ref_key)?);
         ctx.insert("primary_ip", &s.text("IP_HTTP")?);
         // What: HTTPS proxy IP when it is a second LAN IP.
-        // Why: the copied command then sets the HTTPS DNS bind.
+        // Why: the copied command then sets HTTPS DNS bind.
         // From: Issue #1683 | PR #1980
         ctx.insert("primary_ip_https", &primary_https_ip(&s)?);
 
@@ -12740,7 +12740,7 @@ mod ui {
             return Err(Fail(StatusCode::UNAUTHORIZED, "wrong token".into()));
         }
         let mut list = crate::shared::pdns_conf::secondaries(&s);
-        // What: sent address, else stored, else the peer IP.
+        // What: sent address, else stored, else peer IP.
         // Why: re-registration keeps a manual override.
         // From: Issue #1683 | PR #1980
         let stored = list
@@ -12800,7 +12800,7 @@ mod ui {
             SecondaryOp::Remove => {
                 let (_, address) = list.remove(at);
                 // What: the name leaves both NS lists too.
-                // Why: a new secondary of that name starts new.
+                // Why: new same-name secondary starts new.
                 // From: Issue #1683
                 let mut form = ns_change(&s, &name, None);
                 let rows = crate::shared::pdns_conf::secondary_rows(&list);
@@ -12837,8 +12837,8 @@ mod ui {
                 if !crate::shared::dns::is_ip(&a.address) {
                     return Err(bad_request(tr("err_no_ip")));
                 }
-                // What: a new address drops the old records.
-                // Why: same address: no save, no ensure runs.
+                // What: a new address drops old records.
+                // Why: same address: no save/ensure runs.
                 // From: Issue #1683
                 if list[at].1 != a.address {
                     drop_peer_records(&s, &name, &list[at].1)
@@ -12863,8 +12863,8 @@ mod ui {
         pub(crate) count: u64,
     }
 
-    // What: serial table: managed zones, primary, secondaries.
-    // Why: one overview of the loaded serial on each server.
+    // What: serials: managed zones, primary, secondaries
+    // Why: one overview of loaded serial on each server.
     // From: Issue #1683
     pub(crate) async fn zone_overview(State(app): Shared) -> Page {
         let s = app.settings();
@@ -12887,8 +12887,8 @@ mod ui {
             .map(|zone| {
                 let serials: Vec<Option<u32>> =
                     lists.iter().map(|l| peer::serial_of(l, &zone)).collect();
-                // What: state word of each secondary's cell.
-                // Why: table and status line share zone_state.
+                // What: state word of each secondary's cell
+                // Why: table, status line share zone_state.
                 // From: Issue #1683 | PR #2019
                 let states: Vec<Option<&str>> = serials
                     .iter()
@@ -12962,7 +12962,7 @@ mod ui {
         }
         ctx.insert("dhcp_upstream_dhcp_ip", &opt("UPSTREAM_DHCP_IP"));
         ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
-        // What: the hint shows only when own NTP is handed out.
+        // What: hint shows only when own NTP is handed out
         // Why: one rule with the Kea and dnsmasq render.
         // From: Issue #1683
         ctx.insert("ntp_auto_dhcp_active", &crate::shared::dhcp::own_ntp(&s)?);
@@ -13415,7 +13415,7 @@ mod ui {
     }
 
     // What: count the cache folder now and then.
-    // Why: a walk is slow; the dashboard reads the last sum.
+    // Why: a walk is slow; dashboard reads the last sum.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn cache_scanner(app: Arc<App>) {
         loop {
@@ -13491,7 +13491,7 @@ mod ui {
             return Err(Fail(StatusCode::NOT_FOUND, tr("err_program_not_offered")));
         }
         // What: only a running program is touched.
-        // Why: a restart must not start kea in dnsmasq mode.
+        // Why: a restart must not start kea in dnsmasq mode
         // From: Issue #1683
         let control = s.text("SERVICE_CONTROL_PROGRAM")?;
         let status = [control.as_str(), program.as_str(), "status"];
@@ -13531,7 +13531,7 @@ mod ui {
         let v: Value =
             serde_json::from_str(line).map_err(|e| format!("cachehamster: {e}: {out}"))?;
         if let Some(e) = v.get("error").and_then(Value::as_str) {
-            // What: the service text behind a translated lead.
+            // What: service text behind a translated lead.
             // Why: Steam details stay as the service wrote.
             // From: Issue #871 | PR #1980
             return Err(format!("{} {e}", tr("hamster_says")));
@@ -13592,7 +13592,7 @@ mod ui {
             return Err(bad_request(tr("err_hamster_empty")));
         }
         // What: the cachehamster command of each action.
-        // Why: the daemon protocol names commands, not paths.
+        // Why: daemon protocol names commands, not paths.
         // From: Issue #871
         let args: Vec<&str> = match op {
             HamsterOp::Add => vec!["add", &name, &when, &what],
@@ -13730,7 +13730,7 @@ mod ui {
         app.rendered.store(true, Ordering::Relaxed);
         changes.extend(written.iter().cloned());
         // What: drop proxy render files no longer written.
-        // Why: a left-over https.conf keeps the SSL server up.
+        // Why: a left-over https.conf keeps SSL server up.
         // From: Issue #1683 | PR #2019
         let removed = prune_rendered(new, &files)?;
         if !removed.is_empty() {
@@ -13748,7 +13748,7 @@ mod ui {
         // From: Issue #1683 | PR #1980
         let mut report = Vec::new();
         // What: a new file runs the commands of its daemon.
-        // Why: snmpd and pdns read their file only at start.
+        // Why: snmpd and pdns read their file only at start
         // From: Issue #1683
         let (_, limit) = app.limits(new)?;
         for (file, exec, tag) in [
@@ -13824,7 +13824,7 @@ mod ui {
             }
         }
         // What: skip an owner that has no container yet.
-        // Why: at stack start it reads the new files anyway.
+        // Why: at stack start it reads new files anyway.
         // From: Issue #1683 | PR #1980
         let (names, skipped) = plan_containers(app, new, &mut plan).await;
         report.extend(skipped);
@@ -14218,12 +14218,12 @@ mod ui {
         let mut rows: Vec<Value> = Vec::new();
         for m in list {
             // What: an inspect error reads as no state.
-            // Why: the bar still shows the other containers.
+            // Why: the bar still shows other containers.
             // From: Issue #1683 | PR #2020
             let inspect = m.inspect.clone().unwrap_or_default();
             let health = docker::Health::from_inspect(&inspect);
             let colour = health.colour(m.wanted());
-            // What: last health check output when not green.
+            // What: last health check output when not green
             // Why: a failure count alone names no reason.
             // From: Issue #1683 | PR #1980
             let reason = match colour {
@@ -14402,7 +14402,7 @@ mod ui {
         t.autoescape_on(vec!["html"]);
         register_image_functions(&mut t);
         // What: Tera 1 filter cachehamster.html uses.
-        // Why: Tera 2 has no filesizeformat; one byte format.
+        // Why: Tera 2 lacks filesizeformat; one byte format
         // From: Issue #1683 | PR #1980
         t.register_filter(
             "filesizeformat",
@@ -14545,8 +14545,8 @@ mod ui {
             // Why: same reader as the DHCP page and REST.
             // From: Issue #1683 | PR #2020
             Some("kea-snapshots") => Some(kea_snapshots(s).map(|v| println!("{v}"))),
-            // What: registration token as the ui resolves it.
-            // Why: CI reads the token the register API checks.
+            // What: registration token as ui resolves it.
+            // Why: CI reads token the register API checks.
             // From: Issue #1683 | PR #2020
             Some("registration-token") => Some(registration_token(s).map(|t| println!("{t}"))),
             Some("zone-rollback") => Some(match &args[1..] {
@@ -14575,7 +14575,7 @@ mod ui {
                     .ok_or_else(|| format!("{key}: no such setting or a secret")),
                 _ => Err("usage: settings [KEY]".into()),
             }),
-            // What: Kea subnets, reservations, leases as JSON.
+            // What: Kea subnets, reservations, leases: JSON
             // Why: same reader as the DHCP page and REST.
             // From: Issue #1683 | PR #2020
             Some("dhcp-state") => Some(match kea_state(s).await {
@@ -14598,7 +14598,7 @@ mod ui {
         }
     }
 
-    // What: every command of the ui role; none = the server.
+    // What: every command of ui role; none = the server.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
     const COMMANDS: [&str; 12] = [
@@ -14664,7 +14664,7 @@ mod ui {
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
             .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action));
-        // What: one route per action, tagged with its SOT key.
+        // What: one route per action, tagged with SOT key.
         // Why: handlers match the key, never a path text.
         // From: Issue #1683
         for &op in DnsOp::ALL {
@@ -14779,7 +14779,7 @@ mod ui {
             rendered: AtomicBool::new(false),
         });
         // What: render every config once at start.
-        // Why: owners read the config volume; it starts empty.
+        // Why: owners read config volume; it starts empty.
         // From: Issue #1683 | PR #1980
         match apply_all(&app, &s, &s, false).await {
             Ok(lines) => lines.iter().for_each(|l| eprintln!("ui: start: {l}")),
@@ -15280,7 +15280,7 @@ mod watchdog {
                 }
                 return Ok(());
             }
-            // What: the last alarm report as JSON on stdout.
+            // What: last alarm report as JSON on stdout
             // Why: the CLI reads what the ui and REST show.
             // From: Issue #1683 | PR #2020
             Some("alarms") => {
