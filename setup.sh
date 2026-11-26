@@ -159,7 +159,7 @@ lines_joined() {
     printf '%s\n' "$out"
 }
 
-# What: true if $1 equals an item; one text item = its lines
+# What: true if $1 equals a non-empty item; text = lines
 # Why: one membership owner for arrays, words and lines
 # From: Issue #1683 | PR #2017
 list_has() {
@@ -169,7 +169,7 @@ list_has() {
         mapfile -t items <<< "${items[0]}"
     fi
     for item in "${items[@]}"; do
-        [[ "$item" != "$needle" ]] || return 0
+        [[ -z "$item" || "$item" != "$needle" ]] || return 0
     done
     return 1
 }
@@ -3055,7 +3055,7 @@ migrate_quickstart_install() (
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
         if list_has "$volume" "$kept_list"; then
-            kept+=" $(compose_config_value "$old_dir" "$old_env" ".volumes[\$k].name" --arg k "$volume")" || exit $?
+            kept+=" $(compose_config_value "$old_dir" "$old_env" --required ".volumes[\$k].name" --arg k "$volume")" || exit $?
             continue
         fi
         missing+=" $volume"
@@ -3070,14 +3070,22 @@ migrate_quickstart_install() (
     # From: Issue #1683
     ( cmd_backup --config "$old_dir" ) \
         || die "Pre-migration backup of $old_dir failed; the quickstart stack was not touched."
-    stack_compose "$old_dir" "$old_env" stop \
-        || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
+    # What: volume names resolve before the stack stops
+    # Why: a failed lookup must leave the old stack running
+    # From: Issue #1683 | PR #1858
     copies=$(quickstart_volume_dirs "$new_env") \
         || die "Cannot resolve the state directories of $new_env (exit $?)."
     mapfile -t copy_lines <<< "$copies"
+    local -a copy_names=()
     for line in "${copy_lines[@]}"; do
-        volume=$(compose_config_value "$old_dir" "$old_env" ".volumes[\$k].name" --arg k "${line%% *}") || exit $?
-        copy_volume_to_dir "$volume" "${line#* }" "$record"
+        copy_names+=("$(compose_config_value "$old_dir" "$old_env" --required \
+            ".volumes[\$k].name" --arg k "${line%% *}")") || exit $?
+    done
+    stack_compose "$old_dir" "$old_env" stop \
+        || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
+    local i
+    for i in "${!copy_lines[@]}"; do
+        copy_volume_to_dir "${copy_names[$i]}" "${copy_lines[$i]#* }" "$record"
     done
     # What: prod uses the CA the quickstart clients trust
     # Why: another CA would break every client's TLS trust
@@ -5707,17 +5715,29 @@ validate_compose_config() {
 compose_cache_volume_name() {
     local install_dir="$1" env_file="$2" cache_dir volume
     cache_dir=$(prod_state_dir_for_key CACHE_DIR "$env_file") || exit $?
-    volume=$(compose_config_value "$install_dir" "$env_file" \
-        "[.volumes[]? | select(.driver_opts.device == \$dir) | .name][0]" --arg dir "$cache_dir") || exit $?
-    [[ -n "$volume" ]] || die "The compose config of $install_dir has no volume on $cache_dir (CACHE_DIR)."
-    printf '%s\n' "$volume"
+    # What: one named volume, a proven bind mount, or stop
+    # Why: v0.3 binds CACHE_DIR; a missing mount is an error
+    # From: Issue #1683 | PR #1858
+    volume=$(compose_config_value "$install_dir" "$env_file" --required \
+        "[.volumes[]? | select(.driver_opts.device == \$dir) | .name] as \$n
+         | if (\$n | length) == 1 then \$n[0]
+           elif (\$n | length) > 1 then null
+           elif any(.services[]?.volumes[]?;
+                    .type == \"bind\" and .source == \$dir) then \"-\"
+           else null end" --arg dir "$cache_dir") || exit $?
+    [[ "$volume" = "-" ]] || printf '%s\n' "$volume"
 }
 
 # What: the named volumes that carry project label $1
 # Why: one owner of the label filter and its error
 # From: Issue #1683 | PR #2017
 compose_project_volumes() {
-    docker volume ls --filter "label=com.docker.compose.project=$1" --format '{{.Name}}' \
+    local -a filters=(--filter "label=com.docker.compose.project=$1")
+    # What: optional key $2 picks one volume by its label
+    # Why: an old volume can outlive its key in compose
+    # From: Issue #1683 | PR #1858
+    [[ -z "${2:-}" ]] || filters+=(--filter "label=com.docker.compose.volume=$2")
+    docker volume ls "${filters[@]}" --format '{{.Name}}' \
         || die "Failed to list the volumes of compose project $1 (exit $?)."
 }
 
@@ -5728,7 +5748,7 @@ compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
     compose_stack_or_skip "$install_dir" "Listing the Docker volumes" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    project=$(compose_config_value "$install_dir" "$env_file" .name) || exit $?
+    project=$(compose_config_value "$install_dir" "$env_file" --required .name) || exit $?
     containers=$(stack_compose "$install_dir" "$env_file" ps --all -q) \
         || die "Failed to list the containers of $install_dir (exit $?)."
     while IFS= read -r container; do
@@ -6157,7 +6177,7 @@ cmd_restore() (
     # From: Issue #1683 | PR #1858
     archived_project=""
     if command_available docker; then
-        archived_project=$(compose_config_value "$root/$rel_install" "$archived_env" .name) || exit $?
+        archived_project=$(compose_config_value "$root/$rel_install" "$archived_env" --required .name) || exit $?
     fi
     guard_restore_shared_project_volumes "$install_dir" "$archived_here" "$archived_project"
 
@@ -7920,7 +7940,8 @@ ui_data_volume() {
         print_skip "Reading the old Admin UI settings: docker is not available"
         return 0
     fi
-    volume=$(compose_config_value "$install_dir" "$env_file" ".volumes[\$k].name" --arg k ui-data) || exit $?
+    volume=$(compose_config_value "$install_dir" "$env_file" --required \
+        ".volumes[\$k].name" --arg k ui-data) || exit $?
     docker_volume_exists "$volume" || rc=$?
     [[ "$rc" -eq 1 ]] && return 0
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the old Admin UI settings were not read."
@@ -8260,18 +8281,15 @@ logbundle_named_volume_listing() {
         printf 'docker not available; skipped\n' > "$out"
         return 0
     fi
-    local volume err rc=0 prc=0
-    volume=$(compose_config_value "$install_dir" "$env_file" ".volumes[\$k].name" --arg k "$base_name") || prc=$?
+    local volume project prc=0
+    project=$(compose_config_value "$install_dir" "$env_file" --required .name) || prc=$?
+    [[ "$prc" -ne 0 ]] || volume=$(compose_project_volumes "$project" "$base_name" 2>&1) || prc=$?
     if [[ "$prc" -ne 0 ]]; then
-        printf 'compose project lookup failed (exit %s); see the setup.sh output\n' "$prc" > "$out"
+        printf 'volume lookup failed (exit %s); see the setup.sh output\n' "$prc" > "$out"
         return 0
     fi
-    err=$(docker_volume_exists "$volume" 2>&1) || rc=$?
-    if [[ "$rc" -eq 1 ]]; then
-        printf 'volume %s not found (not created yet)\n' "$volume" > "$out"
-        return 0
-    elif [[ "$rc" -ne 0 ]]; then
-        printf 'volume lookup failed: %s\n' "$err" > "$out"
+    if [[ -z "$volume" ]]; then
+        printf 'volume %s of project %s not found (not created yet)\n' "$base_name" "$project" > "$out"
         return 0
     fi
     helper_run "${volume}:/data:ro" -- \
@@ -8562,12 +8580,21 @@ json_value() {
 # Why: compose owns ports and mounts; setup keeps no copy
 # From: Issue #1683 | PR #1858
 compose_config_value() {
-    local install_dir="$1" env_file="$2" filter="$3" cfg
-    shift 3
+    local install_dir="$1" env_file="$2" required=0 filter cfg value
+    shift 2
+    # What: --required stops on an empty or null answer
+    # Why: an empty name would make callers skip real data
+    # From: Issue #1683 | PR #1858
+    [[ "$1" != "--required" ]] || { required=1; shift; }
+    filter="$1"
+    shift
     cfg=$(stack_compose "$install_dir" "$env_file" config --format json) \
         || die "Cannot render the compose config of $install_dir (exit $?)."
-    json_value "$filter" "$cfg" "$@" \
+    value=$(json_value "$filter" "$cfg" "$@") \
         || die "Cannot read $filter from the compose config of $install_dir (exit $?)."
+    [[ "$required" -eq 0 || -n "$value" ]] \
+        || die "The compose config of $install_dir has no value for $filter ($*)."
+    printf '%s\n' "$value"
 }
 
 # What: one Kea Control Agent command, as the UI sends it
