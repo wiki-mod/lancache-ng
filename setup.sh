@@ -6631,17 +6631,22 @@ _verify_healthz_endpoint() {
     return 0
 }
 
+# What: host IPs where service $1 publishes $2 port $3
+# Why: compose owns the binds of primary and secondary
+# From: Issue #1683 | PR #2017
+service_published_ips() {
+    compose_config_value "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
+        "[.services[\$svc].ports[]? | select(.protocol == \$proto and (.published | tostring) == \$port and (.host_ip // \"\") != \"\") | .host_ip] | unique | .[]" \
+        --arg svc "$1" --arg proto "$2" --arg port "$3"
+}
+
 # What: functional checks: proxy /healthz and DNS query
 # Why: healthy alone does not prove a real answer
 # From: Issue #1683 | PR #1858
 verify_stack_functional_health() {
-    local ip_http ip_https https_enabled test_fqdn resolved proxy_svc dns_svc
-    local dns_port dns_ips
+    local test_fqdn resolved proxy_svc dns_svc port ips ip
     local -a probe=() stack_svcs=()
 
-    ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
-    ip_https=$(get_env_var IP_HTTPS "$_UPDATE_ENV_FILE") || exit $?
-    https_enabled=$(env_or_sot_default HTTPS_ENABLED "$_UPDATE_ENV_FILE") || exit $?
     # What: only services that should run are probed
     # Why: a service the user stopped must not fail the gate
     # From: Issue #1683
@@ -6659,36 +6664,33 @@ verify_stack_functional_health() {
     elif ! array_has "$proxy_svc" "${probe[@]}"; then
         print_skip "Proxy probe: $proxy_svc is in SERVICES_STOPPED"
     else
-        if [[ -n "$ip_http" ]]; then
-            _verify_healthz_endpoint "$proxy_svc" "$ip_http" || return 1
+        port=$(prod_env_default PROXY_HTTP_PORT) || exit $?
+        ips=$(service_published_ips "$proxy_svc" tcp "$port") || exit $?
+        if [[ -z "$ips" ]]; then
+            print_error "Functional check failed: $proxy_svc publishes port ${port} on no host IP"
+            return 1
         fi
-        if [[ "$https_enabled" = "1" && -n "$ip_https" ]]; then
-            _verify_healthz_endpoint "$proxy_svc" "$ip_https" || return 1
-        fi
+        for ip in $ips; do
+            _verify_healthz_endpoint "$proxy_svc" "$ip" || return 1
+        done
     fi
 
     # What: dig an exact, non-wildcard cdn-domains.txt host
     # Why: wildcard-only RPZ entries never match their apex
     # From: Issue #1149 | PR #1150
     test_fqdn=$(prod_env_default SETUP_DNS_PROBE_NAME) || exit $?
-    # What: DNS is asked on each host IP dns publishes on
-    # Why: compose owns the binds of primary and secondary
-    # From: Issue #1683 | PR #2017
-    local ip
     if ! array_has "$dns_svc" "${stack_svcs[@]}"; then
         print_skip "DNS probe: this stack has no $dns_svc"
     elif ! array_has "$dns_svc" "${probe[@]}"; then
         print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
     else
-        dns_port=$(prod_env_default DNS_PORT) || exit $?
-        dns_ips=$(compose_config_value "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
-            "[.services[\$svc].ports[]? | select(.protocol == \"udp\" and (.published | tostring) == \$port and (.host_ip // \"\") != \"\") | .host_ip] | unique | .[]" \
-            --arg svc "$dns_svc" --arg port "$dns_port")
-        if [[ -z "$dns_ips" ]]; then
-            print_error "Functional check failed: $dns_svc publishes port ${dns_port} on no host IP"
+        port=$(prod_env_default DNS_PORT) || exit $?
+        ips=$(service_published_ips "$dns_svc" udp "$port") || exit $?
+        if [[ -z "$ips" ]]; then
+            print_error "Functional check failed: $dns_svc publishes port ${port} on no host IP"
             return 1
         fi
-        for ip in $dns_ips; do
+        for ip in $ips; do
             require_functional_check_tool dig "the DNS resolution probe" || return 1
             if ! resolved=$(dns_short_answer "$ip" "" A "$test_fqdn"); then
                 print_error "Functional check failed: DNS did not resolve ${test_fqdn} via ${ip}: ${resolved}"
