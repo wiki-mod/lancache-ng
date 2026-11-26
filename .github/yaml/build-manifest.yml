@@ -1308,14 +1308,11 @@ runtime:
     # Why: setup.sh rejects a longer session.
     # From: Issue #1683 | PR #2020
     - UI_SESSION_TTL_MAX_SECONDS=31536000
-    # What: state subdirs setup.sh makes for syslog-ng, NTP.
-    # Why: setup.sh reads them when it lays out the host.
+    # What: state subdir names below the install dir.
+    # Why: setup.sh reads them through state_dir_keys.
     # From: Issue #1683 | PR #2020
     - STATE_SUBDIR_SYSLOG_NG=syslog-ng
     - STATE_SUBDIR_NTP=ntp
-    # What: more state subdir names below the install dir.
-    # Why: unread in every release; setup.sh has own names.
-    # From: Issue #1683 | PR #2020
     - STATE_SUBDIR_CACHEHAMSTER=cachehamster
     - STATE_SUBDIR_PDNS=pdns
     - STATE_SUBDIR_PDNS_FILTER=pdns-filter-state
