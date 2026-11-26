@@ -16130,6 +16130,21 @@ mod ui {
     // Why: a broken file or a missing key stops the start.
     // From: Issue #1683 | PR #1980
     pub(crate) fn texts(dir: &str) -> Result<Texts, String> {
+        let all = lang_files(dir)?;
+        let report = lang_report(&all);
+        if report["equal"] != json!(true) {
+            return Err(format!(
+                "lang: the files differ in their keys: {}",
+                report["missing"]
+            ));
+        }
+        Ok(all)
+    }
+
+    // What: every language file, parsed.
+    // Why: start and the lang check read the same files.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn lang_files(dir: &str) -> Result<Texts, String> {
         let mut all = Texts::new();
         for (name, body) in folder(dir, "json")? {
             let code = name.trim_end_matches(".json").to_string();
@@ -16137,11 +16152,32 @@ mod ui {
                 serde_json::from_str(&body).map_err(|e| format!("lang {code}: {e}"))?;
             all.insert(code, map);
         }
-        let keys: Vec<Vec<&String>> = all.values().map(|m| m.keys().collect()).collect();
-        if keys.windows(2).any(|w| w[0] != w[1]) {
-            return Err("lang: the files differ in their keys".into());
-        }
         Ok(all)
+    }
+
+    // What: languages, key counts, missing keys each.
+    // Why: names the key a page would show raw.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn lang_report(all: &Texts) -> Value {
+        let union: std::collections::BTreeSet<&String> =
+            all.values().flat_map(|m| m.keys()).collect();
+        let mut missing = serde_json::Map::new();
+        let mut langs = Vec::new();
+        for (code, map) in all {
+            let gone: Vec<&&String> = union.iter().filter(|k| !map.contains_key(**k)).collect();
+            if !gone.is_empty() {
+                missing.insert(code.clone(), json!(gone));
+            }
+            langs.push(json!({"lang": code, "keys": map.len()}));
+        }
+        json!({"languages": langs, "keys": union.len(), "equal": missing.is_empty(), "missing": missing})
+    }
+
+    // What: GET language report of the loaded files.
+    // Why: REST read on the check of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn lang_api(State(_app): Shared) -> Response {
+        json_reply(Ok(Some(lang_report(all_texts()))), "")
     }
 
     // What: language of one request.
@@ -16256,6 +16292,21 @@ mod ui {
             // Why: CI reads token the register API checks.
             // From: Issue #1683 | PR #2020
             Some("registration-token") => Some(registration_token(s).map(|t| println!("{t}"))),
+            // What: language files on disk, key check.
+            // Why: a missing key would show raw on a page.
+            // From: Issue #1683 | PR #2020
+            Some("lang") => Some(
+                s.text("LANG_DIR")
+                    .and_then(|d| lang_files(&d))
+                    .and_then(|all| {
+                        let v = lang_report(&all);
+                        println!("{v}");
+                        match v["equal"].as_bool() {
+                            Some(true) => Ok(()),
+                            _ => Err("lang: the files differ in their keys".into()),
+                        }
+                    }),
+            ),
             Some("zone-rollback") => Some(match &args[1..] {
                 [zone, id] => rollback(s, zone, id).await.map(|()| {
                     println!("{}", json!({"restored": zone, "snapshot": id}));
@@ -16278,11 +16329,12 @@ mod ui {
     // What: every command of ui role; none = the server.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 8] = [
+    const COMMANDS: [&str; 9] = [
         "hash-password",
         "encode-password-hash",
         "zone-snapshots",
         "registration-token",
+        "lang",
         "zone-rollback",
         "healthcheck",
         DHCP_PROBE_CMD,
@@ -16410,6 +16462,7 @@ mod ui {
             .route(&p("UI_ROUTE_STATS_SAMPLE")?, post(stats_sample_api))
             .route(&p("UI_ROUTE_LOGS_SAVE")?, post(logs_save))
             .route(&p("UI_ROUTE_LOGS")?, get(logs_api))
+            .route(&p("UI_ROUTE_LANG")?, get(lang_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
