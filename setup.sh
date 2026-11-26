@@ -2873,7 +2873,7 @@ restore_quickstart_mounts() {
 # Why: AG-KD-008 one profile; AG-OP-007 convergence
 # From: Issue #1683 | PR #1858
 migrate_quickstart_install() (
-    local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" new_env old_env record project key value volume dir copy f
+    local old_dir="$1" stack_dir="${PROD_COMPOSE%/*}" new_env old_env record key value volume dir copy f
     local old_volumes prod_volumes rows missing copies keys old_raw new_raw old_value line path_keys bundle
     local https_ip fresh kept kept_list restored
     local -a copy_lines path_key_list=()
@@ -2900,8 +2900,6 @@ migrate_quickstart_install() (
     # From: Issue #1683 | PR #1858
     start_update_convergence_pause
     capture_stack_health_baseline "$old_dir" "$old_env"
-    project=$(compose_project_name "$old_dir" "$old_env") \
-        || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
     # What: a retry without live copies starts afresh
     # Why: a failed run's .env must not block a retry
     # From: Issue #1683 | PR #1858
@@ -2978,7 +2976,7 @@ migrate_quickstart_install() (
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
         if list_has_line "$volume" "$kept_list"; then
-            kept+=" ${project}_${volume}"
+            kept+=" $(stack_volume_name "$old_dir" "$old_env" "$volume")" || exit $?
             continue
         fi
         missing+=" $volume"
@@ -2999,7 +2997,8 @@ migrate_quickstart_install() (
         || die "Cannot resolve the state directories of $new_env (exit $?)."
     mapfile -t copy_lines <<< "$copies"
     for line in "${copy_lines[@]}"; do
-        copy_volume_to_dir "${project}_${line%% *}" "${line#* }" "$record"
+        volume=$(stack_volume_name "$old_dir" "$old_env" "${line%% *}") || exit $?
+        copy_volume_to_dir "$volume" "${line#* }" "$record"
     done
     # What: prod uses the CA the quickstart clients trust
     # Why: another CA would break every client's TLS trust
@@ -5628,8 +5627,7 @@ compose_project_name() {
 # Why: the prod compose owns the name; works pre-create
 # From: Issue #1683 | PR #1858
 compose_cache_volume_name() {
-    local install_dir="$1" env_file="$2" project volume
-    project=$(compose_project_name "$install_dir" "$env_file") || exit $?
+    local install_dir="$1" env_file="$2" volume
     volume=$(awk '
         /^volumes:/ { v = 1; next }
         v && /^[^ #]/ { v = 0 }
@@ -5637,7 +5635,17 @@ compose_cache_volume_name() {
         v && /device: *\$\{CACHE_DIR[:}]/ { print name; exit }' "$PROD_COMPOSE") \
         || die "Failed to read $PROD_COMPOSE (exit $?)."
     [[ -n "$volume" ]] || die "$PROD_COMPOSE defines no CACHE_DIR-backed volume."
-    printf '%s_%s\n' "$project" "$volume"
+    stack_volume_name "$install_dir" "$env_file" "$volume"
+}
+
+# What: the Docker name of volume key $3 of a stack
+# Why: compose names it <project>_<key>; no name: is set
+# From: Issue #1683 | PR #2017
+stack_volume_name() {
+    local project
+    project=$(compose_project_name "$1" "$2") \
+        || die "Cannot resolve the compose project of $1 (exit $?)."
+    printf '%s_%s\n' "$project" "$3"
 }
 
 # What: the named volumes that carry project label $1
@@ -7809,14 +7817,12 @@ lancache_selectable_channels() {
 # Why: docker run -v would create a missing volume
 # From: Issue #1683 | PR #2017
 ui_data_volume() {
-    local install_dir="$1" env_file="$2" project volume rc=0
+    local install_dir="$1" env_file="$2" volume rc=0
     if ! command_available docker; then
         print_skip "Reading the old Admin UI settings: docker is not available"
         return 0
     fi
-    project=$(compose_project_name "$install_dir" "$env_file") \
-        || die "Cannot resolve the compose project of $install_dir (exit $?)."
-    volume="${project}_ui-data"
+    volume=$(stack_volume_name "$install_dir" "$env_file" ui-data) || exit $?
     docker_volume_exists "$volume" || rc=$?
     [[ "$rc" -eq 1 ]] && return 0
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the old Admin UI settings were not read."
@@ -8172,13 +8178,12 @@ logbundle_named_volume_listing() {
         printf 'docker not available; skipped\n' > "$out"
         return 0
     fi
-    local project volume err rc=0 prc=0
-    project=$(compose_project_name "$install_dir" "$env_file") || prc=$?
+    local volume err rc=0 prc=0
+    volume=$(stack_volume_name "$install_dir" "$env_file" "$base_name") || prc=$?
     if [[ "$prc" -ne 0 ]]; then
         printf 'compose project lookup failed (exit %s); see the setup.sh output\n' "$prc" > "$out"
         return 0
     fi
-    volume="${project}_${base_name}"
     err=$(docker_volume_exists "$volume" 2>&1) || rc=$?
     if [[ "$rc" -eq 1 ]]; then
         printf 'volume %s not found (not created yet)\n' "$volume" > "$out"
