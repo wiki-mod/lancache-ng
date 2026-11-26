@@ -473,6 +473,26 @@ ipv4_cidr_split() {
         && (( _cidr_bits_ref <= 32 ))
 }
 
+# What: $2 = IPv4; ::ffff:IPv4 as IPv4; else IPv6 full
+# Why: one value form for every address comparison
+# From: Issue #1918 | PR #2017
+ip_value_form() {
+    local -n _ipv_form_ref="$2"
+    local _ipv_full _ipv_hi _ipv_lo
+    if is_valid_ipv4 "$1"; then
+        _ipv_form_ref="$1"
+    elif is_valid_ipv6 "$1" _ipv_full; then
+        _ipv_form_ref="$_ipv_full"
+        [[ "$_ipv_full" == 0:0:0:0:0:ffff:* ]] || return 0
+        _ipv_lo="${_ipv_full##*:}" _ipv_hi="${_ipv_full%:*}"
+        _ipv_hi="${_ipv_hi##*:}"
+        printf -v _ipv_form_ref '%d.%d.%d.%d' $(( 16#$_ipv_hi >> 8 )) $(( 16#$_ipv_hi & 255 )) \
+            $(( 16#$_ipv_lo >> 8 )) $(( 16#$_ipv_lo & 255 ))
+    else
+        return 1
+    fi
+}
+
 # What: true if an IPv4 lies inside an IPv4 CIDR
 # Why: LOOPBACK_NETS names loopback as nets, not as IPs
 # From: Issue #1918 | PR #1858
@@ -511,27 +531,31 @@ dns_upstream_split() {
 # Why: the prompt names the reason while the user types
 # From: Issue #1918 | PR #1858
 dns_upstream_server_problem() {
-    local entry="$1" own="$2" host port net nets host6="" net6=""
-    local -a loopback_nets
+    local entry="$1" own="$2" host port net nets addr="" other=""
+    local -a loopback_nets own_ips
     local split_rc=0
     dns_upstream_split "$entry" host port || split_rc=$?
     nets=$(prod_env_default LOOPBACK_NETS) || exit $?
     read -r -a loopback_nets <<< "$nets"
+    read -r -a own_ips <<< "${own//,/ }"
     if [[ "$split_rc" != 0 ]] || { [[ -n "$port" ]] && ! uint_in_range "$port" 1 65535; }; then
         printf "'%s' has no port from 1 to 65535\n" "$entry"
-    elif ! is_valid_ipv4 "$host" && ! is_valid_ipv6 "$host"; then
+    elif ! ip_value_form "$host" addr; then
         printf "'%s' is no IPv4 or IPv6 address\n" "$entry"
-    elif [[ "$host" =~ ^[0:.]+$ ]]; then
+    elif [[ "$addr" = 0.0.0.0 || "$addr" = 0:0:0:0:0:0:0:0 ]]; then
         printf "'%s' is the unspecified address, not a DNS server\n" "$entry"
-    elif [[ ",${own}," == *",${host},"* ]]; then
-        printf "'%s' is a LanCache-NG address; forwarding to it would loop\n" "$entry"
     else
-        # What: IPv6 nets compare in full form, IPv4 as CIDR
-        # Why: 0::1 and ::1 are the same loopback address
-        # From: Issue #1918
+        # What: own IPs and loopback nets compare by value
+        # Why: 0::1 is ::1; ::ffff:192.0.2.1 is 192.0.2.1
+        # From: Issue #1918 | PR #2017
+        for net in "${own_ips[@]}"; do
+            if ip_value_form "$net" other && [[ "$other" = "$addr" ]]; then
+                printf "'%s' is a LanCache-NG address; forwarding to it would loop\n" "$entry"
+                return 0
+            fi
+        done
         for net in "${loopback_nets[@]}"; do
-            if { is_valid_ipv6 "$host" host6 && is_valid_ipv6 "$net" net6 && [[ "$host6" = "$net6" ]]; } \
-                || ipv4_in_cidr "$host" "$net"; then
+            if { ip_value_form "$net" other && [[ "$other" = "$addr" ]]; } || ipv4_in_cidr "$addr" "$net"; then
                 printf "'%s' is this host itself, not an external DNS server\n" "$entry"
                 break
             fi
