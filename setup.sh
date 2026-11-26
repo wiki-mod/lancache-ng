@@ -1935,11 +1935,11 @@ _compose_parse_env_value() {
     printf '%s' "$value"
 }
 
-# What: raw values of KEY= lines; the last one, or all
-# Why: compose uses the last; a read error must stop
+# What: KEY= lines raw: last, all, nonempty or exists (0/1)
+# Why: one reader of a key's lines; a read error must stop
 # From: Issue #1683 | PR #1858
 env_raw_assignments() {
-    local key="$1" env_file="$2" mode="$3" scope="${4:-}" out f
+    local key="$1" env_file="$2" mode="$3" scope="${4:-}" out f raw found=""
     local -a files=()
     # What: <file>.local is read too, but not on "only"
     # Why: its lines win, as in compose's second env file
@@ -1948,11 +1948,27 @@ env_raw_assignments() {
         [[ "$f" != "$env_file.local" || "$scope" != only ]] || continue
         [[ ! -e "$f" ]] || files+=("$f")
     done
-    [[ ${#files[@]} -gt 0 ]] || return 0
+    if [[ ${#files[@]} -eq 0 ]]; then
+        [[ "$mode" != exists ]]
+        return
+    fi
     out=$(awk -F= -v key="$key" -v mode="$mode" '
-        $1 == key { sub(/^[^=]*=/, ""); last = $0; seen = 1; if (mode == "all") print }
-        END { if (mode == "last" && seen) print last }' "${files[@]}") \
+        $1 == key { sub(/^[^=]*=/, ""); last = $0; seen = 1; if (mode == "all" || mode == "nonempty") print }
+        END { if (mode == "last" && seen) print last; if (mode == "exists" && seen) print 1 }' "${files[@]}") \
         || die "Failed to read $key from ${files[*]} (exit $?)."
+    case "$mode" in
+        exists) [[ -n "$out" ]]; return ;;
+        # What: the last line with a non-empty parsed value
+        # Why: repairs an empty later line; else the last
+        # From: Issue #1683 | PR #1858
+        nonempty)
+            while IFS= read -r raw; do
+                [[ -z "$(_compose_parse_env_value "$raw")" ]] || found="$raw"
+            done <<< "$out"
+            printf '%s' "$found"
+            return 0
+            ;;
+    esac
     [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
@@ -1969,64 +1985,15 @@ env_file_keys() {
 # From: Issue #1683 | PR #1858
 get_env_var() {
     local raw
-    raw=$(env_raw_assignments "$1" "$2" last) \
+    raw=$(env_raw_assignments "$1" "$2" "${3:-last}") \
         || die "Cannot read $1 from $2 (exit $?)."
     _compose_parse_env_value "$raw"
-}
-
-# What: the last non-empty parsed value of a key, or ""
-# Why: repairs an empty later line; else compose's winner
-# From: Issue #1683 | PR #1858
-get_env_var_nonempty() {
-    local raw
-    raw=$(get_env_assignment_value_raw_nonempty "$1" "$2") \
-        || die "Cannot read $1 from $2 (exit $?)."
-    _compose_parse_env_value "$raw"
-}
-
-# What: the raw text of the assignment compose uses
-# Why: migrations copy quoting and ${VAR} verbatim
-# From: Issue #1683 | PR #1858
-get_env_assignment_value_raw() {
-    env_raw_assignments "$1" "$2" last
-}
-
-# What: the raw text of the last non-empty assignment
-# Why: migrations keep a real value over an empty one
-# From: Issue #1683 | PR #1858
-get_env_assignment_value_raw_nonempty() {
-    local key="$1" env_file="$2" raw lines found=""
-    lines=$(env_raw_assignments "$key" "$env_file" all) \
-        || die "Cannot read $key from $env_file (exit $?)."
-    while IFS= read -r raw; do
-        [[ -z "$(_compose_parse_env_value "$raw")" ]] || found="$raw"
-    done <<< "$lines"
-    printf '%s' "$found"
 }
 
 # What: .env helpers for install, update and migration
 # Why: setup.sh owns these for curl | bash users
 # From: Issue #1683 | PR #1858
 
-# What: true if KEY= is assigned; a missing file has none
-# Why: a read error must stop setup, never read as absent
-# From: Issue #1683 | PR #1858
-env_key_exists() {
-    local key="$1" env_file="$2" rc=0 hits
-    [[ -e "$env_file" ]] || return 1
-    hits=$(grep "^${key}=" "$env_file") || rc=$?
-    [[ "$rc" -le 1 ]] || die "Failed to read $env_file while looking up $key (exit $rc)."
-    [[ -n "$hits" ]]
-}
-
-# What: true if the key has a non-empty parsed value
-# Why: empty values count as unset for setup decisions
-# From: Issue #1683 | PR #1858
-env_key_has_value() {
-    local key="$1" env_file="$2" value
-    value=$(get_env_var "$key" "$env_file") || exit $?
-    [[ -n "$value" ]]
-}
 
 # What: true for empty, CHANGE_ME_*, <...> and alike
 # Why: placeholders are replaced; real secrets are kept
@@ -2249,7 +2216,7 @@ rewrite_env_key_locked() {
 # From: Issue #1683 | PR #2017
 warn_env_key_overridden() {
     local key="$1" env_file="$2"
-    env_key_exists "$key" "$env_file.local" || return 0
+    env_raw_assignments "$key" "$env_file.local" exists only || return 0
     print_warn "$key is also set in $env_file.local, which wins over $env_file; remove it there to use the value of $env_file." >&2
 }
 
@@ -2283,7 +2250,7 @@ set_env_assignment() {
     local key="$1" assignment_value="$2" env_file="$3"
     validate_env_assignment "$key" "$assignment_value"
 
-    if env_key_exists "$key" "$env_file"; then
+    if env_raw_assignments "$key" "$env_file" exists only; then
         rewrite_env_key "$env_file" "$key" "$assignment_value" set
     else
         append_env_line "$env_file" "$key" "$assignment_value"
@@ -2300,7 +2267,7 @@ append_env_key_if_missing() {
     # What: adds the key only when absent
     # Why: empty placeholders must survive updates
     # From: Issue #1683 | PR #1858
-    env_key_exists "$key" "$env_file" \
+    env_raw_assignments "$key" "$env_file" exists only \
         || set_env_assignment "$key" "$value" "$env_file"
 }
 
@@ -2310,11 +2277,11 @@ append_env_key_if_missing() {
 set_env_key_if_empty_or_missing() {
     local key="$1" value="$2" env_file="$3" existing_assignment
     validate_env_value "$key" "$value"
-    if env_key_exists "$key" "$env_file"; then
+    if env_raw_assignments "$key" "$env_file" exists only; then
         # What: keeps an existing non-empty assignment
         # Why: Compose interpolation must survive updates
         # From: Issue #1683 | PR #1858
-        existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file") || exit $?
+        existing_assignment=$(env_raw_assignments "$key" "$env_file" nonempty) || exit $?
         if [[ -n "$existing_assignment" ]]; then
             set_env_assignment "$key" "$existing_assignment" "$env_file"
         else
@@ -2334,7 +2301,7 @@ append_env_migrated_assignment_if_missing() {
     # What: keeps an existing empty optional target as is
     # Why: an empty value keeps Compose's fallback alive
     # From: Issue #1683 | PR #1858
-    if env_key_exists "$target_key" "$env_file"; then
+    if env_raw_assignments "$target_key" "$env_file" exists only; then
         return 0
     fi
 
@@ -2348,13 +2315,13 @@ env_assign_from_source_or_fallback() {
     local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
     local source_assignment
 
-    source_assignment=$(get_env_assignment_value_raw_nonempty "$source_key" "$env_file") || exit $?
+    source_assignment=$(env_raw_assignments "$source_key" "$env_file" nonempty) || exit $?
     if [[ -n "$source_assignment" ]]; then
         # What: rewrites an empty migrated target in place
         # Why: avoids duplicate KEY= lines on update
         # From: Issue #1683 | PR #1858
         set_env_assignment "$target_key" "$source_assignment" "$env_file"
-    elif env_key_exists "$target_key" "$env_file" || [[ -n "$fallback_value" ]]; then
+    elif env_raw_assignments "$target_key" "$env_file" exists only || [[ -n "$fallback_value" ]]; then
         set_env_key "$target_key" "$fallback_value" "$env_file"
     fi
 }
@@ -2369,7 +2336,7 @@ append_required_env_migrated_assignment_if_empty_or_missing() {
     # What: keeps a non-empty duplicate target value
     # Why: updates must converge on the operator's real dir
     # From: Issue #1683 | PR #1858
-    target_assignment=$(get_env_assignment_value_raw_nonempty "$target_key" "$env_file") || exit $?
+    target_assignment=$(env_raw_assignments "$target_key" "$env_file" nonempty) || exit $?
     if [[ -n "$target_assignment" ]]; then
         set_env_assignment "$target_key" "$target_assignment" "$env_file"
         return 0
@@ -2466,7 +2433,7 @@ set_optional_env_path_override_if_needed() {
     local key="$1" desired_path="$2" derived_path="$3" env_file="$4"
     local existing_assignment
 
-    existing_assignment=$(get_env_assignment_value_raw_nonempty "$key" "$env_file") || exit $?
+    existing_assignment=$(env_raw_assignments "$key" "$env_file" nonempty) || exit $?
     if [[ -n "$existing_assignment" ]]; then
         if [[ "$existing_assignment" = "$derived_path" ]]; then
             remove_env_key "$key" "$env_file"
@@ -2494,7 +2461,7 @@ set_optional_env_path_override_if_needed() {
 remove_env_key() {
     local key="$1" env_file="$2"
 
-    env_key_exists "$key" "$env_file" || return 0
+    env_raw_assignments "$key" "$env_file" exists only || return 0
     rewrite_env_key "$env_file" "$key" "" remove
     warn_env_key_overridden "$key" "$env_file"
 }
@@ -2558,7 +2525,7 @@ install_dir_is() {
     # From: Issue #1683 | PR #2017
     if [[ "$dir" = "$PROD_STACK_REL" || "$dir" = */"$PROD_STACK_REL" ]]; then
         found=prod
-    elif env_key_exists LISTEN_IP "$dir/.env"; then
+    elif env_raw_assignments LISTEN_IP "$dir/.env" exists only; then
         found=secondary
     elif [[ -f "$dir/docker-compose.yml" && -f "$PROD_COMPOSE" ]]; then
         found=quickstart
@@ -3032,7 +2999,7 @@ migrate_quickstart_install() (
     # What: without a state root the old dir becomes it
     # Why: the old stack kept its data inside its checkout
     # From: Issue #1683 | PR #2017
-    if ! env_key_exists LANCACHE_STATE_DIR "$new_env"; then
+    if ! env_raw_assignments LANCACHE_STATE_DIR "$new_env" exists only; then
         set_env_key LANCACHE_STATE_DIR "$old_dir" "$new_env"
     fi
     # What: relative paths become absolute to old dir
@@ -3055,8 +3022,8 @@ migrate_quickstart_install() (
             [[ -z "$old_value" || "$old_value" == /* ]] || old_value=$(realpath -m "$old_dir/$old_value")
             [[ "$new_raw" == "$old_value" ]] && continue
         else
-            old_raw=$(get_env_assignment_value_raw "$key" "$old_env") || die "Cannot read $key from $old_env (exit $?)."
-            new_raw=$(get_env_assignment_value_raw "$key" "$new_env") || die "Cannot read $key from $new_env (exit $?)."
+            old_raw=$(env_raw_assignments "$key" "$old_env" last) || die "Cannot read $key from $old_env (exit $?)."
+            new_raw=$(env_raw_assignments "$key" "$new_env" last) || die "Cannot read $key from $new_env (exit $?)."
             [[ "$new_raw" == "$old_raw" ]] && continue
         fi
         die "Postcondition failed: $key in $new_env differs from $old_env; nothing counts as migrated."
@@ -3823,19 +3790,19 @@ adopt_moved_config_prod_keys() {
     # From: Issue #1683 | PR #1858
     while read -r svc key target; do
         local_env="$repo_root/config/prod/$svc.local.env"
-        env_key_exists "$key" "$local_env" || continue
+        env_raw_assignments "$key" "$local_env" exists only || continue
         if [[ "$step" = drop ]]; then
             remove_env_key "$key" "$local_env"
             print_ok "Moved $key from ${local_env##*/} into ${env_file##*/}${target:+ as $target}"
             continue
         fi
-        raw=$(get_env_assignment_value_raw "$key" "$local_env") \
+        raw=$(env_raw_assignments "$key" "$local_env" last) \
             || die "Cannot read $key from $local_env (exit $?)."
         if [[ -z "$target" ]]; then
             set_env_assignment "$key" "$raw" "$env_file"
             continue
         fi
-        current=$(get_env_assignment_value_raw "$target" "$env_file") \
+        current=$(env_raw_assignments "$target" "$env_file" last) \
             || die "Cannot read $target from $env_file (exit $?)."
         [[ "$raw" == "$current" ]] \
             || die "$key=$raw in $local_env differs from $target=$current in $env_file; both must be the same address. Set $target, remove $key from $local_env, then rerun setup.sh update."
@@ -3895,11 +3862,11 @@ adopt_config_prod_edits() {
             keys=$(env_file_keys "$template") || exit $?
             while IFS= read -r key; do
                 [[ -n "$key" ]] || continue
-                raw=$(get_env_assignment_value_raw "$key" "$template") \
+                raw=$(env_raw_assignments "$key" "$template" last) \
                     || die "Cannot read $key from $template (exit $?)."
-                head_raw=$(get_env_assignment_value_raw "$key" /dev/stdin <<< "$head") \
+                head_raw=$(env_raw_assignments "$key" /dev/stdin last <<< "$head") \
                     || die "Cannot read $key from HEAD:$rel (exit $?)."
-                if [[ "$raw" != "$head_raw" ]] || ! env_key_exists "$key" /dev/stdin <<< "$head"; then
+                if [[ "$raw" != "$head_raw" ]] || ! env_raw_assignments "$key" /dev/stdin exists only <<< "$head"; then
                     set_env_assignment "$key" "$raw" "$local_env"
                 fi
             done <<< "$keys"
@@ -3973,8 +3940,9 @@ replace_literal_in_file() {
 # Why: update must not run with an unusable configuration
 # From: Issue #1683 | PR #1858
 require_env_value_for_update() {
-    local key="$1" env_file="$2"
-    env_key_has_value "$key" "$env_file" \
+    local key="$1" env_file="$2" value
+    value=$(get_env_var "$key" "$env_file") || exit $?
+    [[ -n "$value" ]] \
         || die "$key is missing or empty in $env_file. Set it before running setup.sh update."
 }
 
@@ -5313,7 +5281,7 @@ migrate_env_for_update() (
     # From: Issue #1683 | PR #1912
     append_env_migrated_assignment_if_missing PDNS_DIR PDNS_STANDARD_DIR "" "$env_file"
     remove_env_key PDNS_STANDARD_DIR "$env_file"
-    if [[ -z "$(get_env_var_nonempty PDNS_DIR "$env_file")" && -d "$state_dir/pdns-standard" && ! -d "$state_dir/pdns" ]]; then
+    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$state_dir/pdns" ]]; then
         set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
     fi
 
@@ -5341,8 +5309,8 @@ migrate_env_for_update() (
     # What: a user cache size fills its missing partner key
     # Why: no size set means the SOT default; none is copied
     # From: Issue #1683 | PR #1912
-    cache_max_size=$(get_env_var_nonempty CACHE_MAX_SIZE "$env_file") || exit $?
-    cache_max_gb=$(get_env_var_nonempty CACHE_MAX_GB "$env_file") || exit $?
+    cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file" nonempty) || exit $?
+    cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file" nonempty) || exit $?
     if cache_gb=$(cache_size_gb_from_env "${cache_max_size:-$cache_max_gb}"); then
         set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
     fi
@@ -8255,7 +8223,7 @@ logbundle_collect_secret_values() {
     for key in "${!key_set[@]}"; do
         for env_file in "${env_files[@]}"; do
             [[ -f "$env_file" ]] || continue
-            value=$(get_env_var_nonempty "$key" "$env_file") \
+            value=$(get_env_var "$key" "$env_file" nonempty) \
                 || die "Cannot read $key from $env_file (exit $?); no log bundle was written."
             [[ -n "$value" ]] || continue
             # What: skips default placeholder secrets
@@ -8930,7 +8898,7 @@ env_keys_snapshot() {
     local env_file="$1" key raw
     shift
     for key in "$@"; do
-        if env_key_exists "$key" "$env_file"; then
+        if env_raw_assignments "$key" "$env_file" exists only; then
             raw=$(env_raw_assignments "$key" "$env_file" last only) || exit $?
             printf '%s=%s\n' "$key" "$raw"
         else
