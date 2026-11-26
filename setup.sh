@@ -5693,19 +5693,6 @@ compose_volume_names() {
     awk 'NF' <<< "$names" | sort -u
 }
 
-# What: true if any named volume carries this project label
-# Why: label survives docker compose down on the volume
-# From: Issue #456 | PR #1673
-compose_project_has_named_volumes() {
-    local project="$1"
-    local volume_names
-    # What: captures the volume listing before testing it
-    # Why: a live pipe can SIGPIPE under pipefail
-    # From: Issue #1683 | PR #1858
-    volume_names=$(compose_project_volumes "$project") || exit $?
-    [[ -n "$volume_names" ]]
-}
-
 # What: copies file or dir $1 to $2 with all attributes
 # Why: backup and restore copy alike; $2 keeps $1's name
 # From: Issue #1683 | PR #2017
@@ -5801,7 +5788,7 @@ container_compose_dirs() {
 # Why: project name is fixed, so volumes are shared
 # From: Issue #456 | PR #1673
 guard_restore_shared_project_volumes() {
-    local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir containers
+    local install_dir="$1" archived_install_dir="$2" project="$3" container working_dir containers project_volumes
     if ! command_available docker; then
         print_skip "Shared-volume guard: docker is not available, so no containers can share the volumes"
         return 0
@@ -5820,7 +5807,8 @@ guard_restore_shared_project_volumes() {
             die "Refusing to restore: compose project '$project' still has containers at $working_dir, which is not the restore target ($install_dir). Both installs share the same Docker-managed volumes because the compose project name is not per-install-dir. Remove the other install's containers first (cd \"$working_dir\" && docker compose down), or restore into $working_dir instead."
         fi
     done <<< "$containers"
-    if [[ "$install_dir" != "$archived_install_dir" ]] && compose_project_has_named_volumes "$project"; then
+    project_volumes=$(compose_project_volumes "$project") || exit $?
+    if [[ "$install_dir" != "$archived_install_dir" && -n "$project_volumes" ]]; then
         die "Refusing to restore: compose project '$project' still has named Docker volumes on this host, but the backup is being restored into a different install directory ($install_dir instead of $archived_install_dir). After docker compose down, Docker keeps the project label on the volumes but no longer retains a reliable install-dir owner marker, so same-host cross-directory restore would be ownership-ambiguous. Restore into $archived_install_dir instead, or remove the existing '$project' volumes first if they are no longer needed."
     fi
 }
