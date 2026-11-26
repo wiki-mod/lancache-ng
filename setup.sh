@@ -1830,12 +1830,13 @@ _compose_parse_env_value() {
 # Why: compose uses the last; a read error must stop
 # From: Issue #1683 | PR #1858
 env_raw_assignments() {
-    local key="$1" env_file="$2" mode="$3" out f
+    local key="$1" env_file="$2" mode="$3" scope="${4:-}" out f
     local -a files=()
-    # What: <file>.local is read after the file itself
+    # What: <file>.local is read too, but not on "only"
     # Why: its lines win, as in compose's second env file
     # From: Issue #1683 | PR #2017
     for f in "$env_file" "$env_file.local"; do
+        [[ "$f" != "$env_file.local" || "$scope" != only ]] || continue
         [[ ! -e "$f" ]] || files+=("$f")
     done
     [[ ${#files[@]} -gt 0 ]] || return 0
@@ -8801,29 +8802,94 @@ reset_dns_to_last_known_good_config() {
     print_ok "PowerDNS sends NOTIFY; secondaries pull the zone by AXFR."
 }
 
-# What: writes the previous .env back and restarts the stack
-# Why: IPs that fail the health gate must not stay active
-# From: Issue #1683 | PR #1858
-restore_update_ip_env() {
-    local install_dir="$1" env_file="$2" saved="$3" rc=0
-    with_env_lock "$env_file" write_file_atomically "$env_file" <<< "$saved" || rc=$?
+# What: "KEY=raw" per assigned key, "KEY" per absent one
+# Why: the way back needs the .env's own text, no .local
+# From: Issue #1683 | PR #2017
+env_keys_snapshot() {
+    local env_file="$1" key raw
+    shift
+    for key in "$@"; do
+        if env_key_exists "$key" "$env_file"; then
+            raw=$(env_raw_assignments "$key" "$env_file" last only) || exit $?
+            printf '%s=%s\n' "$key" "$raw"
+        else
+            printf '%s\n' "$key"
+        fi
+    done
+}
+
+# What: puts each snapshot key back: raw value or absent
+# Why: only these keys; what the ui wrote meanwhile stays
+# From: Issue #1683 | PR #2017
+_env_keys_restore_locked() {
+    local env_file="$1" line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        if [[ "$line" == *=* ]]; then
+            set_env_assignment "${line%%=*}" "${line#*=}" "$env_file"
+        else
+            remove_env_key "$line" "$env_file"
+        fi
+    done <<< "$2"
+}
+
+# What: snapshot keys back, then the stack up and healthy
+# Why: a change that fails a check must not stay active
+# From: Issue #1683 | PR #2017
+rollback_env_keys() {
+    local install_dir="$1" env_file="$2" what="$3" snapshot="$4" rc=0
+    with_env_lock "$env_file" _env_keys_restore_locked "$env_file" "$snapshot" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        print_error "Failed to write the previous $env_file back (exit $rc)."
+        print_error "Failed to write the previous $what back into $env_file (exit $rc)."
         return 1
     fi
     stack_up "$install_dir" "$env_file" -d || rc=$?
     if [[ "$rc" -ne 0 ]]; then
-        print_error "Failed to restart the stack with the previous IPs (exit $rc)."
+        print_error "Failed to restart the stack with the previous $what (exit $rc)."
         return 1
     fi
-    # What: "active again" only for a healthy stack
+    # What: "back" only for a healthy stack
     # Why: a roll-back that did not come up is a failure
     # From: Issue #1683 | PR #2017
     if ! wait_for_whole_stack "$install_dir" "$env_file"; then
-        print_error "The stack with the previous IPs did not become healthy."
+        print_error "The stack with the previous $what did not become healthy."
         return 1
     fi
-    print_warn "The previous IPs are active again"
+    print_warn "Back to the previous $what"
+}
+
+# What: KEY=VALUE pairs written behind the update gate
+# Why: one frame for update-ip and the DNS setting
+# From: Issue #1683 | PR #2017
+apply_env_change_gated() {
+    local -n _change_snapshot_ref="$1"
+    local install_dir="$2" env_file="$3" what="$4" hint="$5" pair rc=0
+    local -a keys=()
+    shift 5
+    for pair in "$@"; do
+        keys+=("${pair%%=*}")
+    done
+    # What: no converge run while the change is applied
+    # Why: both recreate the same containers and collide
+    # From: Issue #1683 | PR #2017
+    pause_convergence_until_exit
+    install_health_gate_tools
+    print_step "Capturing health baseline"
+    capture_stack_health_baseline "$install_dir" "$env_file"
+    _change_snapshot_ref=$(env_keys_snapshot "$env_file" "${keys[@]}") \
+        || die "Cannot read $env_file (exit $?); nothing was changed."
+    print_step "Saving configuration"
+    for pair in "$@"; do
+        set_env_key "${pair%%=*}" "${pair#*=}" "$env_file"
+    done
+    print_ok "Updated: $env_file (${keys[*]})"
+    apply_stack_update_ordered "$install_dir" rollback_env_keys "$install_dir" "$env_file" "$what" \
+        "$_change_snapshot_ref" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) die_with_recovery_help "The new $what failed the health gate; the stack is back to the previous $what.${hint:+ $hint}" "$install_dir" ;;
+        *) die_with_recovery_help "The new $what failed the health gate, and going back to the previous $what failed too. Manual recovery required." "$install_dir" ;;
+    esac
 }
 
 # What: turns the Admin UI sign-in off after a lockout
@@ -8928,89 +8994,31 @@ cmd_update_ip() {
     # From: Issue #1683 | PR #2017
     ensure_host_ipv4 "$new_ip_http" "$current_ip_http"
     ensure_host_ipv4 "$new_ip_https" "$current_ip_http"
-    # What: no converge run while the new IPs are applied
-    # Why: both recreate the same containers and collide
-    # From: Issue #1683 | PR #2017
-    pause_convergence_until_exit
 
-    # What: the same baseline and gate as ./setup.sh update
-    # Why: new IPs that fail the gate must not stay active
-    # From: Issue #1683 | PR #1858
-    local saved_env apply_rc=0
-    install_health_gate_tools
-    print_step "Capturing health baseline"
-    capture_stack_health_baseline "$install_dir" "$deploy_env"
-    saved_env=$(cat -- "$deploy_env") || die "Cannot read $deploy_env (exit $?); nothing was changed."
-
-    print_step "Updating configuration files"
-
-    set_env_key IP_HTTP "$new_ip_http" "$deploy_env"
-    set_env_key IP_HTTPS "$new_ip_https" "$deploy_env"
-    print_ok "Updated: $deploy_env (IP_HTTP, IP_HTTPS)"
-
+    local snapshot
+    local -a changes=("IP_HTTP=$new_ip_http" "IP_HTTPS=$new_ip_https")
     # What: rewrites UI_BIND_IP while it equals old IP
     # Why: an empty or explicit value stays untouched
     # From: Issue #666 | PR #745
     if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_http" ]]; then
-        set_env_key UI_BIND_IP "$new_ip_http" "$deploy_env"
-        print_ok "Updated: $deploy_env (UI_BIND_IP)"
+        changes+=("UI_BIND_IP=$new_ip_http")
     fi
-
     # What: rewrites DHCP DNS while it equals old IP
     # Why: dnsmasq-proxy reads these; Kea derives its own
     # From: Issue #1683 | PR #1858
     if [[ "$current_dhcp_mode" = "dnsmasq-proxy" ]]; then
         if [[ -n "$current_dhcp_dns_primary" && "$current_dhcp_dns_primary" = "$current_ip_http" ]]; then
-            set_env_key DHCP_DNS_PRIMARY "$new_ip_http" "$deploy_env"
-            print_ok "Updated: $deploy_env (DHCP_DNS_PRIMARY)"
+            changes+=("DHCP_DNS_PRIMARY=$new_ip_http")
         fi
         if [[ -n "$current_dhcp_dns_secondary" && "$current_dhcp_dns_secondary" = "$current_ip_https" ]]; then
-            set_env_key DHCP_DNS_SECONDARY "$new_ip_https" "$deploy_env"
-            print_ok "Updated: $deploy_env (DHCP_DNS_SECONDARY)"
+            changes+=("DHCP_DNS_SECONDARY=$new_ip_https")
         fi
     fi
-
-    print_step "Restarting containers"
-
-    apply_stack_update_ordered "$install_dir" restore_update_ip_env "$install_dir" "$deploy_env" "$saved_env" \
-        || apply_rc=$?
-    case "$apply_rc" in
-        0) ;;
-        1) die_with_recovery_help "The new IPs failed the health gate; the previous IPs are active again. Check that the new IPs are assigned to this host." "$install_dir" ;;
-        *) die_with_recovery_help "The new IPs failed the health gate, and restoring the previous ones failed too. Manual recovery required." "$install_dir" ;;
-    esac
+    apply_env_change_gated snapshot "$install_dir" "$deploy_env" IPs \
+        "Check that the new IPs are assigned to this host." "${changes[@]}"
 
     print_result_banner "$GREEN" "Reconfiguration complete!"
     printf "  Done. Update your clients to use the new DNS IP.\n\n"
-}
-
-# What: puts the previous upstream values back, restarts dns
-# Why: a setting that fails a check must not stay active
-# From: Issue #1918 | PR #1858
-restore_dns_upstream() {
-    local install_dir="$1" env_file="$2" rc=0 dns_svc ui_svc
-    dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
-    ui_svc=$(prod_env_default UI_SERVICE) || exit $?
-    set_env_key DNS_UPSTREAM_SERVERS "$3" "$env_file"
-    set_env_key DNS_UPSTREAM_ZONES "$4" "$env_file"
-    set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$5" "$env_file"
-    set_env_key DNS_LOCAL_REVERSE_ZONES "$6" "$env_file"
-    # What: starts dns and the ui with the new settings
-    # Why: the ui renders the recursor files dns reads
-    # From: Issue #1918
-    stack_up "$install_dir" "$env_file" -d "$dns_svc" "$ui_svc" || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-        print_error "Failed to restart $dns_svc and $ui_svc with the previous external DNS setting (exit $rc)."
-        return 1
-    fi
-    # What: "active again" only for a healthy stack
-    # Why: a roll-back that did not come up is a failure
-    # From: Issue #1683 | PR #2017
-    if ! wait_for_whole_stack "$install_dir" "$env_file"; then
-        print_error "The stack with the previous external DNS setting did not become healthy."
-        return 1
-    fi
-    print_warn "The previous external DNS setting is active again"
 }
 
 # What: true if the live recursor config matches the setting
@@ -9078,7 +9086,7 @@ cmd_configure_upstream_dns() {
 
     print_step "Reading current configuration"
 
-    local env_file ip_http ip_https lan extra_lan apply_rc=0
+    local env_file ip_http ip_https lan extra_lan apply_rc=0 snapshot
     local old_servers old_zones old_unsigned old_reverse dhcp_mode
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     old_servers=$(get_env_var DNS_UPSTREAM_SERVERS "$env_file") || exit $?
@@ -9119,34 +9127,11 @@ cmd_configure_upstream_dns() {
     printf "    Local PTR zones:    %s\n\n" "$([[ "$DNS_LOCAL_REVERSE_ZONES" = 1 ]] && echo on || echo off)"
 
     confirm "Apply changes?" "N" || { printf "\n  Cancelled.\n\n"; exit 0; }
-    # What: no converge run while the change is applied
-    # Why: both recreate the same containers and collide
-    # From: Issue #1683 | PR #2017
-    pause_convergence_until_exit
-
-    # What: the same baseline and gate as ./setup.sh update
-    # Why: one health-gated restart path, no second copy
-    # From: Issue #1918 | PR #1858
-    install_health_gate_tools
-    print_step "Capturing health baseline"
-    capture_stack_health_baseline "$install_dir" "$env_file"
-
-    print_step "Saving configuration"
-    set_env_key DNS_UPSTREAM_SERVERS "$DNS_UPSTREAM_SERVERS" "$env_file"
-    set_env_key DNS_UPSTREAM_ZONES "$DNS_UPSTREAM_ZONES" "$env_file"
-    set_env_key DNS_UPSTREAM_UNSIGNED_ZONES "$DNS_UPSTREAM_UNSIGNED_ZONES" "$env_file"
-    set_env_key DNS_LOCAL_REVERSE_ZONES "$DNS_LOCAL_REVERSE_ZONES" "$env_file"
-    print_ok "Saved in $env_file"
-
-    apply_stack_update_ordered "$install_dir" restore_dns_upstream "$install_dir" "$env_file" \
-        "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" || apply_rc=$?
-    case "$apply_rc" in
-        0) ;;
-        1) die_with_recovery_help "The new external DNS setting failed the health gate; the previous setting is active again." "$install_dir" ;;
-        *) die_with_recovery_help "The new setting failed the health gate, and restoring the previous one failed too. Manual recovery required." "$install_dir" ;;
-    esac
-    check_dns_upstream_or_restore "$install_dir" "$env_file" \
-        "$old_servers" "$old_zones" "$old_unsigned" "$old_reverse" || apply_rc=$?
+    apply_env_change_gated snapshot "$install_dir" "$env_file" "external DNS setting" "" \
+        "DNS_UPSTREAM_SERVERS=$DNS_UPSTREAM_SERVERS" "DNS_UPSTREAM_ZONES=$DNS_UPSTREAM_ZONES" \
+        "DNS_UPSTREAM_UNSIGNED_ZONES=$DNS_UPSTREAM_UNSIGNED_ZONES" \
+        "DNS_LOCAL_REVERSE_ZONES=$DNS_LOCAL_REVERSE_ZONES"
+    check_dns_upstream_or_restore "$install_dir" "$env_file" "$snapshot" || apply_rc=$?
     case "$apply_rc" in
         0) print_ok "External DNS setting applied and active in the dns container" ;;
         1) die "The new external DNS setting did not work after the start; the previous setting is active again." ;;
@@ -9158,9 +9143,8 @@ cmd_configure_upstream_dns() {
 # Why: install and configure-upstream-dns promise a rollback
 # From: Issue #1918 | PR #1858
 check_dns_upstream_or_restore() {
-    local install_dir="$1" env_file="$2"
+    local install_dir="$1" env_file="$2" snapshot="$3"
     local -a new_entries
-    shift 2
     # What: the dns container took the setting, then answers
     # Why: a dead resolver must not stay active
     # From: Issue #1683
@@ -9169,7 +9153,7 @@ check_dns_upstream_or_restore() {
         && { (( ${#new_entries[@]} == 0 )) || dns_upstream_answers "${new_entries[@]}"; }; then
         return 0
     fi
-    restore_dns_upstream "$install_dir" "$env_file" "$@" || return 2
+    rollback_env_keys "$install_dir" "$env_file" "external DNS setting" "$snapshot" || return 2
     return 1
 }
 
@@ -10924,7 +10908,11 @@ started_stack_health_gate "$INSTALL_DIR" "$ENV_FILE" || install_healthy=0
 if [[ "$install_healthy" = 1 && -n "$DNS_UPSTREAM_SERVERS" ]]; then
     print_step "Checking the external DNS server"
     upstream_rc=0
-    check_dns_upstream_or_restore "$INSTALL_DIR" "$ENV_FILE" "" "" "" "$DNS_LOCAL_REVERSE_ZONES" \
+    # What: the way back is "no external DNS server"
+    # Why: install has no earlier setting to return to
+    # From: Issue #1918 | PR #2017
+    check_dns_upstream_or_restore "$INSTALL_DIR" "$ENV_FILE" \
+        $'DNS_UPSTREAM_SERVERS=\nDNS_UPSTREAM_ZONES=\nDNS_UPSTREAM_UNSIGNED_ZONES=' \
         || upstream_rc=$?
     case "$upstream_rc" in
         0) print_ok "External DNS server ${DNS_UPSTREAM_SERVERS} is in use" ;;
