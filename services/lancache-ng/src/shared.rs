@@ -5261,7 +5261,9 @@ pub mod render {
     // From: Issue #1683 | PR #1980
     fn drop_stale_leaves(ca_crt: &Path, dir: &Path, stamp: &Path) -> Result<(), String> {
         let print = crate::shared::cert::fingerprint(ca_crt)?;
-        if std::fs::read_to_string(stamp).ok().as_deref() == Some(print.as_str()) {
+        let old = crate::shared::fs::read_if_present(stamp)
+            .map_err(|e| format!("{}: {e}", stamp.display()))?;
+        if old.as_deref() == Some(print.as_bytes()) {
             return Ok(());
         }
         let list = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -5303,8 +5305,7 @@ pub mod render {
         let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
         let (ca_key, ca_crt) = (ca.join(s.text("CA_KEY_FILE")?), ca_cert(s)?);
         let serial = ca.join(s.text("CA_SERIAL_FILE")?);
-        let gid = s.text("LANCACHE_RUNTIME_GID")?;
-        let gid = Some(gid.parse::<u32>().map_err(|e| format!("gid {gid}: {e}"))?);
+        let gid = Some(s.num::<u32>("LANCACHE_RUNTIME_GID")?);
         for d in [&ca, &dir] {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }

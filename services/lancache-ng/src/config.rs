@@ -697,7 +697,13 @@ impl Settings {
             // From: Issue #1683 | PR #1980
             Some(Value::Text(t)) => parse_uint(t).ok_or_else(|| format!("{key} is no number")),
             Some(_) => Err(format!("{key} is no number")),
-            None => Err(format!("{key} is not set")),
+            // What: a compose-only key reads the env.
+            // Why: the same rule as text; one rule per key.
+            // From: Issue #1683 | PR #2020
+            None => match env_set(&process_env, key) {
+                Some(t) => parse_uint(&t).ok_or_else(|| format!("{key} is no number")),
+                None => Err(format!("{key} is not set")),
+            },
         }
     }
 
@@ -712,7 +718,13 @@ impl Settings {
             // From: Issue #1683 | PR #2017
             Some(Value::Text(t)) => t.parse().map_err(|_| format!("{key} is no bool")),
             Some(_) => Err(format!("{key} is no bool")),
-            None => Err(format!("{key} is not set")),
+            // What: a compose-only key reads the env.
+            // Why: the same rule as text; one rule per key.
+            // From: Issue #1683 | PR #2020
+            None => match env_set(&process_env, key) {
+                Some(t) => t.parse().map_err(|_| format!("{key} is no bool")),
+                None => Err(format!("{key} is not set")),
+            },
         }
     }
 
@@ -737,7 +749,12 @@ impl Settings {
         match self.get(key) {
             Some(Value::List(items)) => items.clone(),
             Some(other) => list_items(&other.to_string()).map(str::to_string).collect(),
-            None => Vec::new(),
+            // What: a compose-only key reads the env.
+            // Why: the same rule as text; one rule per key.
+            // From: Issue #1683 | PR #2020
+            None => env_set(&process_env, key)
+                .map(|t| list_items(&t).map(str::to_string).collect())
+                .unwrap_or_default(),
         }
     }
 
