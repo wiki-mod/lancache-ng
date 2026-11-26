@@ -2975,6 +2975,18 @@ mod config {
             serde_json::json!({"values": self.view(), "warnings": self.warnings})
         }
 
+        // What: values of every secret-kind setting.
+        // Why: masks in previews know what to hide.
+        // From: Issue #1683 | PR #2020
+        pub fn secret_values(&self) -> Vec<String> {
+            self.values
+                .iter()
+                .filter(|(k, _)| self.specs.get(*k).is_some_and(Spec::is_secret))
+                .map(|(_, v)| v.to_string())
+                .filter(|v| !v.is_empty())
+                .collect()
+        }
+
         // What: schema row, masked value, origin per key.
         // Why: REST and CLI show what a setting is and why.
         // From: Issue #1683 | PR #2020
@@ -5912,6 +5924,33 @@ mod shared {
             Ok(serde_json::json!({"dir": d.display().to_string(), "secrets": rows}))
         }
 
+        // What: every secret value this process knows.
+        // Why: previews mask them; files and settings both.
+        // From: Issue #1683 | PR #2020
+        pub fn all_values(s: &crate::config::Settings) -> Result<Vec<String>, String> {
+            let d = dir(s)?;
+            let mut out = s.secret_values();
+            let paths = fs::entries_if_present(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+            for path in paths.into_iter().filter(|p| p.is_file()) {
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                out.push(text.trim().to_string());
+            }
+            for key in [
+                "PDNS_API_KEY",
+                "RECURSOR_API_KEY",
+                "KEA_CTRL_TOKEN",
+                "SNMP_COMMUNITY",
+            ] {
+                out.extend(crate::config::env_set(&crate::config::process_env, key));
+            }
+            out.push(tsig_secret(s)?);
+            out.retain(|v| v.len() >= 4);
+            out.sort_by_key(|v| std::cmp::Reverse(v.len()));
+            out.dedup();
+            Ok(out)
+        }
+
         // What: lancache-ng secret list: states as JSON.
         // Why: the CLI of secret reads sits with them.
         // From: Issue #1683 | PR #2020
@@ -7619,6 +7658,17 @@ mod shared {
                     };
                 }
                 ["apply"] => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
+                // What: render bodies of an owner or path.
+                // Why: a read; secrets show as <secret>.
+                // From: Issue #1683 | PR #2020
+                ["render", rest @ ..] if rest.len() <= 1 => {
+                    let v = crate::ui::render_preview(&s, rest.first().copied()).await?;
+                    println!("{v}");
+                    return match v["errors"].as_array().map(Vec::len) {
+                        Some(0) => Ok(()),
+                        _ => Err("render: the render has errors".into()),
+                    };
+                }
                 ["service", c, p, a @ ("restart" | "reload")] => {
                     let r = s
                         .text("UI_ROUTE_SERVICE_ACTION")?
@@ -7628,7 +7678,7 @@ mod shared {
                     (r, Body::Form(vec![]))
                 }
                 _ => {
-                    return Err("commands: status | plan | apply | \
+                    return Err("commands: status | plan | apply | render [owner|path] | \
                                 container <service> start|stop | ui restart | \
                                 service <container> <program> restart|reload"
                         .into());
@@ -13676,6 +13726,18 @@ mod ui {
         json_reply(render_plan(&app.settings()).await.map(Some), "")
     }
 
+    // What: GET preview ?pick=owner-or-path, masked.
+    // Why: REST read on the preview of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn apply_preview_api(
+        State(app): Shared,
+        axum::extract::Query(q): axum::extract::Query<Fields>,
+    ) -> Response {
+        let pick = field(&q, "pick");
+        let pick = (!pick.is_empty()).then_some(pick.as_str());
+        json_reply(render_preview(&app.settings(), pick).await.map(Some), "")
+    }
+
     // What: POST apply now; answers the apply report.
     // Why: CLI and REST apply without a restart.
     // From: Issue #1683 | PR #2020
@@ -15025,20 +15087,57 @@ mod ui {
     pub(crate) async fn render_and_write(
         s: &Settings,
     ) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
-        let sec = render::secrets(s)?;
-        let chain = dnssec_chain(s).await;
-        let files = render::all(s, &sec, &chain).map_err(|e| e.join("; "))?;
+        let files = render_now(s).await?.map_err(|e| e.join("; "))?;
         let written = render::write_files(s, &files)?;
         Ok((files, written))
+    }
+
+    // What: all files with secrets and the live chain.
+    // Why: write, plan and preview render one way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn render_now(
+        s: &Settings,
+    ) -> Result<Result<Vec<render::File>, Vec<String>>, String> {
+        let sec = render::secrets(s)?;
+        let chain = dnssec_chain(s).await;
+        Ok(render::all(s, &sec, &chain))
+    }
+
+    // What: rendered bodies of an owner or one path.
+    // Why: shows a config before it is written.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn render_preview(s: &Settings, pick: Option<&str>) -> Result<Value, String> {
+        let files = match render_now(s).await? {
+            Ok(f) => f,
+            Err(errors) => return Ok(json!({"errors": errors})),
+        };
+        let hide = crate::shared::secret::all_values(s)?;
+        let mut list = Vec::new();
+        for (f, state) in render::plan(&files)? {
+            let path = f.path.display().to_string();
+            if pick.is_some_and(|p| p != f.owner && p != path) {
+                continue;
+            }
+            // What: every secret value becomes <secret>.
+            // Why: rendered files embed keys and tokens.
+            // From: Issue #1683 | PR #2020
+            let mut body = f.body.clone();
+            for v in &hide {
+                body = body.replace(v.as_str(), "<secret>");
+            }
+            list.push(json!({"path": path, "owner": f.owner, "state": state, "body": body}));
+        }
+        match pick {
+            Some(p) if list.is_empty() => Err(format!("{p}: no rendered owner or file")),
+            _ => Ok(json!({"files": list, "errors": []})),
+        }
     }
 
     // What: what an apply would write and whom it wakes.
     // Why: page, REST and CLI show one dry run.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn render_plan(s: &Settings) -> Result<Value, String> {
-        let sec = render::secrets(s)?;
-        let chain = dnssec_chain(s).await;
-        let files = match render::all(s, &sec, &chain) {
+        let files = match render_now(s).await? {
             Ok(f) => f,
             Err(errors) => return Ok(json!({"errors": errors})),
         };
@@ -16004,6 +16103,7 @@ mod ui {
             .route(&p("UI_ROUTE_DNS_QUERY")?, get(dns_query_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
+            .route(&p("UI_ROUTE_APPLY_PREVIEW")?, get(apply_preview_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
