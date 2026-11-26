@@ -487,9 +487,15 @@ runtime:
   # Why: images bake them; no .env template holds any.
   # From: Issue #1683 | PR #1912
   defaults:
+    # What: pdns API ports of auth and both recursors.
+    # Why: pdns.conf and the recursor ports build on them.
+    # From: Issue #1683 | PR #2020
     - PDNS_AUTH_API_PORT=8081
     - PDNS_HTTP_API_PORT=8082
     - PDNS_HTTPS_API_PORT=8084
+    # What: pdns SOA timings and names, one key each.
+    # Why: no release reads them; PDNS_DEFAULT_SOA rules.
+    # From: Issue #1683 | PR #2020
     - PDNS_SOA_REFRESH=30
     - PDNS_SOA_RETRY=10
     - PDNS_SOA_RESYNC_INTERVAL=3600
@@ -498,11 +504,29 @@ runtime:
     - PDNS_SOA_RNAME=admin.@
     - PDNS_SOA_EXPIRE=604800
     - PDNS_SOA_MINIMUM=3600
+    # What: log level of the pdns auth server.
+    # Why: the dns render writes it into pdns.conf.
+    # From: Issue #1683 | PR #2020
     - PDNS_AUTH_LOGLEVEL=3
+    # What: private IPv4 nets of a LAN.
+    # Why: other SOT values name them as @PRIVATE_NETS@.
+    # From: Issue #1683 | PR #2020
     - PRIVATE_NETS=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8
+    # What: older allow list of the DNS API.
+    # Why: no release reads it; PDNS_API_ALLOW_FROM rules.
+    # From: Issue #1683 | PR #2020
     - DNS_API_ALLOW_FROM=@PRIVATE_NETS@
+    # What: clients the recursors answer.
+    # Why: the dns render writes the allow list.
+    # From: Issue #1683 | PR #2020
     - DNS_QUERY_ALLOW_FROM=@PRIVATE_NETS@ fc00::/7
+    # What: loopback written as nets.
+    # Why: setup.sh tells loopback from a LAN address.
+    # From: Issue #1683 | PR #2020
     - LOOPBACK_NETS=127.0.0.0/8 ::1
+    # What: RPZ zone SOA, TTL and policy name.
+    # Why: the recursor RPZ sends cache names to the proxy.
+    # From: Issue #1683 | PR #2020
     - RPZ_SOA_RNAME=admin.rpz.
     - RPZ_TTL=60
     - RPZ_SOA_REFRESH=3600
@@ -511,9 +535,15 @@ runtime:
     - RPZ_SOA_EXPIRE=86400
     - RPZ_SOA_MINIMUM=60
     - RPZ_POLICY_NAME=lancache-rpz
+    # What: root zone copy: URL, refresh and retry.
+    # Why: the recursors keep a local copy of the root.
+    # From: Issue #1683 | PR #2020
     - ROOT_ZONE_MIRROR_URL=https://www.internic.net/domain/root.zone
     - ROOT_ZONE_MIRROR_REFRESH=1800
     - ROOT_ZONE_MIRROR_RETRY=3600
+    # What: recursor cache sizes, TTL rules, log levels.
+    # Why: the dns render writes them into recursor yaml.
+    # From: Issue #1683 | PR #2020
     - RECURSOR_MINIMUM_TTL_OVERRIDE=60
     - RECURSOR_RECORDCACHE_MAX_ENTRIES=1000000
     - RECURSOR_REFRESH_ON_TTL_PERC=10
@@ -524,11 +554,17 @@ runtime:
     - RECURSOR_SERVFAIL_TTL=30
     - RECURSOR_LOGLEVEL=3
     - RECURSOR_LOGLEVEL_QUERIES=6
+    # What: watchdog round, user stops, restarts, disk use.
+    # Why: the watchdog heals and alarms by them.
+    # From: Issue #1683 | PR #2020
     - CHECK_INTERVAL=30
     - SERVICES_STOPPED=
     - RESTART_AFTER=3
     - DISK_WARN_PCT=85
     - DISK_ALARM_PCT=95
+    # What: timings of the old supervisor and Docker calls.
+    # Why: unread in every release; DOCKER_TIMEOUT is used.
+    # From: Issue #1683 | PR #2020
     - DOCKER_API_TIMEOUT=5
     - DOCKER_RESTART_TIMEOUT=30
     - DOCKER_RESTART_GRACE=2
@@ -542,7 +578,13 @@ runtime:
     # Why: covers DHCP_PROBE_WINDOW_MS plus the lease wait.
     # From: Issue #1683 | PR #1985
     - DHCP_PROBE_WAIT_TIMEOUT=30
+    # What: secondary check wait while own pdns is down.
+    # Why: at ui start the dns may not run yet.
+    # From: Issue #1683 | PR #2020
     - PDNS_SOA_COLD_RETRY=5
+    # What: seconds until syslog-ng closes an idle log file.
+    # Why: the syslog render writes it as time-reap.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_TIME_REAP=30
     # What: syslog-ng store modes and transports.
     # Why: readers get group read; forward is reliable.
@@ -551,15 +593,30 @@ runtime:
     - SYSLOG_FILE_PERM=0640
     - SYSLOG_IN_TRANSPORT=udp
     - SYSLOG_FWD_TRANSPORT=tcp
+    # What: HTTP client timeout, pool idle and keepalive.
+    # Why: one shared client builder reads them.
+    # From: Issue #1683 | PR #2020
     - HTTP_CLIENT_TIMEOUT=10
     - HTTP_POOL_IDLE_TIMEOUT=90
     - HTTP_TCP_KEEPALIVE=60
+    # What: timeout of an older health probe.
+    # Why: unread in every release.
+    # From: Issue #1683 | PR #2020
     - HEALTH_PROBE_TIMEOUT=2
+    # What: compose healthcheck interval, timeout, retries.
+    # Why: compose fills every healthcheck from them.
+    # From: Issue #1683 | PR #2020
     - HEALTHCHECK_INTERVAL=30s
     - HEALTHCHECK_TIMEOUT=5s
     - HEALTHCHECK_RETRIES=3
     - HEALTHCHECK_START_PERIOD=20s
+    # What: wait before a failed log prune runs again.
+    # Why: the watchdog retries the log budget later.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_PRUNE_RETRY_COOLDOWN=3600
+    # What: cachehamster connections and report gap.
+    # Why: cachehamster reads them for each run.
+    # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_CONCURRENCY=8
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=10
     # What: prefill limit in Mbit/s (0 = none), window.
