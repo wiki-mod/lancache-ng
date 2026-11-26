@@ -472,7 +472,7 @@
       </form>
     </section>
 
-    {# What: zone snapshot table; rows come from main.rs
+    {# What: zone snapshot table; rows come from the ui
        Why: the ui keeps snapshots in DNS_SNAPSHOT_DIR
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="zones" class="card flex flex-col gap-4 hidden">
@@ -612,7 +612,7 @@
       </div>
 
       {# What: install command for a new secondary #}
-      {# Why: main.rs renders the token and primary URL #}
+      {# Why: the ui renders the token and primary URL #}
       <div data-sec-panel="add" class="hidden">
         <div class="section-title" style="margin-top:0;">{{ t.run_this_on_the_secondary_box }}</div>
         <p class="section-sub">{{ t.one_command_installs_it_registers_it }}</p>

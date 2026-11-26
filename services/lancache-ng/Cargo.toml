@@ -12,7 +12,7 @@ license.workspace = true
 
 [[bin]]
 name = "lancache-ng"
-path = "src/main.rs"
+path = "src/lancache-ng.rs"
 
 [dependencies]
 argon2 = { workspace = true }
