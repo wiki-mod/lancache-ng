@@ -8221,6 +8221,22 @@ mod shared {
                 .map_err(|e| format!("openssl: {e}"))
         }
 
+        // What: one certificate: end, days, renew flag.
+        // Why: watchdog, CLI and REST read one rule.
+        // From: Issue #1683 | PR #2020
+        pub fn state(crt: &Path, within: u64) -> serde_json::Value {
+            let file = crt.display().to_string();
+            match expiry(crt) {
+                Err(_) if !crt.is_file() => serde_json::json!({
+                    "file": file, "present": false, "renew": true, "error": "file missing"}),
+                Err(e) => serde_json::json!({
+                    "file": file, "present": true, "renew": true, "error": e}),
+                Ok((day, n)) => serde_json::json!({
+                    "file": file, "present": true, "until": day, "days_left": n,
+                    "renew": !valid_for(crt, within).unwrap_or(false)}),
+            }
+        }
+
         // What: end of crt: ISO day and whole days left.
         // Why: a warning names the day, not a second count.
         // From: Issue #1683 | PR #1980
@@ -10635,9 +10651,25 @@ end
                     Some(host) => crate::shared::render::psl_lookup(&s, host)?,
                     None => return Err("usage: psl <host>".into()),
                 },
-                _ => return Err("commands: status log psl".into()),
+                // What: certs list; check: rc 1; renew: ui.
+                // Why: renew reloads the proxy like apply.
+                // From: Issue #1683 | PR #2020
+                Some("certs") => match args.get(1).map(String::as_str) {
+                    None | Some("check") => crate::shared::render::cert_list(&s)?,
+                    Some("renew") => {
+                        let route = s.text("UI_ROUTE_PROXY_CERTS_RENEW")?;
+                        let body = crate::shared::http::Body::Form(vec![]);
+                        crate::shared::http::ui_socket(&s, &route, body).await?
+                    }
+                    Some(x) => return Err(format!("{x}: certs [check | renew]")),
+                },
+                _ => return Err("commands: status log psl certs".into()),
             };
             println!("{v}");
+            let check = args.get(1).is_some_and(|a| a == "check");
+            if check && v["ok"] == false {
+                return Err("certs: one needs a renewal or is missing".into());
+            }
             Ok(())
         }
 
@@ -11616,21 +11648,10 @@ end
             }
             grant(&ca_key, None, s.mode("CA_KEY_MODE")?)?;
             drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
-            let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
-            let mut want = hosts.certs();
-            // What: default cert: DNS name and IP_HTTPS.
-            // Why: no-SNI or by-IP clients get this cert
-            // From: Issue #1683 | PR #1980
-            let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
-            names.extend(s.text("IP_HTTPS").ok());
-            want.push((s.text("NGINX_DEFAULT_CERT")?, names));
             let (key_mode, crt_mode) = (s.mode("CERT_KEY_MODE")?, s.mode("CERT_FILE_MODE")?);
             let mut made = 0;
-            for (name, sans) in want {
-                let (key, crt) = (
-                    dir.join(format!("{name}.key")),
-                    dir.join(format!("{name}.crt")),
-                );
+            for (name, sans) in wanted_leaves(s)? {
+                let (key, crt) = leaf_files(s, &name)?;
                 if !(crt.exists() && key.exists()) {
                     crate::shared::cert::make_leaf(
                         &ca_key,
@@ -11649,6 +11670,76 @@ end
                 grant(&crt, gid, crt_mode)?;
             }
             Ok(made)
+        }
+
+        // What: the leaves the proxy needs: name, SANs.
+        // Why: issuer, list and renewal read one set.
+        // From: Issue #1683 | PR #2020
+        fn wanted_leaves(s: &Settings) -> Result<Vec<(String, Vec<String>)>, String> {
+            let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
+            let mut want = hosts.certs();
+            // What: default cert: DNS name and IP_HTTPS.
+            // Why: no-SNI or by-IP clients get this cert
+            // From: Issue #1683 | PR #1980
+            let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
+            names.extend(s.text("IP_HTTPS").ok());
+            want.push((s.text("NGINX_DEFAULT_CERT")?, names));
+            Ok(want)
+        }
+
+        // What: key and certificate file of one leaf.
+        // Why: one naming rule for every reader.
+        // From: Issue #1683 | PR #2020
+        fn leaf_files(s: &Settings, name: &str) -> Result<(PathBuf, PathBuf), String> {
+            let root = PathBuf::from(s.text("NGINX_DIR")?);
+            let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
+            Ok((
+                dir.join(format!("{name}.key")),
+                dir.join(format!("{name}.crt")),
+            ))
+        }
+
+        // What: the stack CA and every needed leaf.
+        // Why: CLI and REST see what HTTPS serves.
+        // From: Issue #1683 | PR #2020
+        pub fn cert_list(s: &Settings) -> Result<serde_json::Value, String> {
+            if !s.flag("HTTPS_ENABLED")? {
+                return Ok(
+                    serde_json::json!({"https": false, "ok": true, "ca": null, "leaves": []}),
+                );
+            }
+            let within = s.uint("WATCHDOG_CERT_WARN_SECS")?;
+            let mut leaves = Vec::new();
+            for (name, sans) in wanted_leaves(s)? {
+                let mut row = crate::shared::cert::state(&leaf_files(s, &name)?.1, within);
+                row["name"] = name.into();
+                row["names"] = sans.into();
+                leaves.push(row);
+            }
+            let ca = crate::shared::cert::state(&ca_cert(s)?, within);
+            let ok = std::iter::once(&ca)
+                .chain(&leaves)
+                .all(|r| r["renew"] == false);
+            Ok(serde_json::json!({"https": true, "ok": ok, "ca": ca, "leaves": leaves}))
+        }
+
+        // What: drop leaves that end within the warn time.
+        // Why: issue_certs then makes them anew.
+        // From: Issue #1683 | PR #2020
+        pub fn drop_expiring(s: &Settings) -> Result<Vec<String>, String> {
+            let within = s.uint("WATCHDOG_CERT_WARN_SECS")?;
+            let mut gone = Vec::new();
+            for (name, _) in wanted_leaves(s)? {
+                let (key, crt) = leaf_files(s, &name)?;
+                if crt.is_file() && crate::shared::cert::state(&crt, within)["renew"] == true {
+                    for f in [&key, &crt] {
+                        crate::shared::fs::remove_if_present(f)
+                            .map_err(|e| format!("{}: {e}", f.display()))?;
+                    }
+                    gone.push(name);
+                }
+            }
+            Ok(gone)
         }
 
         // What: the names of a cache domain list.
@@ -15674,6 +15765,15 @@ mod ui {
         // What: issue missing certs after the restarts.
         // Why: many leaves take time; dns must not wait.
         // From: Issue #1683 | PR #1980
+        report.extend(issue_and_reload(app, new).await?);
+        Ok(report)
+    }
+
+    // What: issue missing certs; reload the proxy.
+    // Why: apply and cert renewal share the step.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn issue_and_reload(app: &App, new: &Settings) -> Result<Vec<String>, String> {
+        let mut report = Vec::new();
         let s = new.clone();
         let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
             .await
@@ -15682,6 +15782,8 @@ mod ui {
             Ok(0) => {}
             Ok(n) => {
                 report.push(format!("certs: {n} issued"));
+                let (grace, limit) = app.limits(new)?;
+                let rx = new.list("RELOAD_EXEC");
                 let mut plan = apply::plan(&[proxy_reload(new, "certs")?]);
                 let (names, _) = plan_containers(app, new, &mut plan).await;
                 let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
@@ -15694,6 +15796,29 @@ mod ui {
             Err(e) => report.push(format!("certs: {e}")),
         }
         Ok(report)
+    }
+
+    // What: GET UI_ROUTE_PROXY_CERTS: CA and leaves.
+    // Why: REST reads what the CLI reads.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn certs_api(State(app): Shared) -> Page {
+        Ok(axum::Json(render::cert_list(&app.settings())?).into_response())
+    }
+
+    // What: POST UI_ROUTE_PROXY_CERTS_RENEW.
+    // Why: drop leaves near their end, issue, reload.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn certs_renew_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        let s = app.settings();
+        let dropped = render::drop_expiring(&s).map_err(bad_request)?;
+        let report = issue_and_reload(&app, &s).await?;
+        let v = json!({"renewed": dropped, "report": report, "certs": render::cert_list(&s)?});
+        Ok(axum::Json(v).into_response())
     }
 
     // What: wait until restarted containers are healthy.
@@ -16628,6 +16753,8 @@ mod ui {
             route("UI_ROUTE_APPLY", Post, Api, apply_api),
             route("UI_ROUTE_APPLY_PREVIEW", Get, Api, apply_preview_api),
             route("UI_ROUTE_PROXY_PSL", Get, Api, proxy_psl_api),
+            route("UI_ROUTE_PROXY_CERTS", Get, Api, certs_api),
+            route("UI_ROUTE_PROXY_CERTS_RENEW", Post, Api, certs_renew_api),
             route("UI_ROUTE_DOCKER", Get, Api, docker_api),
             route("UI_ROUTE_STATS_GRAPH", Get, Api, graph),
             route("UI_ROUTE_STATS_LIST", Get, Api, stats_list_api),
@@ -17348,13 +17475,18 @@ mod watchdog {
     fn certs(s: &Settings, f: &mut Findings) -> Result<(), String> {
         let within = s.uint("WATCHDOG_CERT_WARN_SECS")?;
         for path in s.list("WATCHDOG_CERT_FILES") {
-            match cert::valid_for(Path::new(&path), within) {
-                Ok(true) => {}
-                Ok(false) => match cert::expiry(Path::new(&path)) {
-                    Ok((day, n)) => f.warn(&path, format!("expires in {n} days ({day})")),
-                    Err(e) => f.crit(&path, e),
-                },
-                Err(e) => f.crit(&path, e),
+            let v = cert::state(Path::new(&path), within);
+            match (v["error"].as_str(), v["renew"] == true) {
+                (Some(e), _) => f.crit(&path, e),
+                (None, true) => f.warn(
+                    &path,
+                    format!(
+                        "expires in {} days ({})",
+                        v["days_left"],
+                        v["until"].as_str().unwrap_or_default()
+                    ),
+                ),
+                (None, false) => {}
             }
         }
         Ok(())

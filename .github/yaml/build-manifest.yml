@@ -825,6 +825,8 @@ runtime:
     - UI_ROUTE_UI_ROUTES=/api/ui/routes
     - UI_ROUTE_UI_TEMPLATES=/api/ui/templates
     - UI_ROUTE_CSRF=/api/csrf
+    - UI_ROUTE_PROXY_CERTS=/api/proxy/certs
+    - UI_ROUTE_PROXY_CERTS_RENEW=/api/proxy/certs/renew
     - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
