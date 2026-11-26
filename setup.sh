@@ -3055,7 +3055,7 @@ migrate_quickstart_install() (
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
         if list_has "$volume" "$kept_list"; then
-            kept+=" $(stack_volume_name "$old_dir" "$old_env" "$volume")" || exit $?
+            kept+=" $(compose_config_value "$old_dir" "$old_env" ".volumes[\$k].name" --arg k "$volume")" || exit $?
             continue
         fi
         missing+=" $volume"
@@ -3076,7 +3076,7 @@ migrate_quickstart_install() (
         || die "Cannot resolve the state directories of $new_env (exit $?)."
     mapfile -t copy_lines <<< "$copies"
     for line in "${copy_lines[@]}"; do
-        volume=$(stack_volume_name "$old_dir" "$old_env" "${line%% *}") || exit $?
+        volume=$(compose_config_value "$old_dir" "$old_env" ".volumes[\$k].name" --arg k "${line%% *}") || exit $?
         copy_volume_to_dir "$volume" "${line#* }" "$record"
     done
     # What: prod uses the CA the quickstart clients trust
@@ -5701,57 +5701,16 @@ validate_compose_config() {
     print_ok "Docker Compose configuration is valid"
 }
 
-# What: resolves the Compose project name from yaml or env
-# Why: archived compose dirs have no running containers
-# From: Issue #1683 | PR #1858
-compose_project_name() {
-    local compose_dir="$1" env_file="$2" name
-    name="${COMPOSE_PROJECT_NAME:-}"
-    [[ -n "$name" ]] || name=$(get_env_var COMPOSE_PROJECT_NAME "$env_file")
-    if [[ -z "$name" && -f "$compose_dir/docker-compose.yml" ]]; then
-        # What: sed output is captured, then head reads it
-        # Why: avoids SIGPIPE when several name: keys match
-        # From: Issue #1377
-        local compose_name_lines
-        compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml") \
-            || die "Failed to read $compose_dir/docker-compose.yml (exit $?)."
-        name="${compose_name_lines%%$'\n'*}"
-    fi
-    if [[ -z "$name" ]]; then
-        # What: the dir name as compose normalizes it
-        # Why: lower case; a-z0-9_- only; no leading - or _
-        # From: Issue #1683 | PR #2017
-        name=$(basename "$compose_dir")
-        name=$(tr -cd 'a-z0-9_-' <<< "${name,,}") || die "Failed to normalize the project name $name (exit $?)."
-        [[ "$name" =~ ^[-_]*(.*)$ ]]
-        name="${BASH_REMATCH[1]}"
-    fi
-    printf '%s\n' "$name"
-}
-
-# What: <project>_<volume> of the CACHE_DIR-backed volume
-# Why: the prod compose owns the name; works pre-create
+# What: the compose volume whose device is CACHE_DIR
+# Why: compose names it; setup only knows it is the cache
 # From: Issue #1683 | PR #1858
 compose_cache_volume_name() {
-    local install_dir="$1" env_file="$2" volume
-    volume=$(awk '
-        /^volumes:/ { v = 1; next }
-        v && /^[^ #]/ { v = 0 }
-        v && /^  [A-Za-z0-9_.-]+:/ { name = $1; sub(/:$/, "", name) }
-        v && /device: *\$\{CACHE_DIR[:}]/ { print name; exit }' "$PROD_COMPOSE") \
-        || die "Failed to read $PROD_COMPOSE (exit $?)."
-    [[ -n "$volume" ]] || die "$PROD_COMPOSE defines no CACHE_DIR-backed volume."
-    stack_volume_name "$install_dir" "$env_file" "$volume"
-}
-
-# What: the Docker name of volume key $3 of a stack
-# Why: compose names it <project>_<key>; no name: is set
-# From: Issue #1683 | PR #2017
-stack_volume_name() {
-    local project
-    project=$(compose_project_name "$1" "$2") \
-        || die "Cannot resolve the compose project of $1 (exit $?)."
-    printf '%s_%s\n' "$project" "$3"
+    local install_dir="$1" env_file="$2" cache_dir volume
+    cache_dir=$(prod_state_dir_for_key CACHE_DIR "$env_file") || exit $?
+    volume=$(compose_config_value "$install_dir" "$env_file" \
+        "[.volumes[]? | select(.driver_opts.device == \$dir) | .name][0]" --arg dir "$cache_dir") || exit $?
+    [[ -n "$volume" ]] || die "The compose config of $install_dir has no volume on $cache_dir (CACHE_DIR)."
+    printf '%s\n' "$volume"
 }
 
 # What: the named volumes that carry project label $1
@@ -5769,8 +5728,7 @@ compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
     compose_stack_or_skip "$install_dir" "Listing the Docker volumes" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    project=$(compose_project_name "$install_dir" "$env_file") \
-        || die "Cannot resolve the compose project of $install_dir (exit $?)."
+    project=$(compose_config_value "$install_dir" "$env_file" .name) || exit $?
     containers=$(stack_compose "$install_dir" "$env_file" ps --all -q) \
         || die "Failed to list the containers of $install_dir (exit $?)."
     while IFS= read -r container; do
@@ -6194,11 +6152,13 @@ cmd_restore() (
     # Why: restore then puts back .env, the settings file
     # From: Issue #1683 | PR #2017
     archived_env=$(runtime_env_file_for_install_dir "$root/$rel_install") || exit $?
-    # What: resolves project name from archived compose
-    # Why: the guard must check the archive's own project
+    # What: the project of the archived compose, by compose
+    # Why: the guard checks it; without docker it is skipped
     # From: Issue #1683 | PR #1858
-    archived_project=$(compose_project_name "$root/$rel_install" "$archived_env") \
-        || exit $?
+    archived_project=""
+    if command_available docker; then
+        archived_project=$(compose_config_value "$root/$rel_install" "$archived_env" .name) || exit $?
+    fi
     guard_restore_shared_project_volumes "$install_dir" "$archived_here" "$archived_project"
 
     # What: no converge run while files and volumes return
@@ -7960,7 +7920,7 @@ ui_data_volume() {
         print_skip "Reading the old Admin UI settings: docker is not available"
         return 0
     fi
-    volume=$(stack_volume_name "$install_dir" "$env_file" ui-data) || exit $?
+    volume=$(compose_config_value "$install_dir" "$env_file" ".volumes[\$k].name" --arg k ui-data) || exit $?
     docker_volume_exists "$volume" || rc=$?
     [[ "$rc" -eq 1 ]] && return 0
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the old Admin UI settings were not read."
@@ -8301,7 +8261,7 @@ logbundle_named_volume_listing() {
         return 0
     fi
     local volume err rc=0 prc=0
-    volume=$(stack_volume_name "$install_dir" "$env_file" "$base_name") || prc=$?
+    volume=$(compose_config_value "$install_dir" "$env_file" ".volumes[\$k].name" --arg k "$base_name") || prc=$?
     if [[ "$prc" -ne 0 ]]; then
         printf 'compose project lookup failed (exit %s); see the setup.sh output\n' "$prc" > "$out"
         return 0
