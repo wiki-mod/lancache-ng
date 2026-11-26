@@ -953,7 +953,7 @@ PROG
     # What: .env holds this run's KEA_* values
     # Why: setup.sh reads a deploy/prod install's .env
     # From: Issue #763 | PR #1912
-    _ci_validate_setup_rollback resp rc "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_HOST=%s\nKEA_DATA_DIR=%s\n' \
+    _ci_validate_setup_rollback resp rc "$(printf 'KEA_CTRL_TOKEN=%s\nKEA_CTRL_ADDRESS=%s\nKEA_DATA_DIR=%s\n' \
         "${token}" "${kip}" "${dir}")" kea "${snap}" || return 2
     case "${rc}:${resp}" in
         0:*"Kea rolled back to known-good snapshot ${snap} ("*) ;;
