@@ -2773,6 +2773,10 @@ route_ops!(SecondaryOp {
 pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
     match args.first().map(String::as_str) {
         Some("zone-snapshots") => Some(zone_snapshots_cli(s)),
+        // What: registration token as the ui resolves it.
+        // Why: CI reads the token the register API checks.
+        // From: Issue #1683 | PR #2020
+        Some("registration-token") => Some(registration_token(s).map(|t| println!("{t}"))),
         Some("zone-rollback") => Some(match &args[1..] {
             [zone, id] => rollback(s, zone, id).await.map(|()| {
                 println!("{}", json!({"restored": zone, "snapshot": id}));

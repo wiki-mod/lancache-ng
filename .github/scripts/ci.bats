@@ -694,12 +694,13 @@ _ci_curl_secret() {
     printf '%s = "%s"\n' "${opt}" "${value}" | _ci_validate_curl -K - "$@"
 }
 
-# What: zone snapshots as JSON, via the ui CLI.
-# Why: the ui owns them; setup.sh calls the same.
-# From: Issue #628 | PR #1980
-_ci_validate_zone_snapshots() {
-    local cid="$1" crate rows row out
+# What: one ui CLI command in the ui container.
+# Why: the ui owns the data; one way to reach its CLI.
+# From: Issue #1683 | PR #2020
+_ci_validate_ui_cli() {
+    local cid="$1" crate rows row
     local -a cmd=() run=()
+    shift
     crate="$(_ci_required_field ui crates list)" || return 2
     rows="$(_ci_required_field ui processes list)" || return 2
     # What: the ui process row that runs the crate binary.
@@ -713,7 +714,15 @@ _ci_validate_zone_snapshots() {
         fi
     done <<< "${rows}"
     [ "${#run[@]}" -gt 0 ] || { ci_log "[CI-ERROR-VALIDATE-0151]" "crate=\"${crate%%$'\n'*}\" reason=\"no ui process row runs the crate binary\""; return 2; }
-    out="$(_ci_capture 0 _ci_bounded_exec "${cid}" "${run[@]}" zone-snapshots)" || return 2
+    _ci_capture 0 _ci_bounded_exec "${cid}" "${run[@]}" "$@"
+}
+
+# What: zone snapshots as JSON, via the ui CLI.
+# Why: the ui owns them; setup.sh calls the same.
+# From: Issue #628 | PR #1980
+_ci_validate_zone_snapshots() {
+    local cid="$1" out
+    out="$(_ci_validate_ui_cli "${cid}" zone-snapshots)" || return 2
     printf '%s\n' "${out##*$'\n'}"
 }
 
@@ -1051,18 +1060,11 @@ _ci_register_secondary() {
     printf '%s' "${out%$'\n'*}"
 }
 
-# What: the ui's token file path, a SOT runtime default
-# Why: the ui reads it from the SOT list, not a process env
-# From: Issue #583 | PR #1905
-_ci_validate_ui_token_file() {
-    _ci_runtime_default SECONDARY_REGISTRATION_TOKEN_FILE
-}
-
 # What: each secondary gets the transfer key.
 # Why: AXFR needs TSIG name, secret and primary.
 # From: Issue #1683
 _ci_validate_secondary_identity() {
-    local project="$1" base cid token a au ap bp trc=0 tf label svc
+    local project="$1" base cid token a au ap bp label svc
     label="$(_ci_variable CI_VALIDATE_PROBE_LABEL)" || return 2
     svc="$(_ci_validation_service ui)" || return 2
     cid="$(_ci_validate_cid "${project}" "${svc}")" || return 2
@@ -1070,22 +1072,12 @@ _ci_validate_secondary_identity() {
         ci_log "[CI-ERROR-VALIDATE-0045]" "reason=\"no ui container/IP for secondary-identity check\""
         return 2
     fi
-    tf="$(_ci_validate_ui_token_file)" || return 2
-    # What: token as the ui resolves it: its file, else env.
-    # Why: no file when the ui got a real token via env.
-    # From: Issue #583 | PR #1858
-    _ci_bounded_exec "${cid}" test -f "${tf}" || trc=$?
-    case "${trc}" in
-        0) token="$(_ci_capture 0 _ci_bounded_exec "${cid}" cat "${tf}")" || {
-               ci_log "[CI-ERROR-VALIDATE-0084]" "container=\"${cid}\" file=\"${tf}\" reason=\"token file unreadable (raw above)\""; return 2; } ;;
-        1) token="$(_ci_capture 0 _ci_bounded_exec "${cid}" printenv SECONDARY_REGISTRATION_TOKEN)" || {
-               ci_log "[CI-ERROR-VALIDATE-0085]" "container=\"${cid}\" reason=\"no token file and no SECONDARY_REGISTRATION_TOKEN env (raw above)\""; return 2; } ;;
-        *)
-            ci_log "[CI-ERROR-VALIDATE-0066]" "container=\"${cid}\" file=\"${tf}\" rc=${trc} reason=\"token file check in the ui container failed (docker error above)\""
-            return 2
-            ;;
-    esac
-    token="${token//$'\n'/}"
+    # What: the token as the ui resolves it: env, else file.
+    # Why: the ui CLI reads it with the code the API checks.
+    # From: Issue #1683 | PR #2020
+    token="$(_ci_validate_ui_cli "${cid}" registration-token)" || {
+        ci_log "[CI-ERROR-VALIDATE-0084]" "container=\"${cid}\" reason=\"ui registration-token failed (raw above)\""; return 2; }
+    token="${token##*$'\n'}"
     if [ -z "${token}" ]; then
         ci_log "[CI-ERROR-VALIDATE-0046]" "reason=\"could not read SECONDARY_REGISTRATION_TOKEN from ui\""
         return 2
