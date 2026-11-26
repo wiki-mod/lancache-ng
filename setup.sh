@@ -3055,7 +3055,7 @@ migrate_quickstart_install() (
         # Why: nothing is deleted; the operator decides
         # From: Issue #1683 | PR #1858
         if list_has "$volume" "$kept_list"; then
-            kept+=" $(compose_config_value "$old_dir" "$old_env" --required ".volumes[\$k].name" --arg k "$volume")" || exit $?
+            kept+=" $(compose_config_value "$old_dir" "$old_env" --volume "$volume")" || exit $?
             continue
         fi
         missing+=" $volume"
@@ -3065,22 +3065,22 @@ migrate_quickstart_install() (
     # Why: the ui renders nginx only with it; dns/proxy wait
     # From: Issue #1683 | PR #1858
     ensure_public_suffix_list "$(deploy_prod_repo_root "$stack_dir")"
+    # What: names and target dirs resolve before the backup
+    # Why: the backup stops and restarts the old stack too
+    # From: Issue #1683 | PR #1858
+    copies=$(quickstart_volume_dirs "$new_env") \
+        || die "Cannot resolve the state directories of $new_env (exit $?); the quickstart stack was not touched."
+    mapfile -t copy_lines <<< "$copies"
+    local -a copy_names=()
+    for line in "${copy_lines[@]}"; do
+        volume=$(compose_config_value "$old_dir" "$old_env" --volume "${line%% *}") || exit $?
+        copy_names+=("$volume")
+    done
     # What: backup only after every pre-stop check passed
     # Why: a bad setting must stop before the stack stops
     # From: Issue #1683
     ( cmd_backup --config "$old_dir" ) \
         || die "Pre-migration backup of $old_dir failed; the quickstart stack was not touched."
-    # What: volume names resolve before the stack stops
-    # Why: a failed lookup must leave the old stack running
-    # From: Issue #1683 | PR #1858
-    copies=$(quickstart_volume_dirs "$new_env") \
-        || die "Cannot resolve the state directories of $new_env (exit $?)."
-    mapfile -t copy_lines <<< "$copies"
-    local -a copy_names=()
-    for line in "${copy_lines[@]}"; do
-        copy_names+=("$(compose_config_value "$old_dir" "$old_env" --required \
-            ".volumes[\$k].name" --arg k "${line%% *}")") || exit $?
-    done
     stack_compose "$old_dir" "$old_env" stop \
         || die "Failed to stop the quickstart stack in $old_dir (exit $?); the quickstart stack was not touched."
     local i
@@ -5709,25 +5709,6 @@ validate_compose_config() {
     print_ok "Docker Compose configuration is valid"
 }
 
-# What: the compose volume whose device is CACHE_DIR
-# Why: compose names it; setup only knows it is the cache
-# From: Issue #1683 | PR #1858
-compose_cache_volume_name() {
-    local install_dir="$1" env_file="$2" cache_dir volume
-    cache_dir=$(prod_state_dir_for_key CACHE_DIR "$env_file") || exit $?
-    # What: one named volume, a proven bind mount, or stop
-    # Why: v0.3 binds CACHE_DIR; a missing mount is an error
-    # From: Issue #1683 | PR #1858
-    volume=$(compose_config_value "$install_dir" "$env_file" --required \
-        "[.volumes[]? | select(.driver_opts.device == \$dir) | .name] as \$n
-         | if (\$n | length) == 1 then \$n[0]
-           elif (\$n | length) > 1 then null
-           elif any(.services[]?.volumes[]?;
-                    .type == \"bind\" and .source == \$dir) then \"-\"
-           else null end" --arg dir "$cache_dir") || exit $?
-    [[ "$volume" = "-" ]] || printf '%s\n' "$volume"
-}
-
 # What: the named volumes that carry project label $1
 # Why: one owner of the label filter and its error
 # From: Issue #1683 | PR #2017
@@ -5748,7 +5729,7 @@ compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
     compose_stack_or_skip "$install_dir" "Listing the Docker volumes" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    project=$(compose_config_value "$install_dir" "$env_file" --required .name) || exit $?
+    project=$(compose_config_value "$install_dir" "$env_file" --project) || exit $?
     containers=$(stack_compose "$install_dir" "$env_file" ps --all -q) \
         || die "Failed to list the containers of $install_dir (exit $?)."
     while IFS= read -r container; do
@@ -5806,7 +5787,7 @@ backup_compose_volumes() {
     compose_stack_or_skip "$install_dir" "Archiving the Docker volumes" || return 0
     mkdir -p "$volume_root" || die "Failed to create $volume_root (exit $?)."
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    cache_volume=$(compose_cache_volume_name "$install_dir" "$env_file") \
+    cache_volume=$(compose_config_value "$install_dir" "$env_file" --cache) \
         || die "Cannot resolve the cache volume of $install_dir (exit $?)."
     volumes=$(compose_volume_names "$install_dir") \
         || die "Cannot list the Docker volumes of $install_dir (exit $?)."
@@ -6177,7 +6158,7 @@ cmd_restore() (
     # From: Issue #1683 | PR #1858
     archived_project=""
     if command_available docker; then
-        archived_project=$(compose_config_value "$root/$rel_install" "$archived_env" --required .name) || exit $?
+        archived_project=$(compose_config_value "$root/$rel_install" "$archived_env" --project) || exit $?
     fi
     guard_restore_shared_project_volumes "$install_dir" "$archived_here" "$archived_project"
 
@@ -7940,8 +7921,7 @@ ui_data_volume() {
         print_skip "Reading the old Admin UI settings: docker is not available"
         return 0
     fi
-    volume=$(compose_config_value "$install_dir" "$env_file" --required \
-        ".volumes[\$k].name" --arg k ui-data) || exit $?
+    volume=$(compose_config_value "$install_dir" "$env_file" --volume ui-data) || exit $?
     docker_volume_exists "$volume" || rc=$?
     [[ "$rc" -eq 1 ]] && return 0
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the old Admin UI settings were not read."
@@ -8282,14 +8262,20 @@ logbundle_named_volume_listing() {
         return 0
     fi
     local volume project prc=0
-    project=$(compose_config_value "$install_dir" "$env_file" --required .name) || prc=$?
-    [[ "$prc" -ne 0 ]] || volume=$(compose_project_volumes "$project" "$base_name" 2>&1) || prc=$?
+    project=$(compose_config_value "$install_dir" "$env_file" --project) || prc=$?
+    [[ "$prc" -ne 0 ]] || volume=$(compose_project_volumes "$project" "$base_name") || prc=$?
     if [[ "$prc" -ne 0 ]]; then
         printf 'volume lookup failed (exit %s); see the setup.sh output\n' "$prc" > "$out"
         return 0
     fi
     if [[ -z "$volume" ]]; then
-        printf 'volume %s of project %s not found (not created yet)\n' "$base_name" "$project" > "$out"
+        printf 'no volume labeled %s in project %s (not created yet or unlabeled)\n' \
+            "$base_name" "$project" > "$out"
+        return 0
+    fi
+    if [[ "$volume" == *$'\n'* ]]; then
+        printf 'several volumes labeled %s in project %s; none listed:\n%s\n' \
+            "$base_name" "$project" "$volume" > "$out"
         return 0
     fi
     helper_run "${volume}:/data:ro" -- \
@@ -8580,20 +8566,34 @@ json_value() {
 # Why: compose owns ports and mounts; setup keeps no copy
 # From: Issue #1683 | PR #1858
 compose_config_value() {
-    local install_dir="$1" env_file="$2" required=0 filter cfg value
+    local install_dir="$1" env_file="$2" filter cfg value cache_dir
+    local -a args=()
     shift 2
-    # What: --required stops on an empty or null answer
-    # Why: an empty name would make callers skip real data
+    # What: modes: --project, --volume <key>, --cache, or jq
+    # Why: callers ask a name, not compose's JSON layout
     # From: Issue #1683 | PR #1858
-    [[ "$1" != "--required" ]] || { required=1; shift; }
-    filter="$1"
-    shift
+    case "$1" in
+        --project) filter='.name | strings' ;;
+        --volume) filter=".volumes[\$k].name | strings" args=(--arg k "$2") ;;
+        --cache)
+            cache_dir=$(prod_state_dir_for_key CACHE_DIR "$env_file") || exit $?
+            # What: one cache volume, or only bind mounts
+            # Why: v0.3 binds CACHE_DIR; mix or none = error
+            # From: Issue #1683 | PR #1858
+            filter="[.volumes[]? | select(.driver_opts.device == \$dir) | .name] as \$n
+                | [.services[]?.volumes[]? | select(.type == \"bind\" and .source == \$dir)] as \$b
+                | if (\$n | length) == 1 and (\$b | length) == 0 then \$n[0]
+                  elif (\$n | length) == 0 and (\$b | length) > 0 then \"\"
+                  else error(\"CACHE_DIR \\(\$dir): \\(\$n | length) volume(s), \\(\$b | length) bind mount(s)\") end"
+            args=(--arg dir "$cache_dir") ;;
+        *) filter="$1"; shift; args=("$@") ;;
+    esac
     cfg=$(stack_compose "$install_dir" "$env_file" config --format json) \
         || die "Cannot render the compose config of $install_dir (exit $?)."
-    value=$(json_value "$filter" "$cfg" "$@") \
-        || die "Cannot read $filter from the compose config of $install_dir (exit $?)."
-    [[ "$required" -eq 0 || -n "$value" ]] \
-        || die "The compose config of $install_dir has no value for $filter ($*)."
+    value=$(json_value "$filter" "$cfg" "${args[@]}") \
+        || die "Cannot read $1 from the compose config of $install_dir (exit $?)."
+    [[ "$1" != --project && "$1" != --volume || -n "$value" ]] \
+        || die "The compose config of $install_dir has no name for $1 ${2:-}."
     printf '%s\n' "$value"
 }
 
