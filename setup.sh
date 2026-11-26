@@ -5584,17 +5584,12 @@ require_stack_env_file() {
 # Why: backup and restore must handle damaged installs
 # From: Issue #1683 | PR #1858
 compose_stack_available() {
-    local install_dir="$1"
-    [[ -f "$install_dir/docker-compose.yml" ]] && command_available docker
-}
-
-# What: compose_stack_available, else prints a SKIP line
-# Why: a skipped step must say that it was skipped and why
-# From: Issue #1683 | PR #1858
-compose_stack_or_skip() {
-    local install_dir="$1" action="$2"
-    compose_stack_available "$install_dir" && return 0
-    print_skip "$action: no docker-compose.yml or no docker for $install_dir"
+    local install_dir="$1" action="${2:-}"
+    [[ -f "$install_dir/docker-compose.yml" ]] && command_available docker && return 0
+    # What: with an action text a SKIP line says why
+    # Why: a skipped step must say that it was skipped
+    # From: Issue #1683 | PR #1858
+    [[ -z "$action" ]] || print_skip "$action: no docker-compose.yml or no docker for $install_dir"
     return 1
 }
 
@@ -5616,7 +5611,7 @@ compose_stack_running() {
 compose_stack_stop() {
     local install_dir="$1"
     local env_file
-    compose_stack_or_skip "$install_dir" "Stopping the stack" || return 0
+    compose_stack_available "$install_dir" "Stopping the stack" || return 0
     print_step "Stopping stack for consistent backup/restore"
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     stack_compose "$install_dir" "$env_file" stop \
@@ -5629,7 +5624,7 @@ compose_stack_stop() {
 compose_stack_start() {
     local install_dir="$1"
     local env_file
-    compose_stack_or_skip "$install_dir" "Starting the stack" || return 0
+    compose_stack_available "$install_dir" "Starting the stack" || return 0
     print_step "Starting stack"
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     stack_up "$install_dir" "$env_file" -d \
@@ -5677,7 +5672,7 @@ compose_project_volumes() {
 # From: Issue #1683 | PR #1858
 compose_volume_names() {
     local install_dir="$1" container env_file project containers mounts volumes names=""
-    compose_stack_or_skip "$install_dir" "Listing the Docker volumes" || return 0
+    compose_stack_available "$install_dir" "Listing the Docker volumes" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     project=$(compose_config_value "$install_dir" "$env_file" --project) || exit $?
     containers=$(stack_compose "$install_dir" "$env_file" ps --all -q) \
@@ -5721,7 +5716,7 @@ helper_volume_tar() {
 # From: Issue #1683 | PR #1858
 backup_compose_volumes() {
     local install_dir="$1" volume_root="$2" mode="$3" volume env_file cache_volume volumes
-    compose_stack_or_skip "$install_dir" "Archiving the Docker volumes" || return 0
+    compose_stack_available "$install_dir" "Archiving the Docker volumes" || return 0
     mkdir -p "$volume_root" || die "Failed to create $volume_root (exit $?)."
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     cache_volume=$(compose_config_value "$install_dir" "$env_file" --cache) \
@@ -5818,7 +5813,7 @@ guard_restore_shared_project_volumes() {
 # From: Issue #1683 | PR #1858
 record_image_revisions() {
     local install_dir="$1" output="$2" env_file revisions
-    compose_stack_or_skip "$install_dir" "Recording the image revisions" || return 0
+    compose_stack_available "$install_dir" "Recording the image revisions" || return 0
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
     if revisions=$(stack_compose "$install_dir" "$env_file" images --format json); then
         :
