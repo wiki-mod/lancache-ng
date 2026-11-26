@@ -6363,10 +6363,12 @@ Usage: ./setup.sh configure-upstream-dns [install-dir]
 Shows the external DNS setting of an existing primary installation and lets
 you set, change or remove it. It also asks whether LanCache-NG answers
 reverse lookups (PTR) of private networks itself; with Kea as DHCP server
-this stays on. The answers are checked while you type. The
-stack then restarts through the same health-gated steps as ./setup.sh update;
-if it does not become healthy, the previous setting is restored. If
-[install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
+this stays on. The answers are checked while you type, and each DNS server
+gets one real query; a server that does not answer is only kept when you
+confirm it, and the setting is undone if it still does not answer once
+active. The stack then restarts through the same health-gated steps as
+./setup.sh update; if it does not become healthy, the previous setting is
+restored. If [install-dir] is omitted, ${DEFAULT_INSTALL_DIR} is used.
 EOF
             ;;
         debug)
@@ -6453,12 +6455,12 @@ with an error. If convergence or validation fails, the stack is left
 stopped instead of starting on an unconverged config; fix the reported
 problem and run setup.sh update.
 
-Same-host limitation: the Docker Compose project name is fixed
-("lancache-ng") for every install, so two installs on the same host share the
-same named Docker volumes regardless of install-dir. Restoring into a
-different [install-dir] refuses to proceed if a running stack elsewhere on
-this host is still using that project name, to avoid overwriting its live
-volumes.
+Same-host limitation: the Docker Compose project name comes from the
+compose file ("lancache-ng" for every primary), not from install-dir, so two
+primary installs on the same host share the same named Docker volumes.
+Restoring into a different [install-dir] refuses to proceed if a running
+stack elsewhere on this host is still using that project name, to avoid
+overwriting its live volumes.
 EOF
             ;;
         reset-to-last-known-good-config)
