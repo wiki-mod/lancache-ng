@@ -833,6 +833,9 @@ runtime:
     # Why: the DNS page shows one zone overview table.
     # From: Issue #1683
     - UI_ROUTE_ZONE_OVERVIEW=/api/zones/overview
+    # What: more ui routes: DHCP, services, stats, register.
+    # Why: the ui serves them; templates name them by key.
+    # From: Issue #1683 | PR #2020
     - UI_ROUTE_DHCP_MODE=/dhcp/mode
     - UI_ROUTE_DHCP_DDNS=/dhcp/ddns
     - UI_ROUTE_DHCP_PROXY=/dhcp/proxy
@@ -871,7 +874,7 @@ runtime:
     # From: Issue #1683 | PR #1980
     - DNS_CONFIG_WAIT_SECONDS=1
     # What: samples the stats page charts keep per series.
-    # Why: one value for the chart size and the query.
+    # Why: no release has read it.
     # From: Issue #1683 | PR #1912
     - UI_STATS_POINTS=60
     # What: minutes between host convergence runs.
@@ -936,6 +939,9 @@ runtime:
     # Why: setup.sh bootstrap copy; ci.sh checks both.
     # From: Issue #1683 | PR #1912
     - LANCACHE_REPO_URL=https://github.com/wiki-mod/lancache-ng
+    # What: Kea data dir, lease file and socket dir.
+    # Why: compose mounts them; the Kea render uses them.
+    # From: Issue #1683 | PR #2020
     - KEA_DATA_DIR=/var/lib/kea
     - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
     - KEA_SOCKET_DIR=/run/kea
@@ -943,6 +949,9 @@ runtime:
     # Why: Kea refuses a dir looser than 750.
     # From: Issue #1683 | PR #1980
     - KEA_SOCKET_DIR_MODE=750
+    # What: older Kea dhcp4 and DDNS socket paths.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - KEA4_SOCKET=@KEA_SOCKET_DIR@/kea4.sock
     - KEA_DDNS_SOCKET=@KEA_SOCKET_DIR@/kea-ddns.sock
     # What: TSIG key name and algorithm of DDNS and AXFR.
@@ -951,45 +960,99 @@ runtime:
     - DDNS_TSIG_NAME=lancache-ddns-key
     - DDNS_TSIG_ALGORITHM=hmac-sha256
     # What: the Docker bridge range of internal clients.
-    # Why: Kea control and proxy ACLs admit the same range.
+    # Why: the proxy nginx ACLs admit this range.
     # From: Issue #1683 | PR #1912
     - DOCKER_BRIDGE_NET=172.16.0.0/12
+    # What: Kea control ACL, firewall chain and realm.
+    # Why: no program reads them in v0.4.0 or later.
+    # From: Issue #1683 | PR #2020
     - KEA_CTRL_ALLOW_FROM=@DOCKER_BRIDGE_NET@ 127.0.0.0/8
     - KEA_CTRL_CHAIN=LANCACHE_KEA_CTRL
     - KEA_CTRL_REALM=kea-control
+    # What: Kea hook root and its search depth.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - KEA_HOOKS_ROOT=/usr/lib
-    - KEA_LEASE_CMDS_HOOK=libdhcp_lease_cmds.so
     - KEA_HOOKS_SEARCH_DEPTH=5
+    # What: Kea lease commands hook file.
+    # Why: the Kea render loads it for the lease API.
+    # From: Issue #1683 | PR #2020
+    - KEA_LEASE_CMDS_HOOK=libdhcp_lease_cmds.so
+    # What: Kea DDNS queue, name prefix and name rule.
+    # Why: the Kea render writes them into the configs.
+    # From: Issue #1683 | PR #2020
     - KEA_NCR_MAX_QUEUE=1024
     - KEA_DDNS_GENERATED_PREFIX=dhcp
     - KEA_DDNS_REPLACE_CLIENT_NAME=when-present
+    # What: Kea log severity and debug level.
+    # Why: the Kea render writes the loggers from them.
+    # From: Issue #1683 | PR #2020
     - KEA_LOG_SEVERITY=INFO
-    - KEA_DHCP4_PACKET_LOG_SEVERITY=ERROR
     - KEA_LOG_DEBUGLEVEL=0
+    # What: Kea packet log severity of an older layout.
+    # Why: no release has read it; DHCP_LOG_PACKETS rules.
+    # From: Issue #1683 | PR #2020
+    - KEA_DHCP4_PACKET_LOG_SEVERITY=ERROR
+    # What: dns snapshot mount of the dns container.
+    # Why: compose mounts it; snapshots live below it.
+    # From: Issue #1683 | PR #2020
     - DNS_SNAPSHOT_MOUNT=/var/lib/lancache-dns
+    # What: older dns config snapshot dir and file names.
+    # Why: no program reads them in v0.4.0 or later.
+    # From: Issue #1683 | PR #2020
     - DNS_CONFIG_SNAPSHOT_DIR=@DNS_SNAPSHOT_MOUNT@/config-snapshots
     - DNS_AUTH_CONFIG_SNAPSHOT_FILE=pdns.conf
     - DNS_RECURSOR_CONFIG_SNAPSHOT_FILE=recursor.conf
     - DNS_ZONE_SNAPSHOT_FILE=zone.json
+    # What: dns state dir and pdns data dir.
+    # Why: compose mounts them into the dns container.
+    # From: Issue #1683 | PR #2020
     - DNS_STATE_DIR=/var/lib/powerdns-state
     - PDNS_DATA_DIR=/var/lib/powerdns
+    # What: replication role words: primary and secondary.
+    # Why: compose sets the role; the dns render reads it.
+    # From: Issue #1683 | PR #2020
     - DNS_REPLICATION_ROLE=primary
-    - RAW_CONTENT_URL=https://raw.githubusercontent.com
-    - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
     - DNS_REPLICATION_ROLE_SECONDARY=secondary
+    # What: base URL of raw repository files.
+    # Why: CI and other SOT URLs build on it.
+    # From: Issue #1683 | PR #2020
+    - RAW_CONTENT_URL=https://raw.githubusercontent.com
+    # What: path of setup.sh below RAW_CONTENT_URL.
+    # Why: no release has read it.
+    # From: Issue #1683 | PR #2020
+    - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
+    # What: secondary gid, loopback tries and secret dir.
+    # Why: setup.sh and the secondary compose read them.
+    # From: Issue #1683 | PR #2020
     - SECONDARY_RUNTIME_GID=0
     - SECONDARY_LOOPBACK_CANDIDATES=10
     - SECONDARY_SHARED_SECRET_DIR=@DNS_SNAPSHOT_MOUNT@/secrets
+    # What: container names of the stack.
+    # Why: compose names the containers; logs file by them.
+    # From: Issue #1683 | PR #2020
     - CONTAINER_NAME_PREFIX=LanCache-NG
     - CONTAINER_NAME_SERVICES=@CONTAINER_NAME_PREFIX@-services
     - CONTAINER_NAME_PROXY=@CONTAINER_NAME_PREFIX@-proxy
     - CONTAINER_NAME_DNS=@CONTAINER_NAME_PREFIX@-dns
     - CONTAINER_NAME_DHCP=@CONTAINER_NAME_PREFIX@-dhcp
     - CONTAINER_NAME_UI=@CONTAINER_NAME_PREFIX@-ui
+    # What: cache domain list file in the images.
+    # Why: compose mounts it; the renders read it.
+    # From: Issue #1683 | PR #2020
     - CDN_DOMAINS_FILE=/usr/share/lancache/cdn-domains.txt
+    # What: cachehamster data dir.
+    # Why: compose mounts it; cachehamster keeps state.
+    # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
+    # What: cache dir and the prefix it must stay in.
+    # Why: the purge never deletes outside the prefix.
+    # From: Issue #1683 | PR #2020
     - CACHE_DIR=/var/cache/lancache
     - CACHE_DIR_ALLOWED_PREFIX=/var/cache
+    # What: Docker socket path.
+    # Why: compose mounts it; DOCKER_ENDPOINT builds on it.
+    # From: Issue #1683 | PR #2020
     - DOCKER_SOCKET=/var/run/docker.sock
     # What: host clock zone file, read only.
     # Why: the cachehamster window is local time.
