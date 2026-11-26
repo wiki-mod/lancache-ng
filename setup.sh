@@ -5071,7 +5071,6 @@ migrate_env_for_update() (
 
     [[ -f "$env_file" ]] \
         || die "Missing $env_file. Cannot update safely because local runtime configuration is not available."
-    merge_retired_ui_settings "$install_dir" "$env_file" merge
     note_env_overrides "$env_file"
 
     # What: a failed run puts the original .env back
@@ -5174,6 +5173,10 @@ migrate_env_for_update() (
     # Why: the adopted old name moves like any other
     # From: Issue #1683 | PR #1912
     env_renamed_keys "$env_file" move
+    # What: old ui settings merge once names and pins exist
+    # Why: the merge asks compose, which needs a full .env
+    # From: Issue #1683 | PR #2017
+    merge_retired_ui_settings "$install_dir" "$env_file" merge
 
     # What: validates an operator TTL; default is the SOT
     # Why: .env never repeats a runtime.defaults value
