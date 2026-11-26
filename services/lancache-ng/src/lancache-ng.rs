@@ -3947,6 +3947,21 @@ mod dns {
             // Why: a dead upstream must not restart dns.
             // From: Issue #1683 | PR #2020
             Some("healthcheck") => healthcheck(&Settings::from_process()?).await,
+            // What: soa-probe ZONE [http/https/auth/ip#n]
+            // Why: the serial one server holds; no ui.
+            // From: Issue #1683 | PR #2020
+            Some("soa-probe") => match &args[1..] {
+                [zone] | [zone, _] => {
+                    let target = args.get(2).map_or("auth", String::as_str);
+                    let v = soa_probe(&Settings::from_process()?, zone, target).await?;
+                    println!("{v}");
+                    match v["serves_zone"].as_bool() {
+                        Some(true) => Ok(()),
+                        _ => Err(format!("soa-probe: {} does not serve {zone}", v["server"])),
+                    }
+                }
+                _ => Err("usage: soa-probe <zone> [http|https|auth|ip#port]".into()),
+            },
             // What: query NAME TYPE [http/https/auth/ip#n]
             // Why: a real DNS answer; needs no running ui.
             // From: Issue #1683 | PR #2020
@@ -4032,8 +4047,9 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 14] = [
+    const COMMANDS: [&str; 15] = [
         "daemon",
+        "soa-probe",
         "follow-once",
         "healthcheck",
         "records",
@@ -5080,6 +5096,35 @@ mod dns {
         target: &str,
     ) -> Result<Value, String> {
         let qtype = crate::shared::dns::qtype(rtype)?;
+        let (addr, rd) = target_addr(s, target)?;
+        let wait = std::time::Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
+        let (n, ty) = (name.to_string(), qtype);
+        let r =
+            tokio::task::spawn_blocking(move || crate::shared::dns::ask(addr, &n, ty, rd, wait))
+                .await
+                .map_err(|e| e.to_string())??;
+        Ok(json!({"server": addr.to_string(), "name": name, "type": rtype, "rd": rd, "reply": r}))
+    }
+
+    // What: one SOA question without RD to a target.
+    // Why: shows the serial one server holds for a zone.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn soa_probe(s: &Settings, zone: &str, target: &str) -> Result<Value, String> {
+        let (addr, _) = target_addr(s, target)?;
+        let wait = std::time::Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
+        let z = zone.to_string();
+        let soa =
+            tokio::task::spawn_blocking(move || crate::shared::dns::soa_probe(addr, &z, wait))
+                .await
+                .map_err(|e| e.to_string())??;
+        Ok(json!({"server": addr.to_string(), "zone": zone, "soa": soa,
+            "serves_zone": soa.serves_zone()}))
+    }
+
+    // What: http, https, auth or ip#port as address.
+    // Why: query and soa-probe name servers one way.
+    // From: Issue #1683 | PR #2020
+    fn target_addr(s: &Settings, target: &str) -> Result<(std::net::SocketAddr, bool), String> {
         let port = s.num::<u16>("DNS_PORT")?;
         // What: http, https, auth or an address.
         // Why: the SOT names each server; auth gets no RD.
@@ -5101,13 +5146,7 @@ mod dns {
             },
         };
         let addr = std::net::SocketAddr::new(crate::shared::dns::parse_ip(&host)?, port);
-        let wait = std::time::Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
-        let (n, ty) = (name.to_string(), qtype);
-        let r =
-            tokio::task::spawn_blocking(move || crate::shared::dns::ask(addr, &n, ty, rd, wait))
-                .await
-                .map_err(|e| e.to_string())??;
-        Ok(json!({"server": addr.to_string(), "name": name, "type": rtype, "rd": rd, "reply": r}))
+        Ok((addr, rd))
     }
 
     // What: anchors, proven zones and NTAs as JSON.
@@ -7101,7 +7140,7 @@ mod shared {
         // What: SOA answer of one DNS server.
         // Why: aa marks pdns data; serial shows the state.
         // From: Issue #1683
-        #[derive(Clone, Debug, Eq, PartialEq)]
+        #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
         pub struct Soa {
             pub authoritative: bool,
             pub rcode: u8,
@@ -15227,6 +15266,21 @@ mod ui {
         crate::shared::ntp::tracking(&text)
     }
 
+    // What: GET UI_ROUTE_DNS_SOA_PROBE?zone=&target=
+    // Why: REST reads what the CLI reads.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_soa_api(
+        State(app): Shared,
+        axum::extract::Query(q): axum::extract::Query<Fields>,
+    ) -> Page {
+        let target = q.get("target").map_or("auth", String::as_str);
+        let zone = field(&q, "zone");
+        let v = crate::dns::soa_probe(&app.settings(), &zone, target)
+            .await
+            .map_err(bad_request)?;
+        Ok(axum::Json(v).into_response())
+    }
+
     // What: GET UI_ROUTE_DNS_TSIG: key state.
     // Why: REST reads what the CLI reads.
     // From: Issue #1683 | PR #2020
@@ -16953,6 +17007,7 @@ mod ui {
             route("UI_ROUTE_DNSSEC", Get, Api, dnssec_api),
             route("UI_ROUTE_DNS_RECORDS", Get, Api, dns_records_api),
             route("UI_ROUTE_DNS_TSIG", Get, Api, dns_tsig_api),
+            route("UI_ROUTE_DNS_SOA_PROBE", Get, Api, dns_soa_api),
             route("UI_ROUTE_DNS_API_CHECK", Get, Api, dns_api_check),
             route("UI_ROUTE_DNS_STATS", Get, Api, dns_stats_api),
             route("UI_ROUTE_DNS_QUERY", Get, Api, dns_query_api),
