@@ -1818,7 +1818,7 @@ fn walk_cache(
 // From: Issue #871 | PR #1991
 fn cached(c: &Ctx) -> Result<Value, String> {
     let mut sizes = BTreeMap::new();
-    let dir = PathBuf::from(c.s.text("CACHE_DIR")?);
+    let dir = crate::shared::tidy::cache_root(&c.s)?;
     walk_cache(&dir, &|_| false, &mut sizes, &mut (0, 0))?;
     let apps: BTreeMap<String, u64> = known_depots(&c.dir)?
         .into_iter()
@@ -1847,7 +1847,7 @@ fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
 // From: Issue #871 | PR #1991
 fn wipe(c: &Ctx) -> Result<Value, String> {
     let mut freed = (0, 0);
-    wipe_dir(&PathBuf::from(c.s.text("CACHE_DIR")?), &mut freed)?;
+    wipe_dir(&crate::shared::tidy::cache_root(&c.s)?, &mut freed)?;
     Ok(json!({"freed": freed.0, "files": freed.1}))
 }
 
@@ -1872,7 +1872,7 @@ async fn app_cache(c: &Ctx, args: &[String], evict: bool) -> Result<Value, Strin
         .ok_or("app id must be a number")?;
     let ids = lookup(c, app).await?;
     let (mut sizes, mut freed) = (BTreeMap::new(), (0, 0));
-    let dir = PathBuf::from(c.s.text("CACHE_DIR")?);
+    let dir = crate::shared::tidy::cache_root(&c.s)?;
     let hit = |d: u32| evict && ids.contains(&d);
     walk_cache(&dir, &hit, &mut sizes, &mut freed)?;
     let bytes: u64 = ids.iter().filter_map(|d| sizes.get(d)).sum();

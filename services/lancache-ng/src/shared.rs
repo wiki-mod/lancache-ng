@@ -6292,6 +6292,13 @@ pub mod tidy {
         Ok(real)
     }
 
+    // What: the cache dir, checked against its prefix.
+    // Why: every delete in the cache uses this one gate.
+    // From: Issue #1683 | PR #2020
+    pub fn cache_root(s: &crate::config::Settings) -> Result<PathBuf, String> {
+        inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)
+    }
+
     // What: one regular file with its facts.
     // Why: links are never followed or removed.
     // From: Issue #1683 | PR #1980

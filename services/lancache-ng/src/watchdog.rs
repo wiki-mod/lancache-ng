@@ -181,7 +181,7 @@ fn purge_cache(s: &Settings, f: &mut Findings, now: u64) -> Result<(), String> {
     if !tidy::is_due(&stamp, now) {
         return Ok(());
     }
-    let dir = tidy::inside(&s.text("CACHE_DIR")?, &s.text("CACHE_DIR_ALLOWED_PREFIX")?)?;
+    let dir = tidy::cache_root(s)?;
     let (gone, errs) = tidy::drop_older(&dir, s.uint("CACHE_VALID_DAYS")?, now);
     eprintln!("watchdog: cache purge removed {gone} files");
     for e in errs {
