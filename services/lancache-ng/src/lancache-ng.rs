@@ -14068,6 +14068,28 @@ mod ui {
         Form(form): Form<Fields>,
     ) -> Page {
         csrf.check(&form)?;
+        // What: back to the page that sent the form.
+        // Why: a form of the dashboard returns there.
+        // From: Issue #1683 | PR #1980
+        let back = form
+            .get("back")
+            .filter(|b| b.starts_with('/') && !b.starts_with("//"))
+            .cloned()
+            .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
+        save_settings(&app, form).await?;
+        Ok(Redirect::to(&back).into_response())
+    }
+
+    // What: check, derive and save a settings change.
+    // Why: page form and REST save the same way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn save_settings(app: &App, form: Fields) -> Result<(), Fail> {
+        // What: the hash only through the password form.
+        // Why: it checks the old password and length.
+        // From: Issue #1683 | PR #2020
+        if form.contains_key("UI_AUTH_PASSWORD_HASH") {
+            return Err(bad_request(tr("err_password_form")));
+        }
         cache_room(
             &app.settings(),
             &form,
@@ -14095,26 +14117,15 @@ mod ui {
                     .map_err(bad_request)?;
             }
         }
-
-        // What: back to the page that sent the form.
-        // Why: a form of the dashboard returns there.
-        // From: Issue #1683 | PR #1980
-        let back = form
-            .get("back")
-            .filter(|b| b.starts_with('/') && !b.starts_with("//"))
-            .cloned()
-            .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
         // What: the zones before save; none if unreadable.
         // Why: a save may repair the settings; it must run.
         // From: Issue #1683 | PR #2017
         let before = hosted_now(&app.settings())
             .inspect_err(|e| eprintln!("ui: zones before the save unknown: {e}"))
             .unwrap_or_default();
-        let result = commit(&app, form).await;
-        if result.is_ok() {
-            drop_old_zones(&app.settings(), &before).await;
-        }
-        finish(result, &back)
+        commit(app, form).await.map_err(bad_request)?;
+        drop_old_zones(&app.settings(), &before).await;
+        Ok(())
     }
 
     // What: logs page.
@@ -16416,6 +16427,10 @@ mod ui {
             // Why: the router's table, the start's loader.
             // From: Issue #1683 | PR #2020
             Some("routes") => Some(route_list(s).map(|v| println!("{v}"))),
+            // What: change the password through the ui.
+            // Why: stdin keeps it out of the process list.
+            // From: Issue #1683 | PR #2020
+            Some("password") => Some(password_cli(s, args.get(1)).await),
             Some("templates") => Some(template_report(s).and_then(|v| {
                 println!("{v}");
                 match v["ok"].as_bool() {
@@ -16445,7 +16460,7 @@ mod ui {
     // What: every command of ui role; none = the server.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 11] = [
+    const COMMANDS: [&str; 12] = [
         "hash-password",
         "encode-password-hash",
         "zone-snapshots",
@@ -16453,6 +16468,7 @@ mod ui {
         "lang",
         "routes",
         "templates",
+        "password",
         "zone-rollback",
         "healthcheck",
         DHCP_PROBE_CMD,
@@ -16562,7 +16578,7 @@ mod ui {
             route("UI_PAGE_DASHBOARD", Get, Page, dashboard),
             route("UI_PAGE_SETUP", Get, Page, setup),
             route("UI_ROUTE_SETUP_SAVE", Post, Page, save),
-            route("UI_ROUTE_PASSWORD", Post, Page, password),
+            route("UI_ROUTE_PASSWORD", Post, Api, password),
             route("UI_PAGE_LOGS", Get, Page, logs),
             route("UI_PAGE_CACHEHAMSTER", Get, Page, cachehamster),
             route("UI_PAGE_DOMAINS", Get, Page, domains),
@@ -16619,6 +16635,7 @@ mod ui {
             route("UI_ROUTE_LOGS_SAVE", Post, Api, logs_save),
             route("UI_ROUTE_LOGS", Get, Api, logs_api),
             route("UI_ROUTE_LANG", Get, Api, lang_api),
+            route("UI_ROUTE_CSRF", Get, Api, csrf_api),
             route("UI_ROUTE_UI_ROUTES", Get, Api, routes_api),
             route("UI_ROUTE_UI_TEMPLATES", Get, Api, templates_api),
             route("UI_ROUTE_WATCHDOG_TIDY", Post, Api, watchdog_tidy),
@@ -16665,6 +16682,33 @@ mod ui {
                 "method": verb, "access": access}));
         }
         Ok(Value::Array(out))
+    }
+
+    // What: GET UI_ROUTE_CSRF: token of this session.
+    // Why: a script posts it like the page forms do.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn csrf_api(Extension(csrf): Extension<Csrf>) -> Response {
+        let v = json!({"token": csrf.0, "header": "x-csrf-token", "field": CSRF_FIELD});
+        axum::Json(v).into_response()
+    }
+
+    // What: ui password [user]: two stdin lines.
+    // Why: the page form's handler checks and saves.
+    // From: Issue #1683 | PR #2020
+    async fn password_cli(s: &Settings, user: Option<&String>) -> Result<(), String> {
+        let (current, new) = (stdin_line()?, stdin_line()?);
+        let mut form = vec![
+            ("current_password".to_string(), current),
+            ("new_password".to_string(), new.clone()),
+            ("confirm_password".to_string(), new),
+        ];
+        if let Some(u) = user {
+            form.push(("user".to_string(), u.clone()));
+        }
+        let route = s.text("UI_ROUTE_PASSWORD")?;
+        let v = http::ui_socket(s, &route, http::Body::Form(form)).await?;
+        println!("{v}");
+        Ok(())
     }
 
     // What: GET UI_ROUTE_UI_ROUTES: the route list.
@@ -16747,7 +16791,7 @@ mod ui {
         axum::Json(values): axum::Json<Fields>,
     ) -> Page {
         csrf.check_header(&headers)?;
-        commit(&app, values).await.map_err(bad_request)?;
+        save_settings(&app, values).await?;
         Ok(axum::Json(app.settings().view_json()).into_response())
     }
 

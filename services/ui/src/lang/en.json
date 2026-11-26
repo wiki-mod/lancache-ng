@@ -116,6 +116,7 @@
   "err_not_lan_domain": "{x} is not a LAN domain of this stack. Add it on the DNS page first.",
   "err_password_min": "the password needs at least {x} characters",
   "err_password_wrong": "the current password is wrong",
+  "err_password_form": "the password is changed only in the password form",
   "err_passwords_differ": "the two new passwords differ",
   "err_time": "time not understood",
   "busy_done": "Done",

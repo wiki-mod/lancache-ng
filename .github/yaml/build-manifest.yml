@@ -824,6 +824,7 @@ runtime:
     - UI_ROUTE_LANG=/api/ui/lang
     - UI_ROUTE_UI_ROUTES=/api/ui/routes
     - UI_ROUTE_UI_TEMPLATES=/api/ui/templates
+    - UI_ROUTE_CSRF=/api/csrf
     - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema

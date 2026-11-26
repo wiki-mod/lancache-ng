@@ -116,6 +116,7 @@
   "err_not_lan_domain": "{x} ist keine LAN-Domain dieses Systems. Lege sie zuerst auf der DNS-Seite an.",
   "err_password_min": "das Passwort braucht mindestens {x} Zeichen",
   "err_password_wrong": "das aktuelle Passwort ist falsch",
+  "err_password_form": "das Passwort wird nur im Passwortformular geändert",
   "err_passwords_differ": "die beiden neuen Passwörter sind verschieden",
   "err_time": "Zeit nicht verstanden",
   "busy_done": "Fertig",
