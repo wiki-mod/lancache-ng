@@ -1104,6 +1104,72 @@ confirm_experimental_channel() {
     export LANCACHE_CHANNEL_CONFIRMED=1
 }
 
+# What: sets LANCACHE_IMAGE_CHANNEL: preset, else asked
+# Why: one channel choice; role install adds the second yes
+# From: Issue #1683 | PR #2017
+choose_lancache_channel() {
+    local default="$1" role="$2" install_channel selectable retired channel_hint offered current reason
+    install_channel=$(lancache_sot_value install_channel release) || exit $?
+    selectable=$(lancache_selectable_channels) || exit $?
+    if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
+        validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
+        # What: a former channel name gets its new name
+        # Why: a former name has no stack tag of its own
+        # From: Issue #1683 | PR #1858
+        current=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
+        if [[ "$current" != "$LANCACHE_IMAGE_CHANNEL" ]]; then
+            print_warn "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL} is now called ${current}; using ${current}."
+            LANCACHE_IMAGE_CHANNEL="$current"
+        fi
+        print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
+        # What: a preset channel takes the nightly path
+        # Why: same warning and second yes as the prompt
+        # From: Issue #1683
+        if [[ "$role" = install && "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]] \
+            && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$selectable" \
+            && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
+            confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" \
+                || die "Install cancelled; nothing was changed."
+        fi
+        return 0
+    fi
+    list_has_line "$default" "$selectable" \
+        || die "The default channel '$default' is not a channel setup.sh offers."
+    retired=$(lancache_release_rows retired) || exit $?
+    while IFS= read -r offered; do
+        if [[ "$offered" = "$install_channel" ]]; then
+            printf "  %s — tested releases; the recommended default.\n" "$offered"
+        else
+            printf "  %s — experimental daily builds; they may break; not for production.\n" "$offered"
+        fi
+    done <<< "$selectable"
+    printf "\n"
+    channel_hint=$(paste -sd/ <<< "$selectable")
+    while true; do
+        ask "Release channel [$channel_hint]" "$default"
+        if list_has_line "${REPLY,,}" "$selectable"; then
+            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
+            # What: install: another channel, a second yes
+            # Why: untested builds never install unwarned
+            # From: Issue #1683 | PR #1858
+            if [[ "$role" = install && "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
+                confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" || continue
+            fi
+            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
+            return 0
+        fi
+        # What: a retired name shows why it went
+        # Why: the release doc asks for a clear answer
+        # From: Issue #1683 | PR #1858
+        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
+        if [[ -n "$reason" ]]; then
+            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
+        else
+            print_error "Please answer one of: $channel_hint."
+        fi
+    done
+}
+
 # What: runs a broadcast DHCP probe before Kea activation
 # Why: stops or warns before a second DHCP server exists
 # From: Issue #1683 | PR #1858
@@ -6450,7 +6516,7 @@ Order: check, ask, then act. The name and the host are checked before any
 change: a host that holds a LanCache-NG install (settings, host service or dns
 container) stops at once. Then missing requirements are installed. In a
 terminal, missing values are asked one by one and checked at once: name,
-primary URL, token, whether the primary runs the $(lancache_release_rows release) channel, the DNS IP,
+primary URL, token, the channel the primary runs (as on the primary), the DNS IP,
 and whether the primary has HTTPS (then the primary's HTTPS IP and a second
 DNS IP). --rotate offers the values stored in the secondary's .env; only the
 token is asked again. Then a bind IP not yet on this host is offered for
@@ -7869,7 +7935,7 @@ lancache_other_channels() {
 }
 
 # What: the first SOT channel besides the release channel
-# Why: hints and the secondary channel question name it
+# Why: the hint of a missing image names it
 # From: Issue #1683 | PR #2017
 lancache_testing_channel() {
     local others
@@ -9441,13 +9507,11 @@ cmd_secondary() {
         loopback=$(prod_env_default LOOPBACK_BIND_IP) || exit $?
         [[ "$stored_listen_https" != "$loopback" ]] || stored_listen_https=""
     fi
-    # What: the release channel and the other channel
-    # Why: the channel question is yes/no on the release one
+    # What: release channel: default without a stored one
+    # Why: a new secondary most likely follows a release
     # From: Issue #1683
-    local release_channel other_channel
+    local release_channel channel_default
     release_channel=$(lancache_release_rows release) || exit $?
-    other_channel=$(lancache_testing_channel) || exit $?
-    [[ -n "$other_channel" ]] || die "The SOT names no channel besides ${release_channel}."
     # What: ask each missing value; check it at once
     # Why: an empty or bad answer is asked again, not later
     # From: Issue #1683 | PR #1980
@@ -9455,17 +9519,18 @@ cmd_secondary() {
         local listen_default="$stored_listen"
         [[ -n "$primary_arg" ]] || ask_checked primary "Primary Admin-UI URL (${PRIMARY_URL_EXAMPLE})" "$stored_primary" is_http_url "Not an http(s) URL"
         [[ -n "$token" ]] || ask_checked token "Registration token (Admin-UI: DNS, Secondary DNS)" "" is_nonempty_value "The token is required"
-        # What: the primary's channel as a yes/no question
+        # What: the primary's channel, chosen as there
         # Why: the secondary clones and runs that channel
         # From: Issue #1683
         if [[ -z "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
-            local channel_yn="Y"
-            [[ -z "$stored_channel" || "$stored_channel" = "$release_channel" ]] || channel_yn="N"
-            if confirm "Runs the primary on the ${release_channel} channel?" "$channel_yn"; then
-                LANCACHE_IMAGE_CHANNEL="$release_channel"
-            else
-                LANCACHE_IMAGE_CHANNEL="$other_channel"
+            channel_default="$release_channel"
+            if [[ -n "$stored_channel" ]]; then
+                stored_channel=$(lancache_stack_pointer_channel_for "$stored_channel") || exit $?
+                ! list_has_line "$stored_channel" "$(lancache_selectable_channels)" \
+                    || channel_default="$stored_channel"
             fi
+            printf '\n  %sChannel%s: choose the channel the primary runs.\n' "${BOLD}" "${RESET}"
+            choose_lancache_channel "$channel_default" secondary
         fi
         if [[ -z "$listen_ip" ]]; then
             if [[ -z "$listen_default" ]]; then
@@ -10012,72 +10077,11 @@ fi
 # From: Issue #1683 | PR #1858
 print_step "Release channel"
 
-# What: a pre-set LANCACHE_IMAGE_CHANNEL skips the prompt
-# Why: the operator chose the channel before the start
+# What: the default is SOT release.install_channel
+# Why: an untested channel never installs unwarned
 # From: Issue #1683 | PR #1858
-if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
-    validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
-    # What: a former channel name is used under its new name
-    # Why: a former name has no stack tag of its own
-    # From: Issue #1683 | PR #1858
-    current_channel=$(lancache_stack_pointer_channel_for "$LANCACHE_IMAGE_CHANNEL") || exit $?
-    if [[ "$current_channel" != "$LANCACHE_IMAGE_CHANNEL" ]]; then
-        print_warn "LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL} is now called ${current_channel}; using ${current_channel}."
-        LANCACHE_IMAGE_CHANNEL="$current_channel"
-    fi
-    print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
-    # What: a preset channel takes the prompt's nightly path
-    # Why: same warning and second yes as the prompt
-    # From: Issue #1683
-    if [[ "$LANCACHE_IMAGE_CHANNEL" != "$(lancache_sot_value install_channel release)" ]] \
-        && list_has_line "$LANCACHE_IMAGE_CHANNEL" "$(lancache_selectable_channels)" \
-        && [[ -z "${LANCACHE_CHANNEL_CONFIRMED:-}" ]]; then
-        confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" \
-            || die "Install cancelled; nothing was changed."
-    fi
-else
-    selectable=$(lancache_selectable_channels) || exit $?
-    retired=$(lancache_release_rows retired) || exit $?
-    # What: the default is SOT release.install_channel
-    # Why: an untested channel never installs unwarned
-    # From: Issue #1683 | PR #1858
-    install_channel=$(lancache_sot_value install_channel release) || exit $?
-    list_has_line "$install_channel" "$selectable" \
-        || die "SOT release.install_channel '$install_channel' is not a channel setup.sh offers."
-    while IFS= read -r offered; do
-        if [[ "$offered" = "$install_channel" ]]; then
-            printf "  %s — tested releases; the recommended default.\n" "$offered"
-        else
-            printf "  %s — experimental daily builds; they may break; not for production.\n" "$offered"
-        fi
-    done <<< "$selectable"
-    printf "\n"
-
-    channel_hint=$(paste -sd/ <<< "$selectable")
-    while true; do
-        ask "Release channel [$channel_hint]" "$install_channel"
-        if list_has_line "${REPLY,,}" "$selectable"; then
-            LANCACHE_IMAGE_CHANNEL="${REPLY,,}"
-            # What: any other channel needs a second yes
-            # Why: untested builds never install unwarned
-            # From: Issue #1683 | PR #1858
-            if [[ "$LANCACHE_IMAGE_CHANNEL" != "$install_channel" ]]; then
-                confirm_experimental_channel "$LANCACHE_IMAGE_CHANNEL" || continue
-            fi
-            print_ok "Using the $LANCACHE_IMAGE_CHANNEL channel."
-            break
-        fi
-        # What: a retired name shows why it went
-        # Why: the release doc asks for a clear answer
-        # From: Issue #1683 | PR #1858
-        reason=$(awk -v c="${REPLY,,}" '$1 == c { sub(/^[^ ]+ /, ""); print; exit }' <<< "$retired")
-        if [[ -n "$reason" ]]; then
-            print_error "The '${REPLY,,}' channel is no longer supported ($reason). Please answer one of: $channel_hint."
-        else
-            print_error "Please answer one of: $channel_hint."
-        fi
-    done
-fi
+install_channel=$(lancache_sot_value install_channel release) || exit $?
+choose_lancache_channel "$install_channel" install
 
 # What: setup runs from the channel's dir
 # Why: compose files and images from one ref at once
