@@ -455,45 +455,12 @@ is_valid_dhcp_ntp_list() {
     done
 }
 
-# What: true for an IPv6 address; $2 gets its full form
-# Why: the dns service parses it strictly; compare by value
+# What: true for an IPv6 address
+# Why: dns parses it strictly; ip_value_form is the parser
 # From: Issue #1918 | PR #1858
 is_valid_ipv6() {
-    local ip="${1:-}" v4="" head tail g n fill out=""
-    local -a parts=() hg=() tg=() oct=()
-    [[ "$ip" == *:* && "$ip" =~ ^[0-9A-Fa-f:.]+$ && "$ip" != *:::* ]] || return 1
-    [[ ( "$ip" != :* || "$ip" == ::* ) && ( "$ip" != *: || "$ip" == *:: ) ]] || return 1
-    # What: a dotted IPv4 tail is the last two groups
-    # Why: ::ffff:192.0.2.1 is an IPv6 address too
-    # From: Issue #1918
-    if [[ "${ip##*:}" == *.* ]]; then
-        v4="${ip##*:}"
-        is_valid_ipv4 "$v4" || return 1
-        IFS=. read -r -a oct <<< "$v4"
-        ip="${ip%:*}:$(printf '%x:%x' $(( oct[0] * 256 + oct[1] )) $(( oct[2] * 256 + oct[3] )))"
-    fi
-    if [[ "$ip" == *::* ]]; then
-        head="${ip%%::*}" tail="${ip#*::}"
-        [[ "$tail" != *::* ]] || return 1
-        [[ -z "$head" ]] || IFS=: read -r -a hg <<< "$head"
-        [[ -z "$tail" ]] || IFS=: read -r -a tg <<< "$tail"
-        fill=$(( 8 - ${#hg[@]} - ${#tg[@]} ))
-        (( fill >= 1 )) || return 1
-        parts=("${hg[@]}")
-        for (( n = 0; n < fill; n++ )); do parts+=(0); done
-        parts+=("${tg[@]}")
-    else
-        IFS=: read -r -a parts <<< "$ip"
-        (( ${#parts[@]} == 8 )) || return 1
-    fi
-    for g in "${parts[@]}"; do
-        [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
-        out+="${out:+:}$(printf '%x' "$(( 16#$g ))")"
-    done
-    if [[ -n "${2:-}" ]]; then
-        local -n _ipv6_full_ref="$2"
-        _ipv6_full_ref="$out"
-    fi
+    local _v6_form
+    [[ "${1:-}" == *:* ]] && ip_value_form "$1" _v6_form
 }
 
 # What: splits an IPv4 CIDR into address and prefix 0-32
@@ -508,23 +475,53 @@ ipv4_cidr_split() {
 }
 
 # What: $2 = IPv4; ::ffff:IPv4 as IPv4; else IPv6 full
-# Why: one value form for every address comparison
+# Why: one parser and one value form for every comparison
 # From: Issue #1918 | PR #2017
 ip_value_form() {
     local -n _ipv_form_ref="$2"
-    local _ipv_full _ipv_hi _ipv_lo
-    if is_valid_ipv4 "$1"; then
-        _ipv_form_ref="$1"
-    elif is_valid_ipv6 "$1" _ipv_full; then
-        _ipv_form_ref="$_ipv_full"
-        [[ "$_ipv_full" == 0:0:0:0:0:ffff:* ]] || return 0
-        _ipv_lo="${_ipv_full##*:}" _ipv_hi="${_ipv_full%:*}"
-        _ipv_hi="${_ipv_hi##*:}"
-        printf -v _ipv_form_ref '%d.%d.%d.%d' $(( 16#$_ipv_hi >> 8 )) $(( 16#$_ipv_hi & 255 )) \
-            $(( 16#$_ipv_lo >> 8 )) $(( 16#$_ipv_lo & 255 ))
-    else
-        return 1
+    local _ipv_ip="${1:-}" _ipv_v4 _ipv_head _ipv_tail _ipv_g _ipv_n _ipv_fill _ipv_out="" _ipv_hi _ipv_lo
+    local -a _ipv_parts=() _ipv_hg=() _ipv_tg=() _ipv_oct=()
+    if is_valid_ipv4 "$_ipv_ip"; then
+        _ipv_form_ref="$_ipv_ip"
+        return 0
     fi
+    [[ "$_ipv_ip" == *:* && "$_ipv_ip" =~ ^[0-9A-Fa-f:.]+$ && "$_ipv_ip" != *:::* ]] || return 1
+    [[ ( "$_ipv_ip" != :* || "$_ipv_ip" == ::* ) && ( "$_ipv_ip" != *: || "$_ipv_ip" == *:: ) ]] || return 1
+    # What: a dotted IPv4 tail is the last two groups
+    # Why: ::ffff:192.0.2.1 is an IPv6 address too
+    # From: Issue #1918
+    if [[ "${_ipv_ip##*:}" == *.* ]]; then
+        _ipv_v4="${_ipv_ip##*:}"
+        is_valid_ipv4 "$_ipv_v4" || return 1
+        IFS=. read -r -a _ipv_oct <<< "$_ipv_v4"
+        _ipv_ip="${_ipv_ip%:*}:$(printf '%x:%x' $(( _ipv_oct[0] * 256 + _ipv_oct[1] )) $(( _ipv_oct[2] * 256 + _ipv_oct[3] )))"
+    fi
+    if [[ "$_ipv_ip" == *::* ]]; then
+        _ipv_head="${_ipv_ip%%::*}" _ipv_tail="${_ipv_ip#*::}"
+        [[ "$_ipv_tail" != *::* ]] || return 1
+        [[ -z "$_ipv_head" ]] || IFS=: read -r -a _ipv_hg <<< "$_ipv_head"
+        [[ -z "$_ipv_tail" ]] || IFS=: read -r -a _ipv_tg <<< "$_ipv_tail"
+        _ipv_fill=$(( 8 - ${#_ipv_hg[@]} - ${#_ipv_tg[@]} ))
+        (( _ipv_fill >= 1 )) || return 1
+        _ipv_parts=("${_ipv_hg[@]}")
+        for (( _ipv_n = 0; _ipv_n < _ipv_fill; _ipv_n++ )); do _ipv_parts+=(0); done
+        _ipv_parts+=("${_ipv_tg[@]}")
+    else
+        IFS=: read -r -a _ipv_parts <<< "$_ipv_ip"
+        (( ${#_ipv_parts[@]} == 8 )) || return 1
+    fi
+    for _ipv_g in "${_ipv_parts[@]}"; do
+        [[ "$_ipv_g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        _ipv_out+="${_ipv_out:+:}$(printf '%x' "$(( 16#$_ipv_g ))")"
+    done
+    if [[ "$_ipv_out" != 0:0:0:0:0:ffff:* ]]; then
+        _ipv_form_ref="$_ipv_out"
+        return 0
+    fi
+    _ipv_lo="${_ipv_out##*:}" _ipv_hi="${_ipv_out%:*}"
+    _ipv_hi="${_ipv_hi##*:}"
+    printf -v _ipv_form_ref '%d.%d.%d.%d' $(( 16#$_ipv_hi >> 8 )) $(( 16#$_ipv_hi & 255 )) \
+        $(( 16#$_ipv_lo >> 8 )) $(( 16#$_ipv_lo & 255 ))
 }
 
 # What: true if an IPv4 lies inside an IPv4 CIDR
