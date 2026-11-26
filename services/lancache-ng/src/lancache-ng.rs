@@ -9637,6 +9637,60 @@ end
         use sha2::{Digest, Sha256};
         use std::collections::BTreeSet;
 
+        // What: all seven numbers of nginx stub_status.
+        // Why: one reader for dashboard, graphs, REST, CLI.
+        // From: Issue #1683 | PR #2020
+        pub async fn live(s: &Settings) -> Result<serde_json::Value, String> {
+            let url = s.text("PROXY_STATUS_URL")?;
+            let resp = crate::shared::http::client(s)?
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("{url}: {e}"))?;
+            let resp = resp.error_for_status().map_err(|e| format!("{url}: {e}"))?;
+            let body = resp.text().await.map_err(|e| format!("{url}: {e}"))?;
+            stub_status(&body).ok_or_else(|| format!("{url}: no stub_status text"))
+        }
+
+        // What: the stub_status text as named numbers.
+        // Why: nginx gives plain text; readers need fields.
+        // From: Issue #1683 | PR #1980
+        pub fn stub_status(body: &str) -> Option<serde_json::Value> {
+            let nums: Vec<u64> = body
+                .split_whitespace()
+                .filter_map(|w| w.parse().ok())
+                .collect();
+            let [
+                active,
+                accepts,
+                handled,
+                requests,
+                reading,
+                writing,
+                waiting,
+            ] = nums.as_slice()
+            else {
+                return None;
+            };
+            Some(serde_json::json!({
+                "active": active, "accepts": accepts, "handled": handled,
+                "requests": requests, "reading": reading, "writing": writing,
+                "waiting": waiting
+            }))
+        }
+
+        // What: lancache-ng proxy status: nginx as JSON.
+        // Why: proxy reads have their CLI with their owner.
+        // From: Issue #1683 | PR #2020
+        pub async fn proxy_run(args: &[String]) -> Result<(), String> {
+            if args.first().map(String::as_str) != Some("status") {
+                return Err("commands: status".into());
+            }
+            let v = live(&crate::config::Settings::from_process()?).await?;
+            println!("{v}");
+            Ok(())
+        }
+
         // What: first line of every generated file.
         // Why: tells a reader not to edit it by hand.
         // From: Issue #1683 | PR #1980
@@ -12312,32 +12366,6 @@ mod ui {
         Ok((totals, rows))
     }
 
-    // What: active, requests, waiting from stub_status.
-    // Why: live counters next to the log figures.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn fetch_proxy_live(s: &Settings) -> Option<serde_json::Value> {
-        let url = s.text("PROXY_STATUS_URL").ok()?;
-        let resp = http::client(s).ok()?.get(&url).send().await.ok()?;
-        let body = resp.error_for_status().ok()?.text().await.ok()?;
-        parse_stub_status(&body)
-    }
-
-    // What: read the stub_status text into numbers.
-    // Why: nginx gives plain text, the page needs fields.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
-        let nums: Vec<u64> = body
-            .split_whitespace()
-            .filter_map(|w| w.parse().ok())
-            .collect();
-        let [active, _, _, requests, _, _, waiting] = nums.as_slice() else {
-            return None;
-        };
-        Some(serde_json::json!({
-            "active": active, "requests": requests, "waiting": waiting
-        }))
-    }
-
     // What: dashboard: alarms, containers, cache.
     // Why: first page; shows what needs a look.
     // From: Issue #1683 | PR #1858
@@ -12363,7 +12391,11 @@ mod ui {
         let (totals, recent) = proxy_log(&s).await?;
         ctx.insert("log_stats", &totals);
         ctx.insert("recent_logs", &recent);
-        if let Some(live) = fetch_proxy_live(&s).await {
+        // What: no nginx answer: no live box, error logged.
+        // Why: the dashboard renders while nginx is down.
+        // From: Issue #1683 | PR #2020
+        let live = crate::shared::nginx_conf::live(&s).await;
+        if let Ok(live) = live.inspect_err(|e| eprintln!("ui: proxy live: {e}")) {
             ctx.insert("proxy_live", &live);
         }
         // What: zero fill when the cache dir is unreadable.
@@ -13390,7 +13422,7 @@ mod ui {
         let mut out = BTreeMap::new();
         let has = |p: &str| want.iter().any(|w| w.split(':').next() == Some(p));
         if has("nginx")
-            && let Some(v) = fetch_proxy_live(s).await
+            && let Ok(v) = crate::shared::nginx_conf::live(s).await
         {
             for k in ["active", "requests", "waiting"] {
                 out.insert(format!("nginx:{k}"), v[k].to_string());
@@ -14271,6 +14303,14 @@ mod ui {
         json_reply(zone_snapshots(&app.settings()).map(Some), "")
     }
 
+    // What: nginx stub_status numbers as JSON.
+    // Why: REST diagnosis on the reader of page and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn proxy_status_api(State(app): Shared) -> Response {
+        let r = crate::shared::nginx_conf::live(&app.settings()).await;
+        json_reply(r.map(Some), "")
+    }
+
     // What: Kea counters as JSON.
     // Why: REST diagnosis on the reader of graphs and CLI.
     // From: Issue #1683 | PR #2020
@@ -14703,6 +14743,7 @@ mod ui {
             .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
             .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
             .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
+            .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -15393,6 +15434,7 @@ async fn main() -> std::process::ExitCode {
         "dhcp" => code(dhcp::run(&argv).await),
         "config" => code(config::run(&argv)),
         "system" => code(shared::docker::system_run(&argv).await),
+        "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -15412,7 +15454,7 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 3] = ["dhcp", "config", "system"];
+const GROUPS: [&str; 4] = ["dhcp", "config", "system", "proxy"];
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
