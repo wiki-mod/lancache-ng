@@ -2444,26 +2444,18 @@ legacy_state_root_has_known_children() {
     return 1
 }
 
-# What: legacy root if it has children, else the default
-# Why: new-style default applies without legacy state
-# From: Issue #1683 | PR #1858
-legacy_state_root_or_default() {
-    local default_dir="$1"
-
-    if legacy_state_root_has_known_children; then
-        legacy_state_path
-    else
-        printf '%s\n' "$default_dir"
-    fi
-}
-
-# What: legacy dir if it exists, else the default
-# Why: a single directory needs no child-directory check
+# What: legacy path if it holds legacy state, else default
+# Why: the root counts by known children, a dir if present
 # From: Issue #1683 | PR #1858
 legacy_dir_or_default() {
-    local legacy_dir="$1" default_dir="$2"
+    local legacy_dir="$1" default_dir="$2" held=0
 
-    if [[ -d "$legacy_dir" ]]; then
+    if [[ "$legacy_dir" = "$(legacy_state_path)" ]]; then
+        ! legacy_state_root_has_known_children || held=1
+    elif [[ -d "$legacy_dir" ]]; then
+        held=1
+    fi
+    if [[ "$held" = 1 ]]; then
         printf '%s\n' "$legacy_dir"
     else
         printf '%s\n' "$default_dir"
@@ -2547,7 +2539,7 @@ install_state_root() {
     elif [[ -z "$state" ]]; then
         state=$(production_state_root_default "$install_dir") \
             || die "Cannot resolve the default state root of $install_dir (exit $?)."
-        state=$(legacy_state_root_or_default "$state") || exit $?
+        state=$(legacy_dir_or_default "$(legacy_state_path)" "$state") || exit $?
     fi
     printf '%s\n' "$state"
 }
