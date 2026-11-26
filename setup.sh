@@ -3130,8 +3130,16 @@ rollback_quickstart_migration() {
     done <<< "$copies"
     printf 'rolledback|%s\n' "$stamp" >> "$record" \
         || { print_error "Failed to record the rollback in $record (exit $?)."; return 1; }
-    stack_up "$old_dir" "$old_dir/.env" -d \
-        || { print_error "Failed to restart the quickstart stack in $old_dir (exit $?)."; return 1; }
+    # What: "runs again" only for a healthy quickstart stack
+    # Why: a restart that did not come up is a failure
+    # From: Issue #1683 | PR #1858
+    local rc=0
+    stack_up "$old_dir" "$old_dir/.env" -d --wait-healthy || rc=$?
+    case "$rc" in
+        0) ;;
+        3) print_error "Failed to restart the quickstart stack in $old_dir."; return 1 ;;
+        *) print_error "The quickstart stack in $old_dir did not become healthy."; return 1 ;;
+    esac
     print_ok "The quickstart stack in $old_dir runs again"
 }
 
@@ -5568,52 +5576,37 @@ compose_stack_available() {
     return 1
 }
 
-# What: true if any compose container is running
-# Why: restore only restarts a stack that was running
-# From: Issue #1683 | PR #1858
-compose_stack_running() {
-    local install_dir="$1" env_file out
-    compose_stack_available "$install_dir" || return 1
-    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    out=$(stack_compose "$install_dir" "$env_file" ps -q) \
-        || die "Failed to list the containers of $install_dir (exit $?)."
-    [[ -n "$out" ]]
-}
-
-# What: stops the stack; a failed stop aborts the copy
-# Why: files of a running stack can be torn mid-copy
-# From: Issue #1683 | PR #1858
-compose_stack_stop() {
-    local install_dir="$1"
-    local env_file
-    compose_stack_available "$install_dir" "Stopping the stack" || return 0
-    print_step "Stopping stack for consistent backup/restore"
-    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    stack_compose "$install_dir" "$env_file" stop \
-        || die "Failed to stop the stack in $install_dir (exit $?); nothing was copied."
-}
-
-# What: starts the stack for backup or restore cleanup
-# Why: a start failure only warns, so cleanup finishes
+# What: restarts the stack after backup or restore
+# Why: start failure warns; $2=1 also waits for health
 # From: Issue #1683 | PR #1858
 compose_stack_start() {
-    local install_dir="$1"
-    local env_file
+    local install_dir="$1" wait="${2:-0}" env_file rc=0
+    local -a flags=(-d)
     compose_stack_available "$install_dir" "Starting the stack" || return 0
     print_step "Starting stack"
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
-    stack_up "$install_dir" "$env_file" -d \
-        || print_warn "docker compose up failed (exit $?); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
+    [[ "$wait" != 1 ]] || flags+=(--wait-healthy)
+    stack_up "$install_dir" "$env_file" "${flags[@]}" || rc=$?
+    if [[ "$rc" -eq 3 || ( "$wait" != 1 && "$rc" -ne 0 ) ]]; then
+        print_warn "docker compose up failed (exit $rc); start it with: $SCRIPT_DIR/setup.sh compose $install_dir up -d"
+    fi
+    return "$rc"
 }
 
 # What: notes whether the stack ran, then stops it
-# Why: the caller's cleanup trap reads the flags set here
+# Why: files of a running stack can be torn mid-copy
 # From: Issue #1683 | PR #1858
 stop_stack_noting_state() {
-    local install_dir="$1"
-    compose_stack_running "$install_dir" && stack_was_running=1
+    local install_dir="$1" env_file running
+    compose_stack_available "$install_dir" "Stopping the stack" || return 0
+    env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
+    running=$(stack_compose "$install_dir" "$env_file" ps -q) \
+        || die "Failed to list the containers of $install_dir (exit $?)."
+    [[ -z "$running" ]] || stack_was_running=1
     stack_stopped=1
-    compose_stack_stop "$install_dir"
+    print_step "Stopping stack for consistent backup/restore"
+    stack_compose "$install_dir" "$env_file" stop \
+        || die "Failed to stop the stack in $install_dir (exit $?); nothing was copied."
 }
 
 # What: runs docker compose config as a dry-run check
@@ -5885,12 +5878,13 @@ cmd_backup() (
     backup_cleanup() {
         local status=$?
         if [[ "$stack_stopped" = "1" && "$stack_was_running" = "1" ]]; then
-            compose_stack_start "$install_dir"
             # What: a lone backup waits for the restart
             # Why: in an update, the update's gate follows
             # From: Issue #1683 | PR #2017
-            if [[ "$status" -eq 0 && "${UPDATE_CONVERGENCE_PAUSED:-0}" != 1 ]] \
-                && ! wait_for_whole_stack "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")"; then
+            local wait=0 start_rc=0
+            [[ "$status" -ne 0 || "${UPDATE_CONVERGENCE_PAUSED:-0}" = 1 ]] || wait=1
+            compose_stack_start "$install_dir" "$wait" || start_rc=$?
+            if [[ "$wait" = 1 && ( "$start_rc" -eq 1 || "$start_rc" -eq 2 ) ]]; then
                 print_warn "The backup is complete, but the restarted stack is not healthy; see: $SCRIPT_DIR/setup.sh debug $install_dir"
             fi
         fi
@@ -5995,12 +5989,13 @@ cmd_restore() (
                 # Why: a stopped stack must stay stopped
                 # From: Issue #1683 | PR #1858
                 if [[ "$stack_was_running" = "1" ]]; then
-                    compose_stack_start "$install_dir"
                     # What: the restart must become healthy
                     # Why: rollback waits itself, later
                     # From: Issue #1683 | PR #2017
-                    if [[ "${RESTORE_SKIP_WAIT:-0}" != 1 ]] \
-                        && ! wait_for_whole_stack "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")"; then
+                    local wait=1 start_rc=0
+                    [[ "${RESTORE_SKIP_WAIT:-0}" != 1 ]] || wait=0
+                    compose_stack_start "$install_dir" "$wait" || start_rc=$?
+                    if [[ "$wait" = 1 && "$start_rc" -ne 0 ]]; then
                         print_error "Files restored, but the restarted stack is not healthy; see: $SCRIPT_DIR/setup.sh debug $install_dir"
                         status=1
                     fi
@@ -7635,13 +7630,25 @@ cmd_compose() {
 # Why: no start undoes a stop by the user or by DHCP off
 # From: Issue #1683
 stack_up() {
-    local install_dir="$1" env_file="$2" svc
+    local install_dir="$1" env_file="$2" svc wait=0 rc=0
     local -a flags=() services=() wanted=() idle=()
     shift 2
     while [[ $# -gt 0 && "$1" = -* ]]; do
-        flags+=("$1")
+        # What: --wait-healthy: 0 ok, 1/2 gate, 3 up failed
+        # Why: callers tell a failed start from a sick stack
+        # From: Issue #1683 | PR #1858
+        if [[ "$1" = --wait-healthy ]]; then
+            wait=1
+        else
+            flags+=("$1")
+        fi
         shift
     done
+    if [[ "$wait" = 1 ]]; then
+        stack_up "$install_dir" "$env_file" "${flags[@]}" "$@" || return 3
+        wait_for_whole_stack "$install_dir" "$env_file" || rc=$?
+        return "$rc"
+    fi
     services=("$@")
     if (( ${#services[@]} == 0 )); then
         stack_services_into services "$install_dir" "$env_file" || {
@@ -8824,18 +8831,15 @@ rollback_env_keys() {
         print_error "Failed to write the previous $what back into $env_file (exit $rc)."
         return 1
     fi
-    stack_up "$install_dir" "$env_file" -d || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-        print_error "Failed to restart the stack with the previous $what (exit $rc)."
-        return 1
-    fi
     # What: "back" only for a healthy stack
     # Why: a roll-back that did not come up is a failure
     # From: Issue #1683 | PR #2017
-    if ! wait_for_whole_stack "$install_dir" "$env_file"; then
-        print_error "The stack with the previous $what did not become healthy."
-        return 1
-    fi
+    stack_up "$install_dir" "$env_file" -d --wait-healthy || rc=$?
+    case "$rc" in
+        0) ;;
+        3) print_error "Failed to restart the stack with the previous $what."; return 1 ;;
+        *) print_error "The stack with the previous $what did not become healthy."; return 1 ;;
+    esac
     print_warn "Back to the previous $what"
 }
 
