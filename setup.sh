@@ -135,6 +135,15 @@ print_result_banner() {
     printf '%s%s%s%s\n\n' "${BOLD}" "${GREEN}" "$rule" "${RESET}"
 }
 
+# What: array $1 = items of $2 split at commas, blanks, LF
+# Why: one owner for every key, IP or name list; no glob
+# From: Issue #1683 | PR #2017
+list_items_into() {
+    local -n _items_ref="$1"
+    local _items_text="${2//,/ }"
+    read -ra _items_ref <<< "${_items_text//$'\n'/ }"
+}
+
 # What: the lines of text $2 as one line, joined by $1
 # Why: one owner for every list shown in a message or hint
 # From: Issue #1683 | PR #2017
@@ -287,7 +296,7 @@ ask_list() {
     while true; do
         ask "$prompt" "$default"
         _ask_list_ref=()
-        [[ -n "$none_word" && "${REPLY,,}" = "$none_word" ]] || read -r -a _ask_list_ref <<< "${REPLY//,/ }"
+        [[ -n "$none_word" && "${REPLY,,}" = "$none_word" ]] || list_items_into _ask_list_ref "$REPLY"
         bad="" seen=()
         (( ${#_ask_list_ref[@]} > 0 || optional == 1 )) || bad="enter at least one ${label}"
         for entry in "${_ask_list_ref[@]}"; do
@@ -423,7 +432,7 @@ is_valid_dhcp_ntp_server() {
 is_valid_dhcp_ntp_list() {
     local entry
     local -a entries
-    IFS=',' read -r -a entries <<< "${1:-}"
+    list_items_into entries "${1:-}"
     for entry in "${entries[@]}"; do
         entry="${entry//[[:space:]]/}"
         [[ -z "$entry" ]] || is_valid_dhcp_ntp_server "$entry" || return 1
@@ -546,7 +555,7 @@ dns_upstream_server_problem() {
     dns_upstream_split "$entry" host port || split_rc=$?
     nets=$(prod_env_default LOOPBACK_NETS) || exit $?
     read -r -a loopback_nets <<< "$nets"
-    read -r -a own_ips <<< "${own//,/ }"
+    list_items_into own_ips "$own"
     if [[ "$split_rc" != 0 ]] || { [[ -n "$port" ]] && ! uint_in_range "$port" 1 65535; }; then
         printf "'%s' has no port from 1 to 65535\n" "$entry"
     elif ! ip_value_form "$host" addr; then
@@ -579,14 +588,14 @@ dns_upstream_zone_problem() {
     local raw="$1" lans="${2,,}" forwarded="${3:-}" zone inside=0 local_zone=0 item
     local -a forwarded_zones lan_zones
     zone=$(dns_name_normalized "$raw")
-    read -r -a forwarded_zones <<< "${forwarded//,/ }"
+    list_items_into forwarded_zones "$forwarded"
     for item in "${forwarded_zones[@]}"; do
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && inside=1
     done
     # What: every LAN domain is answered here
     # Why: multi-domain: each one is a local zone
     # From: Issue #1683
-    read -r -a lan_zones <<< "${lans//,/ }"
+    list_items_into lan_zones "$lans"
     for item in "${lan_zones[@]}"; do
         [[ "$zone" = "$item" || "$zone" == *".$item" ]] && local_zone=1
     done
@@ -1053,7 +1062,7 @@ set_compose_profiles() {
     result="$primary"
     ! is_secondary_dir "$stack_dir" || result="$secondary"
 
-    IFS=',' read -r -a profiles <<< "$existing"
+    list_items_into profiles "$existing"
     for profile in "${profiles[@]}"; do
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
@@ -2980,8 +2989,7 @@ migrate_quickstart_install() (
     local https_ip fresh kept kept_list restored
     local -a copy_lines path_key_list=()
     path_keys=$(lancache_sot_list quickstart_path_keys runtime) || exit $?
-    path_keys="${path_keys//$'\n'/ }"
-    read -ra path_key_list <<< "$path_keys"
+    list_items_into path_key_list "$path_keys"
     bundle=$(lancache_sot_list quickstart_bundle_copies runtime) || exit $?
     new_env=$(runtime_env_file_for_install_dir "$stack_dir") || exit $?
     old_env="$old_dir/.env"
@@ -3733,7 +3741,7 @@ sot_compose_env() {
     # What: key lists split by read -a, no glob
     # Why: an unquoted loop word would expand * or ?
     # From: Issue #1683 | PR #1858
-    read -ra words <<< "${keys//$'\n'/ }"
+    list_items_into words "$keys"
     for key in "${words[@]}"; do
         value=$(runtime_default_in "$list" "$key") || exit $?
         printf 'SOT_%s=%s\n' "$key" "$value"
@@ -3749,7 +3757,7 @@ sot_compose_env() {
     [[ -n "$dir" ]] || die "No file of the SOT HOST_MACHINE_ID_SOURCES exists: $value."
     printf 'SOT_HOST_MACHINE_ID_SOURCE=%s\n' "$dir"
     keys=$(prod_state_keys) || exit $?
-    read -ra words <<< "${keys//$'\n'/ }"
+    list_items_into words "$keys"
     for key in "${words[@]}"; do
         dir=$(prod_state_dir_for_key "$key" "$env_file" "$state") || exit $?
         printf '%s=%s\n' "$key" "$dir"
@@ -5499,7 +5507,7 @@ migrate_env_for_update() (
     # Why: an empty required key breaks the stack at up
     # From: Issue #1683 | PR #1912
     required_keys=$(lancache_sot_value setup_required_repairs validation) || exit $?
-    read -ra required_key_list <<< "${required_keys//$'\n'/ }"
+    list_items_into required_key_list "$required_keys"
     for required_key in "${required_key_list[@]}"; do
         required_value=$(get_env_var "$required_key" "$env_file") || exit $?
         [[ -n "$required_value" ]] \
@@ -6902,7 +6910,7 @@ wanted_stack_services() {
     dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
     dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
     stopped=$(get_env_var SERVICES_STOPPED "$env_file") || exit $?
-    read -r -a stopped_list <<< "${stopped//,/ }"
+    list_items_into stopped_list "$stopped"
     _wait_ref=()
     for svc in "$@"; do
         [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
@@ -9155,7 +9163,7 @@ dns_upstream_is_live() {
     done
     wait=$(prod_env_default SETUP_HEALTH_WAIT_SERVICES_SECONDS) || exit $?
     poll=$(prod_env_default SETUP_HEALTH_POLL_SECONDS) || exit $?
-    read -r -a wanted <<< "${servers//,/ }"
+    list_items_into wanted "$servers"
     dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     cid=$(stack_compose "$install_dir" "$env_file" ps -q "$dns_svc") \
         || die "Failed to look up the dns container of $install_dir (exit $?)."
@@ -9266,7 +9274,7 @@ check_dns_upstream_or_restore() {
     # What: the dns container took the setting, then answers
     # Why: a dead resolver must not stay active
     # From: Issue #1683
-    read -r -a new_entries <<< "${DNS_UPSTREAM_SERVERS//,/ }"
+    list_items_into new_entries "$DNS_UPSTREAM_SERVERS"
     if dns_upstream_is_live "$install_dir" "$env_file" "$DNS_UPSTREAM_SERVERS" \
         && { (( ${#new_entries[@]} == 0 )) || dns_upstream_answers "${new_entries[@]}"; }; then
         return 0
