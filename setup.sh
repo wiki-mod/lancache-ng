@@ -3216,19 +3216,23 @@ write_lancache_host_services() {
 }
 
 # What: the install dir the host's stack service runs
-# Why: both writers name it; empty when no service exists
+# Why: asked of the running manager, as host_unit_exists
 # From: Issue #1683 | PR #2017
 stack_unit_install_dir() {
-    local defaults unit_file init_file
-    defaults=$(runtime_defaults_list) || exit $?
-    unit_file="$(runtime_default_in "$defaults" SYSTEMD_UNIT_DIR)/$STACK_UNIT" || exit $?
-    init_file="$(runtime_default_in "$defaults" OPENRC_INIT_DIR)/$OPENRC_STACK_SERVICE" || exit $?
-    if [[ -f "$unit_file" ]]; then
-        sed -n 's/^WorkingDirectory=//p' "$unit_file" || die "Failed to read $unit_file (exit $?)."
-    elif [[ -f "$init_file" ]]; then
-        sed -n 's/^[[:space:]]*[^[:space:]]* compose \(.*\) up -d$/\1/p' "$init_file" \
-            || die "Failed to read $init_file (exit $?)."
-    fi
+    local init_file out rc=0
+    host_unit_exists "$STACK_UNIT" || return 0
+    case "$(host_service_manager)" in
+        systemd)
+            out=$(systemctl show -p WorkingDirectory --value "$STACK_UNIT" 2>&1) || rc=$?
+            [[ "$rc" -eq 0 ]] || die "Failed to read the directory of $STACK_UNIT (exit $rc): $out"
+            [[ -z "$out" ]] || printf '%s\n' "$out"
+            ;;
+        openrc)
+            init_file="$(prod_env_default OPENRC_INIT_DIR)/$(openrc_service_for_unit "$STACK_UNIT")" || exit $?
+            sed -n 's/^[[:space:]]*[^[:space:]]* compose \(.*\) up -d$/\1/p' "$init_file" \
+                || die "Failed to read $init_file (exit $?)."
+            ;;
+    esac
 }
 
 # What: writes the three OpenRC services of the stack
