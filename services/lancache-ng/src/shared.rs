@@ -1700,6 +1700,53 @@ pub mod docker {
         row["Names"][0].as_str().map(|n| n.trim_start_matches('/'))
     }
 
+    // What: one stack container with its full state.
+    // Why: the bar and the watchdog read one list.
+    // From: Issue #1683 | PR #2020
+    pub struct Member {
+        pub service: String,
+        pub name: String,
+        pub status: Value,
+        pub inspect: Result<Value, String>,
+        pub stopped_by_user: bool,
+        pub mode_off: bool,
+    }
+
+    impl Member {
+        // What: false if the user or DHCP off stopped it.
+        // Why: one wanted rule for bar and watchdog.
+        // From: Issue #1683 | PR #2020
+        pub fn wanted(&self) -> bool {
+            !(self.stopped_by_user || self.mode_off)
+        }
+    }
+
+    // What: every service container with its inspect.
+    // Why: one stack reader; callers decide on errors.
+    // From: Issue #1683 | PR #2020
+    pub async fn members(api: &Api, s: &crate::config::Settings) -> Result<Vec<Member>, String> {
+        let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+        let stopped = s.list("SERVICES_STOPPED");
+        let off = crate::shared::dhcp::off_service(s)?;
+        let mut out = Vec::new();
+        for row in api.stack(s).await? {
+            let Some(service) = service_of(&row) else {
+                continue;
+            };
+            let name = name_of(&row).unwrap_or(service).to_string();
+            let inspect = api.inspect(&name, limit).await.map_err(|e| e.to_string());
+            out.push(Member {
+                service: service.to_string(),
+                name,
+                status: row["Status"].clone(),
+                inspect,
+                stopped_by_user: stopped.iter().any(|x| x == service),
+                mode_off: off.as_deref() == Some(service),
+            });
+        }
+        Ok(out)
+    }
+
     // What: compose label of a "compose run" container.
     // Why: fixed by Docker Compose; "True" on run only.
     // From: Issue #1683

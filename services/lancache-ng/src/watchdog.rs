@@ -131,17 +131,15 @@ async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<()
     let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
     let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
     let after = s.uint("RESTART_AFTER")?;
-    let stopped = s.list("SERVICES_STOPPED");
-    let dhcp_off = crate::shared::dhcp::off_service(s)?;
-    for row in api.stack(s).await? {
-        let Some(service) = docker::service_of(&row) else {
-            continue;
-        };
-        let name = docker::name_of(&row).unwrap_or(service);
-        let inspect = api.inspect(name, limit).await.map_err(|e| e.to_string())?;
+    for member in docker::members(&api, s).await? {
+        // What: an inspect error stops this round.
+        // Why: no restart on a state that was not read.
+        // From: Issue #1683 | PR #2020
+        let inspect = member.inspect.clone()?;
+        let (service, name) = (member.service.as_str(), member.name.as_str());
         let health = Health::from_inspect(&inspect);
-        let by_user = stopped.iter().any(|x| x == service);
-        let wanted = !(by_user || dhcp_off.as_deref() == Some(service));
+        let by_user = member.stopped_by_user;
+        let wanted = member.wanted();
         let (word, colour) = (health.word(), health.colour(wanted));
         f.containers.push(serde_json::json!({
             "service": service, "name": name, "health": word,

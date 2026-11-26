@@ -2454,6 +2454,19 @@ fn settings_json(s: &Settings) -> Value {
     json!({"values": s.view(), "warnings": s.warnings})
 }
 
+// What: print the stack states; rc 1 if unavailable.
+// Why: same reader as the beambar and REST.
+// From: Issue #1683 | PR #2020
+async fn status_cli(s: &Settings) -> Result<(), String> {
+    let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
+    let v = status_json(&api, s).await;
+    println!("{v}");
+    match v["state"].as_str() {
+        Some("ok") => Ok(()),
+        _ => Err(v["error"].as_str().unwrap_or("unavailable").to_string()),
+    }
+}
+
 // What: the text when the DHCP mode is not Kea.
 // Why: REST and CLI say the same.
 // From: Issue #1683 | PR #2020
@@ -2482,31 +2495,25 @@ fn json_reply(r: Result<Option<Value>, String>, none: &str) -> Response {
 // Why: Docker is the source; no status files.
 // From: Issue #1683 | PR #1980
 pub(crate) async fn status(State(app): Shared) -> Response {
-    let s = app.settings();
-    let stopped = s.list("SERVICES_STOPPED");
-    // What: the dhcp container while DHCP_MODE is off.
-    // Why: the bar must not offer Start for it.
-    // From: Issue #1683 | PR #1980
-    let read = (app.limits(&s), crate::shared::dhcp::off_service(&s));
-    let list = app.docker.stack(&s).await.ok();
-    let (Some(list), (Ok((_, limit)), Ok(off))) = (list, read) else {
-        return axum::Json(json!({"state": "unavailable"})).into_response();
+    axum::Json(status_json(&app.docker, &app.settings()).await).into_response()
+}
+
+// What: {"state","services":[..]} of the stack.
+// Why: the beambar, REST and CLI read one shape.
+// From: Issue #1683 | PR #2020
+async fn status_json(api: &docker::Api, s: &Settings) -> Value {
+    let list = match docker::members(api, s).await {
+        Ok(list) => list,
+        Err(e) => return json!({"state": "unavailable", "error": e}),
     };
-    let off = off.unwrap_or_default();
     let mut rows: Vec<Value> = Vec::new();
-    for c in &list {
-        let name = docker::service_of(c).unwrap_or_default();
-        let by_user = stopped.iter().any(|x| x == name);
-        let mode_off = !off.is_empty() && name == off;
-        // What: colour and reason from the full state.
-        // Why: one rule with the watchdog (work item 30).
-        // From: Issue #1683
-        let inspect = match c["Id"].as_str() {
-            Some(id) => app.docker.inspect(id, limit).await.unwrap_or_default(),
-            None => Value::Null,
-        };
+    for m in list {
+        // What: an inspect error reads as no state.
+        // Why: the bar still shows the other containers.
+        // From: Issue #1683 | PR #2020
+        let inspect = m.inspect.clone().unwrap_or_default();
         let health = docker::Health::from_inspect(&inspect);
-        let colour = health.colour(!by_user && !mode_off);
+        let colour = health.colour(m.wanted());
         // What: last health check output when not green.
         // Why: a failure count alone names no reason.
         // From: Issue #1683 | PR #1980
@@ -2515,12 +2522,12 @@ pub(crate) async fn status(State(app): Shared) -> Response {
             _ => String::new(),
         };
         rows.push(
-            json!({"name": name, "status": colour, "health": c["Status"],
-               "reason": reason, "mode_off": mode_off,
-               "stopped_by_user": by_user}),
+            json!({"name": m.service, "status": colour, "health": m.status,
+               "reason": reason, "mode_off": m.mode_off,
+               "stopped_by_user": m.stopped_by_user}),
         );
     }
-    axum::Json(json!({"state": "ok", "services": rows})).into_response()
+    json!({"state": "ok", "services": rows})
 }
 
 // What: wish from the beambar button.
@@ -2840,6 +2847,10 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
             _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
+        // What: the stack container states as JSON.
+        // Why: same reader as the beambar and REST.
+        // From: Issue #1683 | PR #2020
+        Some("status") => Some(status_cli(s).await),
         // What: the masked settings, or one value.
         // Why: same view as the pages and REST.
         // From: Issue #1683 | PR #2020
@@ -2881,7 +2892,7 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
 // What: every command of the ui role; none = the server.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const COMMANDS: [&str; 11] = [
+const COMMANDS: [&str; 12] = [
     "hash-password",
     "encode-password-hash",
     "zone-snapshots",
@@ -2889,6 +2900,7 @@ const COMMANDS: [&str; 11] = [
     "registration-token",
     "zone-rollback",
     "healthcheck",
+    "status",
     "settings",
     "dhcp-state",
     DHCP_PROBE_CMD,
