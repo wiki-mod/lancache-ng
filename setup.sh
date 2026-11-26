@@ -780,25 +780,21 @@ pxe_boot_pointer_answers_are_complete() {
     [[ -n "$filename_bios" || -n "$filename_uefi" ]]
 }
 
-# What: every IPv4 address of this host as "ip prefix dev"
-# Why: one parser for wizard, secondary and debug
+# What: host IPv4 rows "ip prefix dev"; lan: SOT-skipped out
+# Why: one parser; LANs may use 172.x, so skip by device
 # From: Issue #1683 | PR #1858
 host_ipv4_addresses() {
-    local addrs
+    local scope="${1:-all}" addrs rows skip line dev prefix
+    local -a prefixes
     addrs=$(ip -4 addr show) || return $?
-    awk '
+    rows=$(awk '
         /^[0-9]+: / { dev = $2; sub(/:$/, "", dev); sub(/@.*/, "", dev) }
         $1 == "inet" { split($2, a, "/"); print a[1], a[2], dev }
-    ' <<< "$addrs"
-}
-
-# What: host IPv4 rows minus SOT-skipped interfaces
-# Why: LANs may use 172.x; skip by device, not address
-# From: Issue #1683 | PR #1984
-host_lan_addresses() {
-    local addrs skip line dev prefix
-    local -a prefixes
-    addrs=$(host_ipv4_addresses) || return $?
+    ' <<< "$addrs") || return $?
+    if [[ "$scope" != lan ]]; then
+        [[ -z "$rows" ]] || printf '%s\n' "$rows"
+        return 0
+    fi
     skip=$(prod_env_default STATS_HOST_IF_SKIP) || exit $?
     read -ra prefixes <<< "$skip"
     while read -r line; do
@@ -808,7 +804,7 @@ host_lan_addresses() {
             [[ "$dev" == "$prefix"* ]] && continue 2
         done
         printf '%s\n' "$line"
-    done <<< "$addrs"
+    done <<< "$rows"
 }
 
 # What: reports a failed host address listing, exit as $1
@@ -830,13 +826,6 @@ next_ipv4() {
     printf '%s.%s\n' "${1%.*}" "$((10#${1##*.} + 1))"
 }
 
-# What: true if IP $1 is in the address rows $2
-# Why: one test for "this IP is an address of the host"
-# From: Issue #1683 | PR #2017
-ipv4_listed() {
-    awk -v ip="$1" '$1 == ip { found = 1 } END { exit !found }' <<< "$2"
-}
-
 # What: offer ip addr add for an IP missing on this host
 # Why: one owner for the primary and the secondary binds
 # From: Issue #1683
@@ -846,7 +835,7 @@ ensure_host_ipv4() {
     # Why: same link and subnet; no guessed device or mask
     # From: Issue #1683 | PR #1858
     if addrs=$(host_ipv4_addresses); then
-        ipv4_listed "$ip" "$addrs" && assigned=1
+        list_has "$ip" "$(cut -d" " -f1 <<< "$addrs")" && assigned=1
         link=$(awk -v ip="$ref" '$1 == ip { print $2, $3; exit }' <<< "$addrs")
     else
         print_host_addresses_failed "$?" warn
@@ -897,7 +886,7 @@ detect_lan_ip() {
         fi
     fi
 
-    addrs=$(host_lan_addresses) \
+    addrs=$(host_ipv4_addresses lan) \
         || { print_host_addresses_failed "$?"; return 2; }
     ip=$(awk 'NR == 1 { print $1 }' <<< "$addrs")
     if [[ -n "$ip" ]] && is_valid_ipv4 "$ip"; then
@@ -935,7 +924,7 @@ port_holders() {
 free_bind_ip_suggestion() {
     local current="$1" port="$2" loopback="${3:-0}" candidate addrs conflicts loopback_ip n count
 
-    addrs=$(host_lan_addresses) \
+    addrs=$(host_ipv4_addresses lan) \
         || { print_host_addresses_failed "$?"; return 2; }
     while read -r candidate _; do
         [[ -n "$candidate" ]] || continue
@@ -8158,7 +8147,7 @@ cmd_debug() {
 
     print_step "Network (LAN IPs)"
     local addrs
-    if addrs=$(host_lan_addresses); then
+    if addrs=$(host_ipv4_addresses lan); then
         awk '{ print "    " $1 "/" $2 " dev " $3 }' <<< "$addrs"
     else
         print_host_addresses_failed "$?"
@@ -9773,7 +9762,7 @@ cmd_secondary() {
     is_valid_ipv4 "$ip_http" \
         || die "The primary sent no valid proxy IP (${ip_http}); pass --ip-http <ip>."
     if host_addrs=$(host_ipv4_addresses); then
-        if ipv4_listed "$ip_http" "$host_addrs"; then
+        if list_has "$ip_http" "$(cut -d" " -f1 <<< "$host_addrs")"; then
             print_warn "Cache IP ${ip_http} is an address of this host; it must be the proxy IP of the primary."
         fi
     else
@@ -10169,7 +10158,7 @@ print_step "Network configuration"
 # Why: AG-SEC-007; a host without ip must not abort
 # From: Issue #1683 | PR #1858
 detected_ip=""
-if lan_addresses=$(host_lan_addresses); then
+if lan_addresses=$(host_ipv4_addresses lan); then
     printf "\n  Found LAN addresses:\n"
     awk '{ print "    " $1 "/" $2 " dev " $3 }' <<< "$lan_addresses"
     detect_rc=0
