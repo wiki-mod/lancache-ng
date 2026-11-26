@@ -3292,7 +3292,18 @@ mod dhcp {
             // What: a DHCP page action via the ui socket.
             // Why: the ui checks, saves and applies it.
             // From: Issue #1683 | PR #2020
-            Some("do") => page_action(&s, &args[1..]).await?,
+            Some("do") => {
+                use crate::ui::DhcpOp;
+                // What: rollback has its own word.
+                // Why: one CLI way per job.
+                // From: Issue #1683 | PR #2020
+                let keys: Vec<&str> = DhcpOp::ALL
+                    .iter()
+                    .filter(|o| !matches!(o, DhcpOp::KeaRollback))
+                    .map(|o| o.key())
+                    .collect();
+                crate::shared::http::page_do(&s, &keys, &args[1..]).await?
+            }
             _ => return Err("commands: state kea-snapshots stats kea-rollback do".into()),
         };
         println!("{v}");
@@ -3304,43 +3315,6 @@ mod dhcp {
     // From: Issue #1683 | PR #2020
     pub(crate) fn kea_snapshots(s: &Settings) -> Result<Value, String> {
         Ok(json!({"snapshots": kea_store(s)?.rows()?}))
-    }
-
-    // What: "do <action> field=value": the page form.
-    // Why: the word is the route key without UI_ROUTE_.
-    // From: Issue #1683 | PR #2020
-    async fn page_action(s: &Settings, args: &[String]) -> Result<Value, String> {
-        use crate::ui::DhcpOp;
-        let word = |op: DhcpOp| {
-            op.key()["UI_ROUTE_".len()..]
-                .to_lowercase()
-                .replace('_', "-")
-        };
-        // What: rollback has its own word without the ui.
-        // Why: one CLI way per job.
-        // From: Issue #1683 | PR #2020
-        let ops = DhcpOp::ALL
-            .iter()
-            .copied()
-            .filter(|o| !matches!(o, DhcpOp::KeaRollback));
-        let words: Vec<String> = ops.clone().map(word).collect();
-        let usage = || format!("usage: do <{}> field=value ...", words.join("|"));
-        let (name, pairs) = args.split_first().ok_or_else(usage)?;
-        let op = ops
-            .into_iter()
-            .find(|o| word(*o) == *name)
-            .ok_or_else(usage)?;
-        let mut form = Vec::new();
-        for pair in pairs {
-            let (k, v) = pair
-                .split_once('=')
-                .ok_or_else(|| format!("{pair}: needs field=value"))?;
-            form.push((k.to_string(), v.to_string()));
-        }
-        let route = s.text(op.key())?;
-        let body = crate::shared::http::Body::Form(form);
-        crate::shared::http::ui_socket(s, &route, body).await?;
-        Ok(json!({"done": name}))
     }
 
     // What: put the Kea config back to a snapshot.
@@ -3707,14 +3681,68 @@ mod dns {
                     n => Err(format!("sync-check: {n} zone or server not in sync")),
                 }
             }
+            // What: a DNS page action via the ui socket.
+            // Why: the ui checks, saves and applies it.
+            // From: Issue #1683 | PR #2020
+            Some("do") => {
+                use crate::ui::DnsOp;
+                // What: zone rollback keeps its own word.
+                // Why: one CLI way per job.
+                // From: Issue #1683 | PR #2020
+                let keys: Vec<&str> = DnsOp::ALL
+                    .iter()
+                    .filter(|o| !matches!(o, DnsOp::ZoneRollback))
+                    .map(|o| o.key())
+                    .collect();
+                let s = Settings::from_process()?;
+                let v = crate::shared::http::page_do(&s, &keys, &args[1..]).await?;
+                println!("{v}");
+                Ok(())
+            }
+            Some("secondary") => secondary_do(&args[1..]).await,
             _ => Err(format!("commands: {}", COMMANDS.join(" "))),
         }
+    }
+
+    // What: "secondary <name> <action> [address]".
+    // Why: the DNS page buttons per secondary.
+    // From: Issue #1683 | PR #2020
+    async fn secondary_do(args: &[String]) -> Result<(), String> {
+        use crate::shared::http::Body;
+        use crate::ui::SecondaryOp;
+        let s = Settings::from_process()?;
+        // What: the word is the last part of the route.
+        // Why: the key of remove carries no action word.
+        // From: Issue #1683 | PR #2020
+        let mut ops = Vec::new();
+        for op in SecondaryOp::ALL {
+            let route = s.text(op.key())?;
+            let word = route.rsplit('/').next().unwrap_or_default().to_string();
+            ops.push((*op, route, word));
+        }
+        let words: Vec<&str> = ops.iter().map(|o| o.2.as_str()).collect();
+        let usage = format!("usage: secondary <name> <{}> [address]", words.join("|"));
+        let (name, word, rest) = match args {
+            [n, w, rest @ ..] => (n, w, rest),
+            _ => return Err(usage),
+        };
+        let (op, route, _) = ops.iter().find(|o| o.2 == *word).ok_or(usage.clone())?;
+        let body = match (op, rest) {
+            (SecondaryOp::Address, [ip]) => Body::Json(json!({"address": ip})),
+            (SecondaryOp::Address, _) => return Err(usage),
+            (_, []) => Body::Form(vec![]),
+            _ => return Err(usage),
+        };
+        let route = route.replace("{name}", name);
+        let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+        println!("{}", json!({"done": route, "answer": v}));
+        Ok(())
     }
 
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 3] = ["daemon", "follow-once", "sync-check"];
+    const COMMANDS: [&str; 5] = ["daemon", "follow-once", "sync-check", "do", "secondary"];
 
     // What: serials of managed zones on all servers.
     // Why: one overview for the DNS page, REST and CLI.
@@ -5757,6 +5785,37 @@ mod shared {
                 return Ok(serde_json::Value::Null);
             }
             serde_json::from_str(&text).map_err(|e| format!("ui answer: {e}"))
+        }
+
+        // What: "do <action> field=value" for page forms.
+        // Why: DHCP and DNS CLI post forms the same way.
+        // From: Issue #1683 | PR #2020
+        pub async fn page_do(
+            s: &Settings,
+            keys: &[&str],
+            args: &[String],
+        ) -> Result<serde_json::Value, String> {
+            // What: the word is the key without UI_ROUTE_.
+            // Why: router and CLI read one key list.
+            // From: Issue #1683 | PR #2020
+            let word = |k: &str| {
+                k.trim_start_matches("UI_ROUTE_")
+                    .to_lowercase()
+                    .replace('_', "-")
+            };
+            let words: Vec<String> = keys.iter().map(|k| word(k)).collect();
+            let usage = || format!("usage: do <{}> field=value ...", words.join("|"));
+            let (name, pairs) = args.split_first().ok_or_else(usage)?;
+            let key = keys.iter().find(|k| word(k) == *name).ok_or_else(usage)?;
+            let mut form = Vec::new();
+            for pair in pairs {
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| format!("{pair}: needs field=value"))?;
+                form.push((k.to_string(), v.to_string()));
+            }
+            let v = ui_socket(s, &s.text(key)?, Body::Form(form)).await?;
+            Ok(serde_json::json!({"done": name, "answer": v}))
         }
 
         // What: shared client with SOT timeouts.
@@ -15074,17 +15133,8 @@ mod ui {
         // What: one route per action, tagged with SOT key.
         // Why: handlers match the key, never a path text.
         // From: Issue #1683
-        for &op in DnsOp::ALL {
-            pages = pages.route(&p(op.key())?, post(dns_action).layer(Extension(Op(op))));
-        }
         for &op in HamsterOp::ALL {
             pages = pages.route(&p(op.key())?, post(hamster_action).layer(Extension(Op(op))));
-        }
-        for &op in SecondaryOp::ALL {
-            pages = pages.route(
-                &p(op.key())?,
-                post(secondary_action).layer(Extension(Op(op))),
-            );
         }
         let pages = pages
             .merge(api_routes(&s)?)
@@ -15122,11 +15172,20 @@ mod ui {
     fn api_routes(s: &Settings) -> Result<Router<Arc<App>>, String> {
         let p = |key: &str| s.text(key);
         let mut r = Router::new();
-        // What: DHCP page actions, one route per action.
+        // What: DHCP and DNS page actions, one route each.
         // Why: page, REST and CLI post the same form.
         // From: Issue #1683 | PR #2020
         for &op in DhcpOp::ALL {
             r = r.route(&p(op.key())?, post(dhcp_action).layer(Extension(Op(op))));
+        }
+        for &op in DnsOp::ALL {
+            r = r.route(&p(op.key())?, post(dns_action).layer(Extension(Op(op))));
+        }
+        for &op in SecondaryOp::ALL {
+            r = r.route(
+                &p(op.key())?,
+                post(secondary_action).layer(Extension(Op(op))),
+            );
         }
         Ok(r.route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
             .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
