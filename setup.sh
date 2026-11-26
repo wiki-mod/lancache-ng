@@ -5820,7 +5820,16 @@ cmd_backup() (
     # Why: any exit must leave the stack as it was found
     backup_cleanup() {
         local status=$?
-        [[ "$stack_stopped" = "1" && "$stack_was_running" = "1" ]] && compose_stack_start "$install_dir"
+        if [[ "$stack_stopped" = "1" && "$stack_was_running" = "1" ]]; then
+            compose_stack_start "$install_dir"
+            # What: a lone backup waits for the restart
+            # Why: in an update, the update's gate follows
+            # From: Issue #1683 | PR #2017
+            if [[ "$status" -eq 0 && "${UPDATE_CONVERGENCE_PAUSED:-0}" != 1 ]] \
+                && ! wait_for_whole_stack "$install_dir" "$(runtime_env_file_for_install_dir "$install_dir")"; then
+                print_warn "The backup is complete, but the restarted stack is not healthy; see: $SCRIPT_DIR/setup.sh debug $install_dir"
+            fi
+        fi
         resume_convergence_for_command
         rm -rf "$dest" || print_error "Failed to remove the unfinished backup $dest (exit $?)."
         rm -f "$archive.partial" || print_error "Failed to remove $archive.partial (exit $?)."
