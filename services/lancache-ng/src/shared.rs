@@ -3624,10 +3624,28 @@ pub mod recursor_conf {
         Ok(())
     }
 
-    // What: Lua hook: AAAA answers become empty.
-    // Why: keeps cache traffic on IPv4 when wanted.
-    // From: Issue #1683 | PR #1980
-    pub const AAAA_FILTER_LUA: &str = "function preresolve(dq)\n  if dq.qtype == pdns.AAAA then\n    dq.rcode = pdns.NOERROR\n    return true\n  end\n  return false\nend\n";
+    // What: Lua hook: empty AAAA, not cached, counted.
+    // Why: IPv4 to the cache; one log line per round.
+    // From: Issue #1683 | PR #2020
+    pub const AAAA_FILTER_LUA: &str = r#"suppressed = 0
+
+function preresolve(dq)
+  if dq.qtype == pdns.AAAA then
+    dq.rcode = pdns.NOERROR
+    dq.variable = true
+    suppressed = suppressed + 1
+    return true
+  end
+  return false
+end
+
+function maintenance()
+  if suppressed > 0 then
+    pdnslog("[lancache-dns][filter-aaaa] suppressed " .. suppressed .. " AAAA response(s) since last report", pdns.loglevels.Error)
+    suppressed = 0
+  end
+end
+"#;
 
     // What: full recursor.yml (YAML settings).
     // Why: local zones go to auth; rest upstream.

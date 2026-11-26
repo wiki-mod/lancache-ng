@@ -275,10 +275,6 @@ services:
       - ${PDNS_DIR:?PDNS_DIR is required}:${SOT_PDNS_DATA_DIR}
       - &mount-pdns-filter ${PDNS_FILTER_STATE_DIR:?PDNS_FILTER_STATE_DIR is required}:${SOT_DNS_STATE_DIR}
       - dns-config-snapshots:${SOT_DNS_SNAPSHOT_MOUNT}
-      # What: the recursor Lua script from the checkout.
-      # Why: a runtime file; no image rebuild.
-      # From: Issue #1683 | PR #1858
-      - ../../services/dns/filter-aaaa.lua:${SOT_PDNS_LUA_DNS_SCRIPT}:ro
     # What: dns-http on IP_HTTP, dns-https on IP_HTTPS.
     # Why: one container port each keeps the caches apart.
     # From: Issue #1683
