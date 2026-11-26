@@ -90,19 +90,15 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
     LANCACHE_RUNTIME_DEFAULTS=${LANCACHE_RUNTIME_DEFAULTS} \
     LANCACHE_RUNTIME_SCHEMA=${LANCACHE_RUNTIME_SCHEMA}
 
-# What: the two Rust programs of this image.
+# What: the one Rust program of this image.
 # Why: built in the builder stage from this checkout.
 # From: Issue #1683 | PR #1980
 COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
-# What: old names as symlinks to the one binary.
-# Why: argv0 picks the watchdog and cachehamster roles.
-# From: Issue #1683
-RUN ln -s lancache-ng /usr/local/bin/lancache-watchdog \
- && ln -s lancache-ng /usr/local/bin/lancache-cachehamster
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
+ARG RUST_CRATES
 ARG LANCACHE_PROCESSES
 ARG LANCACHE_PROCESS_PRE
 RUN --mount=type=bind,from=ci-scripts,source=ci.sh,target=/usr/local/bin/ci.sh \

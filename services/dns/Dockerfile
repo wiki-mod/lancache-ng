@@ -94,14 +94,11 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # Why: built in the builder stage from this checkout.
 # From: Issue #1683
 COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
-# What: old name as a symlink to the one binary.
-# Why: argv0 lancache-dns picks the dns role.
-# From: Issue #1683
-RUN ln -s lancache-ng /usr/local/bin/lancache-dns
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
+ARG RUST_CRATES
 ARG LANCACHE_PROCESSES
 ARG LANCACHE_PROCESS_PRE
 ARG LANCACHE_INIT_PRE

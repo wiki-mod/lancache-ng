@@ -7416,7 +7416,7 @@ ci_cmd_image_setup() {
 # From: Issue #1683
 ci_cmd_openrc_setup() {
     local rows="${LANCACHE_RUNTIME_DEFAULTS:-}" row k f out n
-    local level name cmd args idir rdir pl
+    local level name cmd args idir rdir pl prog crates="${!CI_ARG_CRATES:-}"
     local -a kv=()
     local -A oset=() oset_pre=()
     rows="${rows//|/$'\n'}"
@@ -7456,6 +7456,16 @@ ci_cmd_openrc_setup() {
         _ci_fill "${row#*=}" "${rows}" || return 2
         cmd="${REPLY//,/ }"; args=""
         [[ "${cmd}" != *" "* ]] || args="${cmd#* }"
+        # What: process name as a link to the crate binary.
+        # Why: argv0 picks the role, e.g. lancache-ui.
+        # From: Issue #1683
+        prog="${cmd%% *}"
+        if [[ " ${crates} " == *" ${prog##*/} "* ]] && [ "${name}" != "${prog##*/}" ]; then
+            if ! out="$(ln -s "${prog##*/}" "${prog%/*}/${name}" 2>&1)"; then
+                ci_error "[CI-ERROR-OPENRC-0004]" "process=\"${name}\" reason=\"role link not made\"" "${out}"
+                return 2
+            fi
+        fi
         # What: reload sends HUP to the supervised program.
         # Why: openrc-init drops a container HUP.
         # From: Issue #1683
