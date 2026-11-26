@@ -29,20 +29,17 @@ mod watchdog;
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // What: the program name may name the role (busybox).
+    // What: lancache-<role> as program name picks the role.
     // Why: old callers run lancache-ui/-dns/... unchanged.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     let exe = std::env::args().next().unwrap_or_default();
     let exe = std::path::Path::new(&exe)
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("");
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
-    let role: String = match exe {
-        "lancache-ui" => "ui".into(),
-        "lancache-dns" => "dns".into(),
-        "lancache-watchdog" => "watchdog".into(),
-        "lancache-cachehamster" => "cachehamster".into(),
+    let role: String = match exe.strip_prefix("lancache-") {
+        Some(r) if r != "ng" => r.into(),
         _ if !argv.is_empty() => argv.remove(0),
         _ => String::new(),
     };
@@ -52,11 +49,19 @@ async fn main() -> std::process::ExitCode {
         "dns" => code(dns::run(&argv).await),
         "cachehamster" => cachehamster::run(&argv).await,
         other => {
-            eprintln!("lancache-ng: unknown role {other:?}; use ui|watchdog|dns|cachehamster");
+            eprintln!(
+                "lancache-ng: unknown role {other:?}; use {}",
+                ROLES.join("|")
+            );
             std::process::ExitCode::from(2)
         }
     }
 }
+
+// What: the roles; argv0 lancache-<role> picks one too.
+// Why: the help names the same set as the match.
+// From: Issue #1683 | PR #2020
+const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
