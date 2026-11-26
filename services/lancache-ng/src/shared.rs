@@ -2219,14 +2219,23 @@ pub mod log {
     // From: Issue #1683 | PR #1980
     pub fn forward_block(s: &Settings, targets: &[Target], source: &str) -> Result<String, String> {
         let buffer = s.text("SYSLOG_BUFFER_DIR")?;
+        let bytes = s.uint("SYSLOG_BUFFER_BYTES")?;
         let transport = s.text("SYSLOG_FWD_TRANSPORT")?;
         Ok(targets
             .iter()
             .enumerate()
             .map(|(i, t)| {
+                // What: ip-protocol(6) for an IPv6 address.
+                // Why: syslog-ng defaults to IPv4 only.
+                // From: Issue #1683 | PR #2020
+                let proto = if t.host.parse::<std::net::Ipv6Addr>().is_ok() {
+                    " ip-protocol(6)"
+                } else {
+                    ""
+                };
                 let dest = format!(
                     "destination d_fwd{i} {{ network(\"{}\" port({}) transport(\"{transport}\") \
-                     disk-buffer(reliable(yes) dir(\"{buffer}\")) ); }};\n",
+                     disk-buffer(reliable(yes) capacity-bytes({bytes}) dir(\"{buffer}\")){proto} ); }};\n",
                     t.host, t.port
                 );
                 let n = i.to_string();

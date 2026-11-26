@@ -1717,6 +1717,10 @@ runtime:
     - STEAM_OS=windows
     - STEAM_PROTOCOL_VERSION=65580
     - STEAM_QR_SIZE=220
+    # What: disk buffer size per forward target, bytes.
+    # Why: syslog-ng drops every line without a size.
+    # From: Issue #1683 | PR #2020
+    - SYSLOG_BUFFER_BYTES=1073741824
     # What: syslog buffer, forward, form, mute, primary.
     # Why: the syslog render writes them.
     # From: Issue #1683 | PR #2020
@@ -2087,6 +2091,7 @@ runtime:
     - STEAM_OS=choice;windows,macos,linux;;live;services
     - STEAM_PROTOCOL_VERSION=uint;1;1000000;live;services
     - STEAM_QR_SIZE=uint;100;1000;live;services
+    - SYSLOG_BUFFER_BYTES=uint;1048576;1099511627776;restart;services
     - SYSLOG_BUFFER_DIR=path;;;restart;services
     - SYSLOG_FORWARD=list?;;;restart;services
     - SYSLOG_LINE_TEMPLATE=text;;;restart;services
