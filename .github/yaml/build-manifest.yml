@@ -2102,6 +2102,7 @@ runtime:
     - SETUP_SCRIPT_URL=text;;;live;ui
     - SETUP_SCRIPT_URL_NIGHTLY=text;;;live;ui
     - SETUP_GIT_REF=text;;;live;ui
+    - SETUP_DNS_PROBE_NAME=text;;;container;dns
     - SETUP_GIT_REF_NIGHTLY=text;;;live;ui
     - SNMP_AGENTX=bool;;;restart;services
     - SNMP_AGENTX_SOCKET=path;;;restart;services

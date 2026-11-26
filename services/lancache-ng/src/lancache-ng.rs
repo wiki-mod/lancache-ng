@@ -621,6 +621,18 @@ mod cachehamster {
         })
     }
 
+    // What: the daemon writes jobs.json every round.
+    // Why: a stale file means the daemon is down.
+    // From: Issue #871 | PR #1980
+    fn daemon_alive(c: &Ctx) -> Result<bool, String> {
+        let tick = c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?;
+        Ok(std::fs::metadata(c.path(JOBS_FILE))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() <= tick * 3))
+    }
+
     // What: the status for the UI: login and jobs.
     // Why: one JSON answer per page refresh.
     // From: Issue #871 | PR #1980
@@ -644,17 +656,8 @@ mod cachehamster {
         for j in jobs.iter_mut().skip(known) {
             j.id.clear();
         }
-        // What: the daemon writes jobs.json every round.
-        // Why: a stale file means the daemon is down.
-        // From: Issue #871 | PR #1980
-        let tick = c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?;
-        let alive = std::fs::metadata(c.path(JOBS_FILE))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age.as_secs() <= tick * 3);
         Ok(json!({
-            "daemon_running": alive,
+            "daemon_running": daemon_alive(c)?,
             "logged_in": session.is_some(),
             "login_error": login_error,
             "account": session.map(|s| s.account),
@@ -2199,9 +2202,10 @@ mod cachehamster {
     // What: every command cachehamster takes.
     // Why: the help names the same set as the match.
     // From: Issue #871 | PR #2020
-    const COMMANDS: [&str; 17] = [
+    const COMMANDS: [&str; 18] = [
         "daemon",
         "status",
+        "healthcheck",
         "login-begin",
         "login-poll",
         "login-cancel",
@@ -2226,6 +2230,13 @@ mod cachehamster {
         let client = http::client(&c.s)?;
         match args.first().map(String::as_str) {
             Some("status") => status(&c),
+            // What: probe: the daemon wrote jobs lately.
+            // Why: the same rule as daemon_running.
+            // From: Issue #871 | PR #2020
+            Some("healthcheck") => match daemon_alive(&c)? {
+                true => Ok(json!({"daemon_running": true})),
+                false => Err("cachehamster daemon is not running".into()),
+            },
             Some("login-begin") => login_begin(&c, &client).await,
             Some("login-poll") => login_poll(&c, &client).await,
             Some("login-cancel") => {
@@ -3910,6 +3921,10 @@ mod dns {
                 }
                 Ok(())
             }
+            // What: container probe: any reply counts.
+            // Why: a dead upstream must not restart dns.
+            // From: Issue #1683 | PR #2020
+            Some("healthcheck") => healthcheck(&Settings::from_process()?).await,
             // What: query NAME TYPE [http/https/auth/ip#n]
             // Why: a real DNS answer; needs no running ui.
             // From: Issue #1683 | PR #2020
@@ -3995,9 +4010,10 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 11] = [
+    const COMMANDS: [&str; 12] = [
         "daemon",
         "follow-once",
+        "healthcheck",
         "sync-check",
         "do",
         "secondary",
@@ -4938,6 +4954,15 @@ mod dns {
                 crate::shared::recursor_conf::Chain::default()
             }
         }
+    }
+
+    // What: SETUP_DNS_PROBE_NAME A on the loopback.
+    // Why: compose ran dig; one DNS client now.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn healthcheck(s: &Settings) -> Result<(), String> {
+        let target = format!("{}#{}", s.text("LOOPBACK_BIND_IP")?, s.uint("DNS_PORT")?);
+        let name = s.text("SETUP_DNS_PROBE_NAME")?;
+        query(s, &name, "A", &target).await.map(drop)
     }
 
     // What: one DNS question to a stack server.
