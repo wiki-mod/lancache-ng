@@ -2258,91 +2258,41 @@ set_env_assignment() {
     warn_env_key_overridden "$key" "$env_file"
 }
 
-# What: adds KEY=VALUE only if the key is absent
-# Why: an existing assignment, even empty, is kept
+# What: fills an absent or empty key from $4 or key $5
+# Why: one rule for defaults and renamed keys on update
 # From: Issue #1683 | PR #1858
-append_env_key_if_missing() {
-    local key="$1" value="$2" env_file="$3"
+env_key_fill() {
+    local key="$1" env_file="$2" when="$3" value="$4" source="${5:-}" existing
     validate_env_value "$key" "$value"
-    # What: adds the key only when absent
-    # Why: empty placeholders must survive updates
-    # From: Issue #1683 | PR #1858
-    env_raw_assignments "$key" "$env_file" exists only \
-        || set_env_assignment "$key" "$value" "$env_file"
-}
-
-# What: fills a default only when missing or empty
-# Why: a non-empty raw assignment is kept as-is
-# From: Issue #1683 | PR #1858
-set_env_key_if_empty_or_missing() {
-    local key="$1" value="$2" env_file="$3" existing_assignment
-    validate_env_value "$key" "$value"
-    if env_raw_assignments "$key" "$env_file" exists only; then
-        # What: keeps an existing non-empty assignment
-        # Why: Compose interpolation must survive updates
-        # From: Issue #1683 | PR #1858
-        existing_assignment=$(env_raw_assignments "$key" "$env_file" nonempty) || exit $?
-        if [[ -n "$existing_assignment" ]]; then
-            set_env_assignment "$key" "$existing_assignment" "$env_file"
-        else
-            set_env_key "$key" "$value" "$env_file"
-        fi
-    else
-        set_env_assignment "$key" "$value" "$env_file"
-    fi
-}
-
-# What: migrates an old key to a new one, or seeds fallback
-# Why: an empty target is a valid, intentional state
-# From: Issue #1683 | PR #1858
-append_env_migrated_assignment_if_missing() {
-    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-
-    # What: keeps an existing empty optional target as is
+    # What: "absent" keeps any line, even an empty one
     # Why: an empty value keeps Compose's fallback alive
     # From: Issue #1683 | PR #1858
-    if env_raw_assignments "$target_key" "$env_file" exists only; then
+    if [[ "$when" = absent ]] && env_raw_assignments "$key" "$env_file" exists only; then
         return 0
     fi
-
-    env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
-}
-
-# What: copies the source assignment, else the fallback
-# Why: one owner of the tail of both migrations
-# From: Issue #1683 | PR #1858
-env_assign_from_source_or_fallback() {
-    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local source_assignment
-
-    source_assignment=$(env_raw_assignments "$source_key" "$env_file" nonempty) || exit $?
-    if [[ -n "$source_assignment" ]]; then
-        # What: rewrites an empty migrated target in place
-        # Why: avoids duplicate KEY= lines on update
-        # From: Issue #1683 | PR #1858
-        set_env_assignment "$target_key" "$source_assignment" "$env_file"
-    elif env_raw_assignments "$target_key" "$env_file" exists only || [[ -n "$fallback_value" ]]; then
-        set_env_key "$target_key" "$fallback_value" "$env_file"
-    fi
-}
-
-# What: migrates a required key; repairs an empty target
-# Why: Compose would turn KEY= into an invalid bind mount
-# From: Issue #1683 | PR #1858
-append_required_env_migrated_assignment_if_empty_or_missing() {
-    local target_key="$1" source_key="$2" fallback_value="$3" env_file="$4"
-    local target_assignment
-
-    # What: keeps a non-empty duplicate target value
-    # Why: updates must converge on the operator's real dir
+    # What: "empty" keeps a non-empty value as the one line
+    # Why: Compose interpolation and duplicates converge
     # From: Issue #1683 | PR #1858
-    target_assignment=$(env_raw_assignments "$target_key" "$env_file" nonempty) || exit $?
-    if [[ -n "$target_assignment" ]]; then
-        set_env_assignment "$target_key" "$target_assignment" "$env_file"
+    if [[ "$when" = empty ]]; then
+        existing=$(env_raw_assignments "$key" "$env_file" nonempty) || exit $?
+        if [[ -n "$existing" ]]; then
+            set_env_assignment "$key" "$existing" "$env_file"
+            return 0
+        fi
+    fi
+    if [[ -n "$source" ]]; then
+        # What: a renamed key takes the old key's raw text
+        # Why: quoting and ${VAR} survive; no empty key
+        # From: Issue #1683 | PR #1858
+        existing=$(env_raw_assignments "$source" "$env_file" nonempty) || exit $?
+        if [[ -n "$existing" ]]; then
+            set_env_assignment "$key" "$existing" "$env_file"
+        elif [[ -n "$value" ]] || env_raw_assignments "$key" "$env_file" exists only; then
+            set_env_key "$key" "$value" "$env_file"
+        fi
         return 0
     fi
-
-    env_assign_from_source_or_fallback "$target_key" "$source_key" "$fallback_value" "$env_file"
+    set_env_assignment "$key" "$value" "$env_file"
 }
 
 # What: sets strict proxy mode to default if no allowlist
@@ -5158,8 +5108,8 @@ migrate_env_for_update() (
     # What: moves IP_STANDARD/IP_SSL to IP_HTTP/IP_HTTPS.
     # Why: older installs still carry the old key names.
     # From: Issue #1683 | PR #1912
-    append_env_migrated_assignment_if_missing IP_HTTP IP_STANDARD "" "$env_file"
-    append_env_migrated_assignment_if_missing IP_HTTPS IP_SSL "" "$env_file"
+    env_key_fill IP_HTTP "$env_file" absent "" IP_STANDARD
+    env_key_fill IP_HTTPS "$env_file" absent "" IP_SSL
     remove_env_key IP_STANDARD "$env_file"
     remove_env_key IP_SSL "$env_file"
     # What: drops every NATS and Netdata key on update.
@@ -5229,9 +5179,9 @@ migrate_env_for_update() (
         assert_resolved_image_tag_platform_supported \
             "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
     fi
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_REGISTRY "$lancache_image_registry" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_PREFIX "$lancache_image_prefix" "$env_file"
-    set_env_key_if_empty_or_missing LANCACHE_IMAGE_CHANNEL "$lancache_image_channel" "$env_file"
+    env_key_fill LANCACHE_IMAGE_REGISTRY "$env_file" empty "$lancache_image_registry"
+    env_key_fill LANCACHE_IMAGE_PREFIX "$env_file" empty "$lancache_image_prefix"
+    env_key_fill LANCACHE_IMAGE_CHANNEL "$env_file" empty "$lancache_image_channel"
     # What: a former channel name in .env becomes current
     # Why: a former name has no stack tag of its own
     # From: Issue #1683 | PR #1858
@@ -5248,7 +5198,7 @@ migrate_env_for_update() (
     # What: moves SSL_ENABLED to HTTPS_ENABLED.
     # Why: old installs and config/prod keep the old key.
     # From: Issue #1683 | PR #1912
-    append_env_migrated_assignment_if_missing HTTPS_ENABLED SSL_ENABLED "" "$env_file"
+    env_key_fill HTTPS_ENABLED "$env_file" absent "" SSL_ENABLED
     remove_env_key SSL_ENABLED "$env_file"
 
     # What: validates an operator TTL; default is the SOT
@@ -5260,11 +5210,11 @@ migrate_env_for_update() (
     # What: an install without the key gets auto-update off
     # Why: the user never agreed; a SOT change must not
     # From: Issue #1683 | PR #1912
-    set_env_key_if_empty_or_missing AUTO_UPDATE_ENABLED "0" "$env_file"
+    env_key_fill AUTO_UPDATE_ENABLED "$env_file" empty "0"
 
     state_dir=$(install_state_root "$install_dir" "$env_file") \
         || die "Cannot resolve the state root of $install_dir (exit $?)."
-    set_env_key_if_empty_or_missing LANCACHE_STATE_DIR "$state_dir" "$env_file"
+    env_key_fill LANCACHE_STATE_DIR "$env_file" empty "$state_dir"
 
     # What: CACHE_DIR is the canonical cache path
     # Why: legacy split cache keys must collapse into it
@@ -5287,7 +5237,7 @@ migrate_env_for_update() (
     # What: moves PDNS_STANDARD_DIR to PDNS_DIR, data stays
     # Why: moving the key must not move the zone data.
     # From: Issue #1683 | PR #1912
-    append_env_migrated_assignment_if_missing PDNS_DIR PDNS_STANDARD_DIR "" "$env_file"
+    env_key_fill PDNS_DIR "$env_file" absent "" PDNS_STANDARD_DIR
     remove_env_key PDNS_STANDARD_DIR "$env_file"
     if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$state_dir/pdns" ]]; then
         set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
@@ -5320,7 +5270,7 @@ migrate_env_for_update() (
     cache_max_size=$(get_env_var CACHE_MAX_SIZE "$env_file" nonempty) || exit $?
     cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file" nonempty) || exit $?
     if cache_gb=$(cache_size_gb_from_env "${cache_max_size:-$cache_max_gb}"); then
-        set_env_key_if_empty_or_missing CACHE_MAX_GB "$cache_gb" "$env_file"
+        env_key_fill CACHE_MAX_GB "$env_file" empty "$cache_gb"
     fi
     # What: a broken CACHE_MEM_MB is removed, not replaced
     # Why: the image then takes the SOT default itself
@@ -5332,7 +5282,7 @@ migrate_env_for_update() (
     fi
     migrate_proxy_security_mode_for_update "$env_file"
     migrate_dhcp_mode_for_update "$env_file"
-    append_env_migrated_assignment_if_missing UI_BIND_IP IP_HTTP "$ip_http" "$env_file"
+    env_key_fill UI_BIND_IP "$env_file" absent "$ip_http" IP_HTTP
 
     # What: drops the retired global logging switch
     # Why: the Admin UI holds one switch per service
@@ -5471,8 +5421,8 @@ migrate_env_for_update() (
     # What: UI auth is user-chosen; user needs a password
     # Why: unset user and password mean insecure UI
     # From: Issue #1683 | PR #1858
-    append_env_key_if_missing UI_AUTH_USER "" "$env_file"
-    append_env_key_if_missing UI_AUTH_PASSWORD_HASH "" "$env_file"
+    env_key_fill UI_AUTH_USER "$env_file" absent ""
+    env_key_fill UI_AUTH_PASSWORD_HASH "$env_file" absent ""
     ui_user=$(get_env_var UI_AUTH_USER "$env_file") || exit $?
     ui_password=$(get_env_var UI_AUTH_PASSWORD "$env_file") || exit $?
     ui_password_hash=$(get_env_var UI_AUTH_PASSWORD_HASH "$env_file") || exit $?
@@ -5481,7 +5431,7 @@ migrate_env_for_update() (
     # Why: an open install stays open; others use the SOT
     # From: Issue #1683 | PR #1912
     if [[ -z "$ui_user" && -z "$ui_password" && -z "$ui_password_hash" ]]; then
-        append_env_key_if_missing ALLOW_INSECURE_UI true "$env_file"
+        env_key_fill ALLOW_INSECURE_UI "$env_file" absent true
     fi
 
     # What: every SOT-required key holds a value by now
