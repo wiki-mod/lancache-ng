@@ -969,6 +969,37 @@ mod cachehamster {
         }))
     }
 
+    // What: session, Web API, CM and CDN, each checked.
+    // Why: shows which step blocks Steam jobs.
+    // From: Issue #871 | PR #2020
+    async fn steam_check(c: &Ctx) -> Result<Value, String> {
+        let cfg = SteamCfg::load(c)?;
+        let part = |r: Result<Value, String>| match r {
+            Ok(v) => json!({"ok": true, "detail": v}),
+            Err(e) => json!({"ok": false, "error": e}),
+        };
+        let session = part(load_session(&cfg.dir, &cfg.bind).and_then(|s| {
+            s.map(|s| json!(s.account))
+                .ok_or("Steam login missing".into())
+        }));
+        let api = part(
+            cm_list(&cfg, &cfg.web)
+                .await
+                .map(|l| json!({"cm_servers": l.len()})),
+        );
+        let cm = part(match session["ok"].as_bool() {
+            Some(true) => Cm::login(&cfg, &cfg.web)
+                .await
+                .map(|cm| json!({"steam_id": cm.steam_id})),
+            _ => Err("skipped: no Steam login".into()),
+        });
+        let cdn = part(fetch_check(c, &[format!("http://{}/", cfg.cdn_host)]).await);
+        let all = [&session, &api, &cm, &cdn]
+            .iter()
+            .all(|p| p["ok"].as_bool() == Some(true));
+        Ok(json!({"ok": all, "session": session, "web_api": api, "cm": cm, "cdn": cdn}))
+    }
+
     // What: run one URL job with many connections.
     // Why: bytes are read and dropped (RAM sink, no disk).
     // From: Issue #871 | PR #1980
@@ -1390,6 +1421,27 @@ mod cachehamster {
         body: Vec<u8>,
     }
 
+    // What: websocket CM servers of our Steam cell.
+    // Why: login and steam-check ask Steam one way.
+    // From: Issue #871 | PR #2020
+    async fn cm_list(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Vec<String>, String> {
+        let list = steam_api(
+            client,
+            &cfg.api,
+            "ISteamDirectory/GetCMList",
+            Req::Get(&[("cellid", cfg.cell.as_str())]),
+        )
+        .await?;
+        Ok(list["serverlist_websockets"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     // What: our own CM session over a websocket.
     // Why: no third-party Steam library is used.
     // From: Issue #871 | PR #1980
@@ -1413,17 +1465,11 @@ mod cachehamster {
             let steam_id: u64 = steam_id_of(&s.refresh_token)?
                 .parse()
                 .map_err(|e| format!("steam id: {e}"))?;
-            let list = steam_api(
-                client,
-                &cfg.api,
-                "ISteamDirectory/GetCMList",
-                Req::Get(&[("cellid", cfg.cell.as_str())]),
-            )
-            .await?;
-            let host = list["serverlist_websockets"][0]
-                .as_str()
-                .ok_or("CM list: no websocket server")?
-                .to_string();
+            let host = cm_list(cfg, client)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or("CM list: no websocket server")?;
             // What: connect within the SOT request limit.
             // Why: a silent CM must not hang a lookup.
             // From: Issue #871 | PR #2020
@@ -2153,7 +2199,7 @@ mod cachehamster {
     // What: every command cachehamster takes.
     // Why: the help names the same set as the match.
     // From: Issue #871 | PR #2020
-    const COMMANDS: [&str; 16] = [
+    const COMMANDS: [&str; 17] = [
         "daemon",
         "status",
         "login-begin",
@@ -2164,6 +2210,7 @@ mod cachehamster {
         "cached",
         "wipe",
         "fetch-check",
+        "steam-check",
         "lookup",
         "evict",
         "add",
@@ -2188,6 +2235,7 @@ mod cachehamster {
             Some("library") => library(&c, &client).await,
             Some("cached") => cached(&c),
             Some("fetch-check") => fetch_check(&c, &args[1..]).await,
+            Some("steam-check") => steam_check(&c).await,
             Some("wipe") => wipe(&c),
             Some("lookup") => app_cache(&c, &args[1..], false).await,
             Some("evict") => app_cache(&c, &args[1..], true).await,
@@ -2218,6 +2266,13 @@ mod cachehamster {
             Ok(c) => command(c, &args).await,
         };
         match result {
+            // What: a check with "ok": false exits 1.
+            // Why: the answer keeps its parts as JSON.
+            // From: Issue #871 | PR #2020
+            Ok(v) if v.get("ok") == Some(&Value::Bool(false)) => {
+                println!("{v}");
+                std::process::ExitCode::FAILURE
+            }
             Ok(v) => {
                 println!("{v}");
                 std::process::ExitCode::SUCCESS
@@ -14294,7 +14349,10 @@ mod ui {
             // From: Issue #871 | PR #1980
             return Err(format!("{} {e}", tr("hamster_says")));
         }
-        if code != 0 {
+        // What: a failed check still answers its JSON.
+        // Why: REST shows which part failed.
+        // From: Issue #871 | PR #2020
+        if code != 0 && v.get("ok") != Some(&Value::Bool(false)) {
             return Err(tr("hamster_exit").replace("{x}", &code.to_string()));
         }
         Ok(v)
@@ -14383,6 +14441,7 @@ mod ui {
             "status",
             "cached",
             "wipe",
+            "steam-check",
         ];
         // What: lookup-ID and evict-ID carry one app id.
         // Why: the library row checks or frees one game.
