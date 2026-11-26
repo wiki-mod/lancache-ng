@@ -5938,33 +5938,35 @@ record_image_revisions() {
     printf '%s\n' "$revisions" > "$output" || die "Failed to write $output (exit $?)."
 }
 
-# What: prints the ext of the first present compressor
-# Why: runtime.archive_compressors lists them best first
+# What: archive_compressors: best ext, cmd of ext, or exts
+# Why: one reader of the SOT rows "ext command args"
 # From: Issue #1683 | PR #1912
-archive_compressor_ext() {
-    local rows
+archive_compressor() {
+    local mode="$1" ext="${2:-}" rows
     local -a row
     rows=$(lancache_sot_list archive_compressors runtime) || exit $?
     while read -r -a row; do
-        if command_available "${row[1]}"; then
-            printf '%s\n' "${row[0]}"
-            return 0
-        fi
+        [[ ${#row[@]} -gt 0 ]] || continue
+        case "$mode" in
+            best) command_available "${row[1]}" || continue; printf '%s\n' "${row[0]}"; return 0 ;;
+            command) [[ "${row[0]}" = "$ext" ]] || continue; printf '%s\n' "${row[*]:1}"; return 0 ;;
+            exts) printf '.tar.%s\n' "${row[0]}" ;;
+        esac
     done <<< "$rows"
-    die "No compressor of runtime.archive_compressors is installed."
+    case "$mode" in
+        best) die "No compressor of runtime.archive_compressors is installed." ;;
+        command) die "No compressor for .$ext archives in runtime.archive_compressors." ;;
+    esac
 }
 
 # What: tars one entry through the compressor of <ext>
 # Why: bash waits for both ends; no half-written archive
 # From: Issue #1683 | PR #1858
 write_compressed_tar() {
-    local ext="$1" archive="$2" parent="$3" entry="$4" rows
-    local -a row compressor=()
-    rows=$(lancache_sot_list archive_compressors runtime) || exit $?
-    while read -r -a row; do
-        [[ "${row[0]}" != "$ext" ]] || compressor=("${row[@]:1}")
-    done <<< "$rows"
-    [[ ${#compressor[@]} -gt 0 ]] || die "No compressor for .$ext archives in runtime.archive_compressors."
+    local ext="$1" archive="$2" parent="$3" entry="$4" command
+    local -a compressor=()
+    command=$(archive_compressor command "$ext") || exit $?
+    read -r -a compressor <<< "$command"
     # What: the archive is written like any file, mode 600
     # Why: write_file_atomically owns temp file and rename
     # From: Issue #1683 | PR #2017
@@ -6010,7 +6012,7 @@ cmd_backup() (
     # What: backup packs with the best present compressor
     # Why: zstd -T0 uses all cores; gzip used only one
     # From: Issue #1683
-    archive_ext=$(archive_compressor_ext)
+    archive_ext=$(archive_compressor best)
     archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.${archive_ext}"
     mkdir -p "$backup_root" || die "Failed to create $backup_root (exit $?)."
     old_umask=$(umask)
@@ -6109,7 +6111,7 @@ cmd_restore() (
     archive="${1:-}"
     install_dir="${2:-$DEFAULT_INSTALL_DIR}"
     install_dir=$(resolve_stack_dir "$install_dir") || exit $?
-    [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]"
+    [[ -n "$archive" ]] || die "Usage: $0 restore <backup archive ($(archive_compressor exts | paste -sd" "))> [install-dir]"
     [[ -f "$archive" ]] || die "Backup archive not found: $archive"
     # What: tools of the restore and its convergence step
     # Why: fails before restore mutations on minimal hosts
@@ -6549,7 +6551,7 @@ EOF
             ;;
         restore)
             cat <<EOF
-Usage: ./setup.sh restore <backup archive (.tar.zst, .tar.bz2 or .tar.gz)> [install-dir]
+Usage: ./setup.sh restore <backup archive ($(archive_compressor exts | paste -sd" "))> [install-dir]
 
 Restores a setup-script backup. Files from the archived install directory are
 remapped to [install-dir] when it differs from the original path. After
@@ -8480,7 +8482,7 @@ Review the contents before attaching this archive to a GitHub issue --
 automatic upload is intentionally not part of this tool.
 EOF
 
-    ext=$(archive_compressor_ext)
+    ext=$(archive_compressor best)
     archive="$dest_root/lancache-ng-issue-logs-${stamp}.tar.${ext}"
     write_compressed_tar "$ext" "$archive" "$dest_root" "$(basename "$dest")" \
         || die "Failed to write $archive (exit $?)."
