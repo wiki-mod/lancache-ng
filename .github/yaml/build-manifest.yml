@@ -1842,7 +1842,7 @@ ci_check_inputs:
     - "deploy/**"
     - "@{ci_variables.CI_README}"
     - "@{ci_variables.CI_INSTALLER}"
-    - "@{services.ui.context}/src/main.rs"
+    - "**/*.rs"
   codeql-coverage: ["**/*.rs", "**/Cargo.toml"]
   comments: ["**"]
   deny-short-sha:
