@@ -7645,6 +7645,38 @@ mod shared {
             json!({"state": "ok", "services": rows})
         }
 
+        // What: engine reachable, versions, stack size.
+        // Why: one check for REST and the CLI.
+        // From: Issue #1683 | PR #2020
+        pub async fn engine_check(api: &Api, s: &crate::config::Settings) -> Result<Value, String> {
+            let endpoint = s.text("DOCKER_ENDPOINT")?;
+            let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+            let project = s.text("COMPOSE_PROJECT")?;
+            let mut v = json!({"endpoint": endpoint, "project": project});
+            match api.version(limit).await {
+                Ok(ver) => {
+                    v["version"] = ver["Version"].clone();
+                    v["api_version"] = ver["ApiVersion"].clone();
+                }
+                Err(e) => {
+                    v["ok"] = json!(false);
+                    v["error"] = json!(e.to_string());
+                    return Ok(v);
+                }
+            }
+            match api.stack(s).await {
+                Ok(rows) => {
+                    v["ok"] = json!(true);
+                    v["containers"] = json!(rows.len());
+                }
+                Err(e) => {
+                    v["ok"] = json!(false);
+                    v["error"] = json!(e);
+                }
+            }
+            Ok(v)
+        }
+
         // What: lancache-ng system status: stack as JSON.
         // Why: stack reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
@@ -7686,6 +7718,17 @@ mod shared {
                     };
                 }
                 ["apply"] => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
+                // What: Docker engine check; rc 1 on fail.
+                // Why: a read; it needs no running ui.
+                // From: Issue #1683 | PR #2020
+                ["docker"] => {
+                    let v = engine_check(&Api::new(&s.text("DOCKER_ENDPOINT")?)?, &s).await?;
+                    println!("{v}");
+                    return match v["ok"].as_bool() {
+                        Some(true) => Ok(()),
+                        _ => Err("docker: the engine did not answer".into()),
+                    };
+                }
                 // What: render bodies of an owner or path.
                 // Why: a read; secrets show as <secret>.
                 // From: Issue #1683 | PR #2020
@@ -7706,10 +7749,12 @@ mod shared {
                     (r, Body::Form(vec![]))
                 }
                 _ => {
-                    return Err("commands: status | plan | apply | render [owner|path] | \
+                    return Err(
+                        "commands: status | docker | plan | apply | render [owner|path] | \
                                 container <service> start|stop | ui restart | \
                                 service <container> <program> restart|reload"
-                        .into());
+                            .into(),
+                    );
                 }
             };
             let v = crate::shared::http::ui_socket(&s, &route, body).await?;
@@ -7923,6 +7968,13 @@ mod shared {
                         )
                         .await?,
                 )
+            }
+
+            // What: engine version and API version.
+            // Why: docker check shows the engine answers.
+            // From: Issue #1683 | PR #2020
+            pub async fn version(&self, limit: Duration) -> Result<Value, Error> {
+                decode(&self.call(Method::GET, "/version", None, limit).await?)
             }
 
             // What: one stats sample of a container.
@@ -13790,6 +13842,18 @@ mod ui {
         json_reply(render_plan(&app.settings()).await.map(Some), "")
     }
 
+    // What: GET Docker engine check as JSON.
+    // Why: REST read on the check of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn docker_api(State(app): Shared) -> Response {
+        json_reply(
+            docker::engine_check(&app.docker, &app.settings())
+                .await
+                .map(Some),
+            "",
+        )
+    }
+
     // What: GET psl ?host=: how the proxy maps it.
     // Why: REST read on the lookup of the CLI.
     // From: Issue #1683 | PR #2020
@@ -16200,6 +16264,7 @@ mod ui {
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_APPLY_PREVIEW")?, get(apply_preview_api))
             .route(&p("UI_ROUTE_PROXY_PSL")?, get(proxy_psl_api))
+            .route(&p("UI_ROUTE_DOCKER")?, get(docker_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
