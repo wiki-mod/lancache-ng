@@ -5233,16 +5233,6 @@ pub mod render {
         Ok(())
     }
 
-    // What: set group and mode of one path.
-    // Why: nginx workers read keys by the shared gid.
-    // From: Issue #1683 | PR #1980
-    fn grant(p: &Path, gid: Option<u32>, mode: u32) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        let err = |e: std::io::Error| format!("{}: {e}", p.display());
-        std::os::unix::fs::chown(p, None, gid).map_err(err)?;
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).map_err(err)
-    }
-
     // What: drop every leaf when the CA changed.
     // Why: leaves of an old CA fail on every client.
     // From: Issue #1683 | PR #1980
@@ -5295,6 +5285,14 @@ pub mod render {
         for d in [&ca, &dir] {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
+        // What: group and mode of one cert path.
+        // Why: nginx workers read keys by the shared gid.
+        // From: Issue #1683 | PR #2020
+        let grant = |p: &Path, gid: Option<u32>, mode: u32| {
+            let owner = crate::shared::fs::Owner { uid: None, gid };
+            crate::shared::fs::set_path_owner(p, owner, Some(mode))
+                .map_err(|e| format!("{}: {e}", p.display()))
+        };
         grant(&dir, gid, s.mode("CERT_DIR_MODE")?)?;
         if !(ca_crt.exists() && ca_key.exists()) {
             crate::shared::cert::make_ca(
