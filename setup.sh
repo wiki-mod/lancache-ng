@@ -2858,11 +2858,7 @@ migrate_quickstart_install() (
     # What: convergence paused for the whole migration
     # Why: the timer must not run compose mid-migration
     # From: Issue #1683 | PR #1858
-    UPDATE_CONVERGENCE_PAUSED=0
-    UPDATE_CONVERGENCE_COMPLETED=0
-    trap resume_lancache_convergence_after_failed_update EXIT
-    UPDATE_CONVERGENCE_PAUSED=1
-    pause_lancache_convergence_for_update
+    start_update_convergence_pause
     capture_stack_health_baseline "$old_dir" "$old_env"
     project=$(compose_project_name "$old_dir" "$old_env") \
         || die "Cannot resolve the compose project of $old_dir (exit $?); nothing was changed."
@@ -4117,6 +4113,17 @@ pause_lancache_convergence_for_update() {
         CONVERGENCE_TIMER_WAS_ENABLED=1
         host_unit_action "$CONVERGE_TIMER_UNIT" disable
     fi
+}
+
+# What: pauses convergence for an update or a migration
+# Why: a failed exit resumes it through the EXIT trap
+# From: Issue #1683 | PR #1858
+start_update_convergence_pause() {
+    UPDATE_CONVERGENCE_PAUSED=0
+    UPDATE_CONVERGENCE_COMPLETED=0
+    trap resume_lancache_convergence_after_failed_update EXIT
+    UPDATE_CONVERGENCE_PAUSED=1
+    pause_lancache_convergence_for_update
 }
 
 # What: restores units that were active or enabled
@@ -7383,11 +7390,7 @@ perform_stack_update_flow() {
         # From: Issue #1391
         print_step "Capturing pre-update health baseline"
         capture_stack_health_baseline "$install_dir" "$_UPDATE_ENV_FILE"
-
-        UPDATE_CONVERGENCE_PAUSED=0
-        trap resume_lancache_convergence_after_failed_update EXIT
-        UPDATE_CONVERGENCE_PAUSED=1
-        pause_lancache_convergence_for_update
+        start_update_convergence_pause
     fi
 
     # What: deploy/prod template edits move into .local.env
