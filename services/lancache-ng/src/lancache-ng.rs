@@ -3881,6 +3881,13 @@ mod dns {
                 Ok(())
             }
             Some("secondary") => secondary_do(&args[1..]).await,
+            // What: DNSSEC anchors, proven zones, NTAs.
+            // Why: a read; it needs no running ui.
+            // From: Issue #1683 | PR #2020
+            Some("dnssec") => {
+                println!("{}", dnssec_status(&Settings::from_process()?).await?);
+                Ok(())
+            }
             // What: empty recursor caches; no zone = all.
             // Why: a repair must work while the ui is down.
             // From: Issue #1683 | PR #2020
@@ -3936,13 +3943,14 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 6] = [
+    const COMMANDS: [&str; 7] = [
         "daemon",
         "follow-once",
         "sync-check",
         "do",
         "secondary",
         "flush",
+        "dnssec",
     ];
 
     // What: serials of managed zones on all servers.
@@ -4864,6 +4872,20 @@ mod dns {
                 crate::shared::recursor_conf::Chain::default()
             }
         }
+    }
+
+    // What: anchors, proven zones and NTAs as JSON.
+    // Why: shows why a zone is or is not validated.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dnssec_status(s: &Settings) -> Result<Value, String> {
+        let chain = read_chain(s).await?;
+        let nta = crate::shared::recursor_conf::nta_zones(s, &chain)?;
+        let anchors: Vec<Value> = chain
+            .anchors
+            .iter()
+            .map(|(zone, ds)| json!({"zone": zone, "ds": ds}))
+            .collect();
+        Ok(json!({"anchors": anchors, "secured": chain.secured, "nta": nta}))
     }
 
     // What: anchors of top zones; zones chained to them.
@@ -9181,6 +9203,38 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Ok(out)
         }
 
+        // What: zones the recursor must not check.
+        // Why: no chain, no proof; render and status agree.
+        // From: Issue #1683 | PR #2020
+        pub fn nta_zones(s: &Settings, chain: &Chain) -> Result<Vec<String>, String> {
+            let mut out = Vec::new();
+            // What: no DNSSEC check for an unchained zone.
+            // Why: the root denies it; no chain, no proof.
+            // From: Issue #1683 | PR #1980
+            for z in crate::shared::dns::managed_zones(s)? {
+                if !chain.secured.contains(&z) {
+                    out.push(z.trim_end_matches('.').to_string());
+                }
+            }
+            // What: a top zone without DS stays an NTA.
+            // Why: an anchor without DS proves nothing.
+            // From: Issue #1683 | PR #2019
+            for (zone, ds) in &chain.anchors {
+                if ds.is_empty() {
+                    out.push(zone.trim_end_matches('.').to_string());
+                }
+            }
+            // What: no DNSSEC check for private domains.
+            // Why: router domains (fritz.box) are unsigned
+            // From: Issue #1683 | PR #1980
+            for z in upstream_zones(s, "DNS_UPSTREAM_UNSIGNED_ZONES")? {
+                if z != "." {
+                    out.push(z);
+                }
+            }
+            Ok(out)
+        }
+
         // What: Lua config that loads the RPZ file.
         // Why: the recursor reads RPZ only via Lua.
         // From: Issue #1683 | PR #1980
@@ -9189,13 +9243,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             crate::config::plain(rpz_file)?;
             crate::config::plain(&policy)?;
             let mut lua = format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n");
-            // What: no DNSSEC check for an unchained zone.
-            // Why: the root denies it; no chain, no proof.
-            // From: Issue #1683 | PR #1980
-            for z in crate::shared::dns::managed_zones(s)? {
-                if !chain.secured.contains(&z) {
-                    lua += &format!("addNTA(\"{}\")\n", z.trim_end_matches('.'));
-                }
+            for z in nta_zones(s, chain)? {
+                crate::config::plain(&z)?;
+                lua += &format!("addNTA(\"{z}\")\n");
             }
             // What: a top zone is anchored by its own DS.
             // Why: .lan, .local then validate (POC 25.11.)
@@ -9203,21 +9253,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             for (zone, ds) in &chain.anchors {
                 let name = zone.trim_end_matches('.');
                 crate::config::plain(name)?;
-                if ds.is_empty() {
-                    lua += &format!("addNTA(\"{name}\")\n");
-                }
                 for row in ds {
                     crate::config::plain(row)?;
                     lua += &format!("addTA(\"{name}\", \"{row}\")\n");
-                }
-            }
-
-            // What: no DNSSEC check for private domains.
-            // Why: router domains (fritz.box) are unsigned
-            // From: Issue #1683 | PR #1980
-            for z in upstream_zones(s, "DNS_UPSTREAM_UNSIGNED_ZONES")? {
-                if z != "." {
-                    lua += &format!("addNTA(\"{z}\")\n");
                 }
             }
             lua += &root_copy(s)?;
@@ -13261,6 +13299,16 @@ mod ui {
         adopt(app, &old, new).await
     }
 
+    // What: GET DNSSEC anchors, proven zones and NTAs.
+    // Why: REST read on the reader of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dnssec_api(State(app): Shared) -> Response {
+        json_reply(
+            crate::dns::dnssec_status(&app.settings()).await.map(Some),
+            "",
+        )
+    }
+
     // What: POST flush ?zone=; no zone flushes all.
     // Why: REST on the flush the CLI and pages use.
     // From: Issue #1683 | PR #2020
@@ -15642,6 +15690,7 @@ mod ui {
             .route(&p("UI_ROUTE_CDN")?, get(cdn_api))
             .route(&p("UI_ROUTE_SETTINGS_SCHEMA")?, get(settings_schema_api))
             .route(&p("UI_ROUTE_DNS_FLUSH")?, post(dns_flush_api))
+            .route(&p("UI_ROUTE_DNSSEC")?, get(dnssec_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
