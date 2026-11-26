@@ -15489,6 +15489,19 @@ mod ui {
         Ok(v)
     }
 
+    // What: GET UI_ROUTE_WATCHDOG_CHECK: checks now.
+    // Why: REST runs the watchdog check in services.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn watchdog_check(State(app): Shared) -> Page {
+        let s = app.settings();
+        let program = s.text("SERVICES_PROGRAM")?;
+        let cmd = [program.as_str(), "watchdog", "check"];
+        let (_, v) = exec_json(&app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        Ok(axum::Json(v).into_response())
+    }
+
     // What: POST UI_ROUTE_WATCHDOG_TIDY, ?dry_run=1.
     // Why: REST runs the watchdog step in services.
     // From: Issue #1683 | PR #2020
@@ -16961,6 +16974,7 @@ mod ui {
             route("UI_ROUTE_UI_ROUTES", Get, Api, routes_api),
             route("UI_ROUTE_UI_TEMPLATES", Get, Api, templates_api),
             route("UI_ROUTE_WATCHDOG_TIDY", Post, Api, watchdog_tidy),
+            route("UI_ROUTE_WATCHDOG_CHECK", Get, Api, watchdog_check),
             route("UI_ROUTE_ZONE_OVERVIEW", Get, Api, zone_overview),
             route("UI_ROUTE_DESIRED_STATE", Post, Api, container_state),
             route("UI_ROUTE_RESTART_UI", Post, Api, restart_ui),
@@ -17345,7 +17359,12 @@ mod watchdog {
     // What: check every container; heal on a streak.
     // Why: one miss is noise; RESTART_AFTER is a fault.
     // From: Issue #1683 | PR #1980
-    async fn containers(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
+    async fn containers(
+        s: &Settings,
+        f: &mut Findings,
+        m: &mut Memory,
+        heal: bool,
+    ) -> Result<(), String> {
         let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
         let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
         let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
@@ -17369,6 +17388,13 @@ mod watchdog {
             }
             if !wanted || !health.failing() {
                 m.streak.remove(name);
+                continue;
+            }
+            // What: a check on demand never restarts.
+            // Why: the streak lives only in the loop.
+            // From: Issue #1683 | PR #2020
+            if !heal {
+                f.warn(service, word);
                 continue;
             }
             let count = m.streak.entry(name.to_string()).or_default();
@@ -17738,13 +17764,12 @@ mod watchdog {
         Ok(())
     }
 
-    // What: run every duty of one round.
-    // Why: a broken duty is itself an alarm.
-    // From: Issue #1683 | PR #1858
-    async fn round(s: &Settings, m: &mut Memory) -> Findings {
+    // What: the checks of a round, no tidy step.
+    // Why: the loop and "watchdog check" share them.
+    // From: Issue #1683 | PR #2020
+    async fn checks(s: &Settings, m: &mut Memory, heal: bool) -> Findings {
         let mut f = Findings::default();
-        let now = clock::unix_secs();
-        if let Err(e) = containers(s, &mut f, m).await {
+        if let Err(e) = containers(s, &mut f, m, heal).await {
             f.crit("docker", e);
         }
         let steps: [(&str, Result<(), String>); 4] = [
@@ -17758,6 +17783,18 @@ mod watchdog {
                 f.crit(name, e);
             }
         }
+        if let Err(e) = dns_sync(s, &mut f).await {
+            f.crit("dns", e);
+        }
+        f
+    }
+
+    // What: run every duty of one round.
+    // Why: a broken duty is itself an alarm.
+    // From: Issue #1683 | PR #1858
+    async fn round(s: &Settings, m: &mut Memory) -> Findings {
+        let mut f = checks(s, m, true).await;
+        let now = clock::unix_secs();
         let tidy_steps = [
             ("cache purge", purge_cache(s, now, When::Due)),
             ("log prune", prune_logs(s, now, When::Due)),
@@ -17773,12 +17810,29 @@ mod watchdog {
         if let Err(e) = log_writing(s, &mut f, m) {
             f.crit("logs", e);
         }
-        if let Err(e) = dns_sync(s, &mut f).await {
-            f.crit("dns", e);
-        }
+        sort_alarms(&mut f);
+        f
+    }
+
+    // What: critical first, then by source.
+    // Why: the loop and the check print one order.
+    // From: Issue #1683 | PR #2020
+    fn sort_alarms(f: &mut Findings) {
         f.alarms
             .sort_by(|a, b| b.level.cmp(&a.level).then_with(|| a.source.cmp(&b.source)));
-        f
+    }
+
+    // What: the report body of a set of findings.
+    // Why: alarm file and "watchdog check" share it.
+    // From: Issue #1683 | PR #2020
+    fn report_of(f: &Findings) -> Report<'_> {
+        Report {
+            written: clock::unix_secs(),
+            alarms: &f.alarms,
+            containers: &f.containers,
+            cache: &f.cache,
+            heal: &f.heal,
+        }
     }
 
     // What: write the alarm file for the ui.
@@ -17787,14 +17841,7 @@ mod watchdog {
     fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
         let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
         let mode = s.mode("WATCHDOG_ALARM_FILE_MODE")?;
-        let report = Report {
-            written: clock::unix_secs(),
-            alarms: &f.alarms,
-            containers: &f.containers,
-            cache: &f.cache,
-            heal: &f.heal,
-        };
-        let body = serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?;
+        let body = serde_json::to_vec_pretty(&report_of(f)).map_err(|e| e.to_string())?;
         fs::write(&path, &body, mode, fs::Place::Replace, fs::Owner::default())
             .map_err(|e| format!("{}: {e}", path.display()))
     }
@@ -17844,6 +17891,20 @@ mod watchdog {
                 println!("{v}");
                 return Ok(());
             }
+            // What: the checks once, no heal, no tidy.
+            // Why: see a fix now, not after CHECK_INTERVAL.
+            // From: Issue #1683 | PR #2020
+            Some("check") => {
+                let s = Settings::from_process()?;
+                let mut f = checks(&s, &mut Memory::default(), false).await;
+                sort_alarms(&mut f);
+                let body = serde_json::to_string(&report_of(&f)).map_err(|e| e.to_string())?;
+                println!("{body}");
+                if f.alarms.iter().any(|a| a.level == Level::Crit) {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             // What: one tidy step now, or --dry-run.
             // Why: the same functions as the round.
             // From: Issue #1683 | PR #2020
@@ -17866,7 +17927,7 @@ mod watchdog {
             Some(_) => {
                 let steps = TIDY_STEPS.join(" | ");
                 return Err(format!(
-                    "commands: healthcheck | alarms | {steps} [--dry-run] (none: check loop)"
+                    "commands: healthcheck | alarms | check | {steps} [--dry-run] (none: check loop)"
                 ));
             }
         }
