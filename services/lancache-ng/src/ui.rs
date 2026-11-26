@@ -48,11 +48,6 @@ use tera::{Context, Tera};
 // From: Issue #1683 | PR #1985
 pub(crate) const DHCP_PROBE_CMD: &str = "dhcp-probe";
 
-// What: page keys read from env, not from specs.
-// Why: compose sets them; no schema row exists.
-// From: Issue #1683 | PR #1980
-pub(crate) const ENV_ONLY_KEYS: [&str; 2] = ["IP_HTTP", "LANCACHE_IMAGE_CHANNEL"];
-
 // What: read the files of one mounted folder.
 // Why: page edits need no image build.
 // From: Issue #1683 | PR #1991
@@ -244,13 +239,6 @@ impl App {
             .map(|sp| (sp.key.clone(), String::new()))
             .collect();
         values.extend(s.texts().map(|(k, v)| (k.clone(), v)));
-        // What: env-only keys the pages show.
-        // Why: they live in env, not in the spec list.
-        // From: Issue #1683 | PR #1980
-        for key in ENV_ONLY_KEYS {
-            let val = s.text_or_empty(key);
-            values.entry(key.into()).or_insert(val);
-        }
         let login = !password_hash(&s).is_empty();
         // What: page and route paths by short name.
         // Why: templates name the SOT key without prefix.
