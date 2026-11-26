@@ -241,12 +241,7 @@ impl App {
         // What: every spec key, unset ones as empty text.
         // Why: templates read optional keys unguarded.
         // From: Issue #1683 | PR #1980
-        let mut values: BTreeMap<String, String> = s
-            .specs()
-            .filter(|sp| !sp.is_secret())
-            .map(|sp| (sp.key.clone(), String::new()))
-            .collect();
-        values.extend(s.texts().map(|(k, v)| (k.clone(), v)));
+        let values = s.view();
         let login = !password_hash(&s).is_empty();
         // What: page and route paths by short name.
         // Why: templates name the SOT key without prefix.
@@ -2445,6 +2440,20 @@ pub(crate) async fn kea_snapshots_api(State(app): Shared) -> Response {
     json_reply(kea_snapshots(&app.settings()).map(Some), "")
 }
 
+// What: the masked settings view and load warnings.
+// Why: REST diagnosis on the reader of pages and CLI.
+// From: Issue #1683 | PR #2020
+pub(crate) async fn settings_api(State(app): Shared) -> Response {
+    json_reply(Ok(Some(settings_json(&app.settings()))), "")
+}
+
+// What: {"values":{..},"warnings":[..]} of settings.
+// Why: REST and CLI print the same shape.
+// From: Issue #1683 | PR #2020
+fn settings_json(s: &Settings) -> Value {
+    json!({"values": s.view(), "warnings": s.warnings})
+}
+
 // What: the text when the DHCP mode is not Kea.
 // Why: REST and CLI say the same.
 // From: Issue #1683 | PR #2020
@@ -2831,6 +2840,21 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
             _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
         }),
         Some("healthcheck") => Some(healthcheck(s).await),
+        // What: the masked settings, or one value.
+        // Why: same view as the pages and REST.
+        // From: Issue #1683 | PR #2020
+        Some("settings") => Some(match &args[1..] {
+            [] => {
+                println!("{}", settings_json(s));
+                Ok(())
+            }
+            [key] => s
+                .view()
+                .get(key)
+                .map(|v| println!("{v}"))
+                .ok_or_else(|| format!("{key}: no such setting or a secret")),
+            _ => Err("usage: settings [KEY]".into()),
+        }),
         // What: Kea subnets, reservations, leases as JSON.
         // Why: same reader as the DHCP page and REST.
         // From: Issue #1683 | PR #2020
@@ -2857,7 +2881,7 @@ pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), 
 // What: every command of the ui role; none = the server.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const COMMANDS: [&str; 10] = [
+const COMMANDS: [&str; 11] = [
     "hash-password",
     "encode-password-hash",
     "zone-snapshots",
@@ -2865,6 +2889,7 @@ const COMMANDS: [&str; 10] = [
     "registration-token",
     "zone-rollback",
     "healthcheck",
+    "settings",
     "dhcp-state",
     DHCP_PROBE_CMD,
     "(none: web server)",
@@ -2911,6 +2936,7 @@ pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
         .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
         .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
         .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
+        .route(&p("UI_ROUTE_SETTINGS")?, get(settings_api))
         .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
         .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
         .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))

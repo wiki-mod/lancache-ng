@@ -666,6 +666,19 @@ impl Settings {
             .map(|(k, v)| (k, v.to_string()))
     }
 
+    // What: every value as text, unset spec keys empty.
+    // Why: pages, REST and CLI show one masked view.
+    // From: Issue #1683 | PR #2020
+    pub fn view(&self) -> BTreeMap<String, String> {
+        let mut values: BTreeMap<String, String> = self
+            .specs()
+            .filter(|sp| !sp.is_secret())
+            .map(|sp| (sp.key.clone(), String::new()))
+            .collect();
+        values.extend(self.texts().map(|(k, v)| (k.clone(), v)));
+        values
+    }
+
     // What: value as text; missing is an error.
     // Why: the error names the key.
     // From: Issue #1683 | PR #1980

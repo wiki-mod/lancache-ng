@@ -800,6 +800,7 @@ runtime:
     - UI_ROUTE_CONTAINER_STATUS=/api/status
     - UI_ROUTE_ALARMS=/api/alarms
     - UI_ROUTE_DHCP_STATE=/api/dhcp
+    - UI_ROUTE_SETTINGS=/api/settings
     - UI_ROUTE_ZONE_SNAPSHOTS=/api/zone-snapshots
     - UI_ROUTE_KEA_SNAPSHOTS=/api/kea-snapshots
     - UI_ROUTE_DESIRED_STATE=/api/container/{service}
