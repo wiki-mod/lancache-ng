@@ -21,8 +21,16 @@
 // From: Issue #1683 | PR #1858
 
 use crate::config::{self, Settings, process_env};
-use crate::dhcp::*;
-use crate::dns::*;
+use crate::dhcp::{
+    dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_api, kea_store, kea_view,
+    main_subnet,
+};
+use crate::dns::{
+    answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones, flush_on_transfer,
+    hosted_now, lan_domain_action, main_domain_fields, missing_ptrs, ns_change, own_rrsets,
+    peer_kit, ptr, ptr_rows, record, rollback, rotate_tsig, secondary_health, secondary_watch,
+    snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots_cli,
+};
 use crate::shared::dhcp::Mode as DhcpMode;
 use crate::shared::peer::{self, PeerZone};
 use crate::shared::{access, apply, docker, fs, http, human, render, secret};

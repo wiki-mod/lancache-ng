@@ -25,7 +25,10 @@ use crate::shared::dns::Role;
 use crate::shared::peer::{self, PeerZone, ZoneState};
 use crate::shared::tool;
 use crate::shared::{apply, fs, render, secret};
-use crate::ui::*;
+use crate::ui::{
+    App, Failing, Fields, apply_all, commit, list_change, or_stop, primary_https_ip, single_field,
+    snapshot_rows, tr,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -20,10 +20,10 @@
 // Why: one home for the DHCP actions of the ui.
 // From: Issue #1683 | PR #2020
 use crate::config::{self, Settings};
-use crate::dns::*;
+use crate::dns::{chosen_lan_zone, main_domain_fields};
 use crate::shared::dhcp::{Mode as DhcpMode, option_data};
 use crate::shared::{docker, fs, http, secret};
-use crate::ui::*;
+use crate::ui::{App, Fields, commit, dns_pair, field, tr};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
