@@ -8701,6 +8701,13 @@ restore_update_ip_env() {
         print_error "Failed to restart the stack with the previous IPs (exit $rc)."
         return 1
     fi
+    # What: "active again" only for a healthy stack
+    # Why: a roll-back that did not come up is a failure
+    # From: Issue #1683 | PR #2017
+    if ! wait_for_whole_stack "$install_dir" "$env_file"; then
+        print_error "The stack with the previous IPs did not become healthy."
+        return 1
+    fi
     print_warn "The previous IPs are active again"
 }
 
@@ -8881,6 +8888,13 @@ restore_dns_upstream() {
     stack_up "$install_dir" "$env_file" -d "$dns_svc" "$ui_svc" || rc=$?
     if [[ "$rc" -ne 0 ]]; then
         print_error "Failed to restart $dns_svc and $ui_svc with the previous external DNS setting (exit $rc)."
+        return 1
+    fi
+    # What: "active again" only for a healthy stack
+    # Why: a roll-back that did not come up is a failure
+    # From: Issue #1683 | PR #2017
+    if ! wait_for_whole_stack "$install_dir" "$env_file"; then
+        print_error "The stack with the previous external DNS setting did not become healthy."
         return 1
     fi
     print_warn "The previous external DNS setting is active again"
