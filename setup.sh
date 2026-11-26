@@ -8679,12 +8679,10 @@ dns_zone_snapshot_entries() {
 # Why: zone-snapshots and zone-rollback are ui commands
 # From: Issue #1683 | PR #1858
 dns_rollback_exec() (
-    local install_dir="$1" env_file="$2" project out rc=0 ui_svc
+    local install_dir="$1" env_file="$2" out rc=0 ui_svc
     shift 2
-    project=$(compose_project_name "$install_dir" "$env_file") \
-        || die "Cannot determine the compose project of $install_dir (exit $?)."
     ui_svc=$(prod_env_default UI_SERVICE) || exit $?
-    out=$(stack_compose "$install_dir" "$env_file" -p "$project" exec -T "$ui_svc" lancache-ui "$@" 2>&1) || rc=$?
+    out=$(stack_compose "$install_dir" "$env_file" exec -T "$ui_svc" lancache-ui "$@" 2>&1) || rc=$?
     [[ $rc -eq 0 ]] || die "lancache-ui $1 in the ui container failed (exit $rc): $out"
     printf "%s\n" "$out" | tail -n 1
 )
@@ -8792,7 +8790,7 @@ restore_update_ip_env() {
 # Why: a locked-out user needs a way back in
 # From: Issue #1683 | PR #1985
 cmd_reset_sign_in() {
-    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file project ui_svc
+    local install_dir="$DEFAULT_INSTALL_DIR" assume_yes=0 env_file ui_svc
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|-y) assume_yes=1 ;;
@@ -8810,8 +8808,6 @@ cmd_reset_sign_in() {
         confirm "Turn the Admin UI sign-in off now?" "N" || die "Cancelled; nothing was changed."
     fi
     env_file=$(require_stack_env_file "$install_dir") || exit $?
-    project=$(compose_project_name "$install_dir" "$env_file") \
-        || die "Cannot determine the compose project of $install_dir (exit $?)."
     # What: no converge run while the ui is recreated
     # Why: both recreate the ui and collide on its name
     # From: Issue #1683 | PR #2017
@@ -8825,7 +8821,7 @@ cmd_reset_sign_in() {
     # Why: the compose config is unchanged, up -d keeps it
     # From: Issue #1683 | PR #2017
     ui_svc=$(prod_env_default UI_SERVICE) || exit $?
-    stack_compose "$install_dir" "$env_file" -p "$project" restart "$ui_svc" >/dev/null \
+    stack_compose "$install_dir" "$env_file" restart "$ui_svc" >/dev/null \
         || die "The ui container did not restart (exit $?); sign-in turns off on its next start."
     print_ok "Admin UI sign-in is off. Set a new user name and password under General, Sign-in."
 }
