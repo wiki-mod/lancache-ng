@@ -3004,9 +3004,7 @@ migrate_quickstart_install() (
     fi
     [[ "$apply_rc" -eq 0 ]] \
         || die_with_recovery_help "The migrated stack failed its health gate; the quickstart stack in $old_dir runs again and nothing counts as migrated. Fix the cause, then rerun setup.sh update." "$old_dir"
-    if ! write_lancache_host_services "$stack_dir"; then
-        print_warn "Neither systemd nor OpenRC found — host services were not written"
-    fi
+    write_lancache_host_services "$stack_dir"
     printf 'completed|%s\n' "$(utc_stamp iso)" >> "$record" \
         || die "Failed to record the completed migration in $record (exit $?)."
     # What: bundle removed last; its absence marks done
@@ -3086,16 +3084,21 @@ rollback_quickstart_migration() {
     print_ok "The quickstart stack in $old_dir runs again"
 }
 
-# What: writes the units of systemd or OpenRC; 1 if neither
-# Why: fresh install and migration share one definition
+# What: writes systemd or OpenRC units, or says why not
+# Why: one definition and one text; the flag tells install
 # From: Issue #1683 | PR #1858
 write_lancache_host_services() {
     local stack_dir="$1" manager
     manager=$(host_service_manager)
+    HOST_SERVICES_AVAILABLE=1
     case "$manager" in
         systemd) write_lancache_systemd_units "$stack_dir" ;;
         openrc) write_lancache_openrc_services "$stack_dir" ;;
-        *) return 1 ;;
+        *)
+            HOST_SERVICES_AVAILABLE=0
+            print_warn "Neither systemd nor OpenRC found — host services were not written."
+            print_warn "Start the stack after a reboot with: $SCRIPT_DIR/setup.sh compose $stack_dir up -d"
+            ;;
     esac
 }
 
@@ -7522,8 +7525,7 @@ perform_stack_update_flow() {
     # From: Issue #1683 | PR #2002
     if [[ -e "$DEFAULT_INSTALL_DIR/.git" && "$(realpath -m "$install_dir")" != "$(realpath -m "$DEFAULT_INSTALL_DIR/$PROD_STACK_REL")" ]]; then
         migrate_legacy_ca "$DEFAULT_INSTALL_DIR/certs" "$_UPDATE_ENV_FILE" 1
-        write_lancache_host_services "$(channel_active_link)/$PROD_STACK_REL" \
-            || print_warn "Neither systemd nor OpenRC found — host services were not written"
+        write_lancache_host_services "$(channel_active_link)/$PROD_STACK_REL"
         remove_root_checkout "$DEFAULT_INSTALL_DIR"
     fi
     trap - EXIT
@@ -10713,14 +10715,9 @@ fi
 # What: writes the host units; notes if a manager exists
 # Why: without systemd or OpenRC the start stays manual
 # From: Issue #1683 | PR #1983
-HOST_SERVICES_AVAILABLE=0
-if write_lancache_host_services "$INSTALL_DIR"; then
-    HOST_SERVICES_AVAILABLE=1
-    print_ok "Host services installed; they will be enabled after image pull succeeds"
-else
-    print_warn "Neither systemd nor OpenRC found — host services will not be installed"
-    print_warn "Start stack manually after reboot: $SCRIPT_DIR/setup.sh compose $INSTALL_DIR up -d"
-fi
+write_lancache_host_services "$INSTALL_DIR"
+[[ "$HOST_SERVICES_AVAILABLE" != "1" ]] \
+    || print_ok "Host services installed; they will be enabled after image pull succeeds"
 
 # What: ends the block opened before "Writing .env"
 # Why: its lines are not indented; this names the pair
