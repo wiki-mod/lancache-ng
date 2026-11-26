@@ -2402,7 +2402,12 @@ install_state_root() {
     local install_dir="$1" env_file="$2" state
     state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
         || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-    if [[ -z "$state" ]]; then
+    # What: a quickstart .env may lack LANCACHE_STATE_DIR
+    # Why: its state lives in the quickstart dir (v0.3.2)
+    # From: Issue #1683 | PR #1858
+    if [[ -z "$state" ]] && is_quickstart_install "$install_dir"; then
+        state="$install_dir"
+    elif [[ -z "$state" ]]; then
         state=$(production_state_root_default "$install_dir") \
             || die "Cannot resolve the default state root of $install_dir (exit $?)."
         state=$(legacy_state_root_or_default "$state") || exit $?
@@ -2514,7 +2519,7 @@ stack_compose() {
     local -a stack_files
     shift 2
     compose_files_into stack_files "$install_dir"
-    sot_compose "$env_file" "${stack_files[@]}" "$@"
+    sot_compose "$install_dir" "$env_file" "${stack_files[@]}" "$@"
 }
 
 # What: fills an array with the services of a stack
@@ -2700,8 +2705,8 @@ prod_state_dir_for_key() {
     [[ -z "$env_file" ]] || dir=$(get_env_var "$key" "$env_file") \
         || die "Cannot read $key from $env_file (exit $?)."
     if [[ -z "$dir" ]]; then
-        [[ -n "$state" || -z "$env_file" ]] || state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
-            || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
+        [[ -n "$state" || -z "$env_file" ]] || state=$(install_state_root "${env_file%/*}" "$env_file") \
+            || die "Cannot resolve the state root of $env_file (exit $?)."
         [[ -n "$state" ]] || die "No LANCACHE_STATE_DIR for $key (env file: ${env_file:-none})."
         sub=$(prod_state_subdir "$key") || die "Cannot read the default directory of $key (exit $?)."
         dir="$state/$sub"
@@ -3630,17 +3635,11 @@ sot_compose_env() {
 # Why: compose names no path, port or default of its own
 # From: Issue #1683 | PR #1912
 sot_compose() {
-    local env_file="$1" rows state=""
+    local install_dir="$1" env_file="$2" rows state
     local -a sot_env=() env_args=()
-    shift
-    # What: a quickstart .env may lack LANCACHE_STATE_DIR
-    # Why: its state lives in the quickstart dir (v0.3.2)
-    # From: Issue #1683 | PR #1858
-    if [[ "${env_file##*/}" = .env ]] && is_quickstart_install "${env_file%/*}"; then
-        state=$(get_env_var LANCACHE_STATE_DIR "$env_file") \
-            || die "Cannot read LANCACHE_STATE_DIR from $env_file (exit $?)."
-        [[ -n "$state" ]] || state="${env_file%/*}"
-    fi
+    shift 2
+    state=$(install_state_root "$install_dir" "$env_file") \
+        || die "Cannot resolve the state root of $install_dir (exit $?)."
     rows=$(sot_compose_env "$env_file" "$state") || exit $?
     mapfile -t sot_env <<< "$rows"
     # What: <file>.local as the second env file
