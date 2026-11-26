@@ -139,10 +139,20 @@ print_result_banner() {
 # Why: one membership owner; no grep exit code to misread
 # From: Issue #1683 | PR #1858
 list_has_line() {
-    local needle="$1" line
-    while IFS= read -r line; do
-        if [[ "$line" == "$needle" ]]; then return 0; fi
-    done <<< "$2"
+    local -a lines=()
+    mapfile -t lines <<< "$2"
+    array_has "$1" "${lines[@]}"
+}
+
+# What: true if $1 equals one of the further arguments
+# Why: one membership test for arrays, words and lines
+# From: Issue #1683 | PR #2017
+array_has() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [[ "$item" != "$needle" ]] || return 0
+    done
     return 1
 }
 
@@ -253,7 +263,8 @@ ask_checked() {
 # Why: one owner of the list ask; ask_checked owns one value
 # From: Issue #1683
 ask_list() {
-    local optional=0 none_word="" entry key bad problem seen
+    local optional=0 none_word="" entry key bad problem
+    local -a seen=()
     while [[ "${1:-}" = --* ]]; do
         case "$1" in
             --optional) optional=1; shift ;;
@@ -268,7 +279,7 @@ ask_list() {
         ask "$prompt" "$default"
         _ask_list_ref=()
         [[ -n "$none_word" && "${REPLY,,}" = "$none_word" ]] || read -r -a _ask_list_ref <<< "${REPLY//,/ }"
-        bad="" seen=" "
+        bad="" seen=()
         (( ${#_ask_list_ref[@]} > 0 || optional == 1 )) || bad="enter at least one ${label}"
         for entry in "${_ask_list_ref[@]}"; do
             problem=$("$check" "$entry" "$@") || exit $?
@@ -276,8 +287,8 @@ ask_list() {
             # Why: a list names each server or domain once
             # From: Issue #1683
             key=$(dns_name_normalized "$entry")
-            [[ -n "$problem" || "$seen" != *" $key "* ]] || problem="'${entry}' is listed twice"
-            seen+="$key "
+            [[ -n "$problem" ]] || ! array_has "$key" "${seen[@]}" || problem="'${entry}' is listed twice"
+            seen+=("$key")
             [[ -z "$problem" ]] || bad="$problem"
         done
         [[ -n "$bad" ]] || return 0
@@ -1502,7 +1513,7 @@ docker_rpm_repo_url() {
 install_docker_rpm() {
     local manager="$1"
     shift
-    local repo_url os_id needs_engine=0 package docker_package
+    local repo_url os_id needs_engine=0 package
     local packages=("$@")
 
     if (( ${#packages[@]} == 0 )); then
@@ -1516,11 +1527,9 @@ install_docker_rpm() {
     # Why: a plugin alone joins a Docker that already runs
     # From: Issue #1683
     for package in "${packages[@]}"; do
-        for docker_package in "${DOCKER_CE_PACKAGES[@]}"; do
-            if [[ "$package" = "$docker_package" ]]; then
-                needs_engine=1
-            fi
-        done
+        if array_has "$package" "${DOCKER_CE_PACKAGES[@]}"; then
+            needs_engine=1
+        fi
     done
     if (( needs_engine )); then
         guard_rpm_docker_conflicts
@@ -2924,7 +2933,7 @@ migrate_quickstart_install() (
     keys=$(env_file_keys "$old_env") || exit $?
     while IFS= read -r key; do
         [[ -n "$key" ]] || continue
-        if [[ " $path_keys " == *" $key "* ]]; then
+        if array_has "$key" "${path_key_list[@]}"; then
             old_value=$(get_env_var "$key" "$old_env") || die "Cannot read $key from $old_env (exit $?)."
             new_raw=$(get_env_var "$key" "$new_env") || die "Cannot read $key from $new_env (exit $?)."
             [[ -z "$old_value" || "$old_value" == /* ]] || old_value=$(realpath -m "$old_dir/$old_value")
@@ -5180,7 +5189,7 @@ migrate_env_for_update() (
             || die "Cannot read the default directory of $state_key (exit $?)."
         [[ "$state_key" != CACHE_DIR ]] || continue
         state_sub_dir="$state_dir/$state_sub"
-        if [[ " ${LEGACY_STATE_CHILDREN[*]} " == *" $state_sub "* ]]; then
+        if array_has "$state_sub" "${LEGACY_STATE_CHILDREN[@]}"; then
             legacy_path=$(legacy_state_path "$state_sub") || exit $?
             state_sub_dir=$(legacy_dir_or_default "$legacy_path" "$state_sub_dir") || exit $?
         fi
@@ -6606,8 +6615,8 @@ _verify_healthz_endpoint() {
 # Why: healthy alone does not prove a real answer
 # From: Issue #1683 | PR #1858
 verify_stack_functional_health() {
-    local ip_http ip_https https_enabled test_fqdn resolved proxy_svc dns_svc probed
-    local stack dns_port dns_ips
+    local ip_http ip_https https_enabled test_fqdn resolved proxy_svc dns_svc
+    local dns_port dns_ips
     local -a probe=() stack_svcs=()
 
     ip_http=$(get_env_var IP_HTTP "$_UPDATE_ENV_FILE") || exit $?
@@ -6619,17 +6628,15 @@ verify_stack_functional_health() {
     proxy_svc=$(prod_env_default PROXY_SERVICE) || exit $?
     dns_svc=$(prod_env_default DNS_SERVICE) || exit $?
     wanted_stack_services probe "$_UPDATE_ENV_FILE" "$proxy_svc" "$dns_svc"
-    probed=" ${probe[*]} "
     # What: a service the stack lacks is not probed
     # Why: a secondary stack runs dns without a proxy
     # From: Issue #1683 | PR #2017
     stack_services_into stack_svcs "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
         || die "Failed to list the services in $_UPDATE_STACK_DIR (exit $?)."
-    stack=" ${stack_svcs[*]} "
 
-    if [[ "$stack" != *" $proxy_svc "* ]]; then
+    if ! array_has "$proxy_svc" "${stack_svcs[@]}"; then
         print_skip "Proxy probe: this stack has no $proxy_svc"
-    elif [[ "$probed" != *" $proxy_svc "* ]]; then
+    elif ! array_has "$proxy_svc" "${probe[@]}"; then
         print_skip "Proxy probe: $proxy_svc is in SERVICES_STOPPED"
     else
         if [[ -n "$ip_http" ]]; then
@@ -6648,9 +6655,9 @@ verify_stack_functional_health() {
     # Why: compose owns the binds of primary and secondary
     # From: Issue #1683 | PR #2017
     local ip
-    if [[ "$stack" != *" $dns_svc "* ]]; then
+    if ! array_has "$dns_svc" "${stack_svcs[@]}"; then
         print_skip "DNS probe: this stack has no $dns_svc"
-    elif [[ "$probed" != *" $dns_svc "* ]]; then
+    elif ! array_has "$dns_svc" "${probe[@]}"; then
         print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
     else
         dns_port=$(prod_env_default DNS_PORT) || exit $?
@@ -6720,15 +6727,16 @@ wanted_stack_services() {
     local env_file="$2"
     shift 2
     local dhcp_svc dhcp_mode stopped svc
+    local -a stopped_list=()
 
     dhcp_svc=$(prod_env_default DHCP_SERVICE) || exit $?
     dhcp_mode=$(env_or_sot_default DHCP_MODE "$env_file") || exit $?
     stopped=$(get_env_var SERVICES_STOPPED "$env_file") || exit $?
-    stopped=" ${stopped//,/ } "
+    read -r -a stopped_list <<< "${stopped//,/ }"
     _wait_ref=()
     for svc in "$@"; do
         [[ "$dhcp_mode" = "off" && "$svc" = "$dhcp_svc" ]] && continue
-        [[ "$stopped" != *" $svc "* ]] || continue
+        ! array_has "$svc" "${stopped_list[@]}" || continue
         _wait_ref+=("$svc")
     done
 }
@@ -7375,14 +7383,13 @@ update_resume_handoff() {
 # Why: a missing, changed or sick container is update work
 # From: Issue #1683
 stack_container_drift() {
-    local install_dir="$1" env_file="$2" hashes svc want have id wanted_list
+    local install_dir="$1" env_file="$2" hashes svc want have id
     local -a all=() wanted=()
     hashes=$(stack_compose "$install_dir" "$env_file" config --hash '*') \
         || { printf 'compose config --hash failed (exit %s)\n' "$?"; return 0; }
     stack_services_into all "$install_dir" "$env_file" \
         || { printf 'the service list failed (exit %s)\n' "$?"; return 0; }
     wanted_stack_services wanted "$env_file" "${all[@]}"
-    wanted_list=" ${wanted[*]} "
     while read -r svc want; do
         [[ -n "$svc" ]] || continue
         id=$(service_container_id "$svc") || { printf '%s: container lookup failed\n' "$svc"; continue; }
@@ -7393,7 +7400,7 @@ stack_container_drift() {
         have=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$id") \
             || { printf '%s: docker inspect failed (exit %s)\n' "$svc" "$?"; continue; }
         [[ "$have" = "$want" ]] || printf '%s runs an older config\n' "$svc"
-        [[ "$wanted_list" != *" $svc "* ]] || service_container_is_healthy "$svc" \
+        ! array_has "$svc" "${wanted[@]}" || service_container_is_healthy "$svc" \
             || printf '%s is not running healthy\n' "$svc"
     done <<< "$hashes"
 }
@@ -7596,7 +7603,7 @@ cmd_compose() {
 # Why: no start undoes a stop by the user or by DHCP off
 # From: Issue #1683
 stack_up() {
-    local install_dir="$1" env_file="$2" svc wanted_list
+    local install_dir="$1" env_file="$2" svc
     local -a flags=() services=() wanted=() idle=()
     shift 2
     while [[ $# -gt 0 && "$1" = -* ]]; do
@@ -7611,9 +7618,8 @@ stack_up() {
         }
     fi
     wanted_stack_services wanted "$env_file" "${services[@]}"
-    wanted_list=" ${wanted[*]} "
     for svc in "${services[@]}"; do
-        [[ "$wanted_list" == *" $svc "* ]] || idle+=("$svc")
+        array_has "$svc" "${wanted[@]}" || idle+=("$svc")
     done
     # What: created with the current config, not started
     # Why: the ui can only start a container that exists
