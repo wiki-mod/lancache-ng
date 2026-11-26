@@ -5496,6 +5496,21 @@ pub mod ntp {
             .map(|r| r[0] & 0x07 == MODE_SERVER && (1..=15).contains(&r[1]))
             .unwrap_or(false)
     }
+
+    // What: does the stack's own NTP server answer.
+    // Why: one check for the page, a CLI and a REST call.
+    // From: Issue #1683 | PR #2020
+    pub async fn own_answers(s: &crate::config::Settings) -> Result<bool, String> {
+        if !s.flag("NTP_ENABLED")? {
+            return Ok(false);
+        }
+        let ip = s.text("IP_HTTP")?;
+        let port = s.uint("NTP_PORT")?;
+        let wait = Duration::from_millis(s.uint("NTP_PROBE_WAIT_MS")?);
+        tokio::task::spawn_blocking(move || answers(&ip, port, wait))
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 // What: proxy access log: recent requests, totals.

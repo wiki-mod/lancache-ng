@@ -534,7 +534,7 @@ pub(crate) async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csr
 pub(crate) async fn setup(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
     let s = app.settings();
     let mut ctx = Context::new();
-    ctx.insert("ntp_answers", &ntp_answers(&s).await?);
+    ctx.insert("ntp_answers", &crate::shared::ntp::own_answers(&s).await?);
     app.page("setup.html", ctx, &csrf)
 }
 

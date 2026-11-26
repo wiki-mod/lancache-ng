@@ -27,23 +27,6 @@ use crate::ui::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
-
-// What: does our NTP server answer.
-// Why: General page shows the live state.
-// From: Issue #1683 | PR #1980
-pub(crate) async fn ntp_answers(s: &Settings) -> Result<bool, String> {
-    if !s.flag("NTP_ENABLED")? {
-        return Ok(false);
-    }
-    let ip = s.text("IP_HTTP")?;
-    let port = s.uint("NTP_PORT")?;
-    let wait = Duration::from_millis(s.uint("NTP_PROBE_WAIT_MS")?);
-    let probe = move || crate::shared::ntp::answers(&ip, port, wait);
-    tokio::task::spawn_blocking(probe)
-        .await
-        .map_err(|e| e.to_string())
-}
 
 // What: Kea subnets per LAN zone, by domain-name.
 // Why: the DNS page shows which subnet uses a domain.
