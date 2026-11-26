@@ -386,7 +386,7 @@ pub(crate) async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<Option<Str
         return Ok(None);
     };
     let (grace, limit) = app.limits(s)?;
-    let list = project_containers(app, s).await?;
+    let list = app.docker.stack(s).await?;
     let running = list.iter().find(|c| {
         docker::service_of(c) == Some(service.as_str()) && c["State"].as_str() == Some("running")
     });

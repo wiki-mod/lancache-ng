@@ -501,7 +501,13 @@ pub(crate) async fn dashboard(State(app): Shared, Extension(csrf): Extension<Csr
         .ok()
         .flatten();
     ctx.insert("alarms", &alarms);
-    let containers = project_containers(&app, &s).await.unwrap_or_default();
+    // What: no Docker answer: empty list, error logged.
+    // Why: the page must render while Docker is down.
+    // From: Issue #1683 | PR #2020
+    let containers = app.docker.stack(&s).await;
+    let containers = containers
+        .inspect_err(|e| eprintln!("ui: containers: {e}"))
+        .unwrap_or_default();
     ctx.insert("containers", &containers);
     let (totals, recent) = proxy_log(&s).await?;
     ctx.insert("log_stats", &totals);
@@ -1758,18 +1764,11 @@ pub(crate) async fn cache_scanner(app: Arc<App>) {
 // Why: Docker calls need the real name.
 // From: Issue #1683 | PR #1980
 pub(crate) async fn container_of(app: &App, s: &Settings, service: &str) -> Result<String, String> {
-    let list = project_containers(app, s).await?;
+    let list = app.docker.stack(s).await?;
     let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
     hit.and_then(docker::name_of)
         .map(str::to_string)
         .ok_or_else(|| tr("err_no_container").replace("{service}", service))
-}
-
-// What: the containers of this compose project.
-// Why: every lookup of a service starts from this list.
-// From: Issue #1683 | PR #2017
-pub(crate) async fn project_containers(app: &App, s: &Settings) -> Result<Vec<Value>, String> {
-    app.docker.stack(s).await
 }
 
 // What: run a command in a service container.
@@ -2449,7 +2448,7 @@ pub(crate) async fn status(State(app): Shared) -> Response {
     // Why: the bar must not offer Start for it.
     // From: Issue #1683 | PR #1980
     let read = (app.limits(&s), crate::shared::dhcp::off_service(&s));
-    let list = project_containers(&app, &s).await.ok();
+    let list = app.docker.stack(&s).await.ok();
     let (Some(list), (Ok((_, limit)), Ok(off))) = (list, read) else {
         return axum::Json(json!({"state": "unavailable"})).into_response();
     };

@@ -123,13 +123,6 @@ impl Memory {
     }
 }
 
-// What: settings from env and the saved file.
-// Why: ui changes reach the watchdog via the file.
-// From: Issue #1683 | PR #1980
-fn load() -> Result<Settings, String> {
-    Settings::from_process()
-}
-
 // What: check every container; heal on a streak.
 // Why: one miss is noise; RESTART_AFTER is a fault.
 // From: Issue #1683 | PR #1980
@@ -453,7 +446,7 @@ fn publish(s: &Settings, f: &Findings) -> Result<(), String> {
 // Why: fresh alarm file means the watch loop runs.
 // From: Issue #1683 | PR #1980
 fn healthcheck() -> Result<(), String> {
-    let s = load()?;
+    let s = Settings::from_process()?;
     let limit = s.uint("CHECK_INTERVAL")? * s.uint("RESTART_AFTER")?.max(1);
     let path = PathBuf::from(s.text("WATCHDOG_ALARM_FILE")?);
     let v: Value = fs::read_json(&path)?.ok_or_else(|| format!("{}: missing", path.display()))?;
@@ -477,12 +470,12 @@ pub async fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     use tokio::signal::unix::{SignalKind, signal};
-    let mut settings = load()?;
+    let mut settings = Settings::from_process()?;
     let mut pause = Duration::from_secs(settings.uint("CHECK_INTERVAL")?);
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut memory = Memory::default();
     loop {
-        match load() {
+        match Settings::from_process() {
             Ok(s) => settings = s,
             Err(e) => eprintln!("watchdog: settings kept: {e}"),
         }
