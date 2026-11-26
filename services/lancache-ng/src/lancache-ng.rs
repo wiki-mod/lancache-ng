@@ -5344,6 +5344,13 @@ mod shared {
             pub fn used(&self) -> u64 {
                 self.total.saturating_sub(self.free)
             }
+
+            // What: percent of the disk in use.
+            // Why: one rule for watchdog light and readers.
+            // From: Issue #1683 | PR #2020
+            pub fn pct(&self) -> u64 {
+                self.used().saturating_mul(100) / self.total.max(1)
+            }
         }
 
         // What: statvfs of the filesystem holding path.
@@ -11741,6 +11748,71 @@ end
             crate::shared::fs::space(Path::new(&dir)).map_err(|e| format!("{dir}: {e}"))
         }
 
+        // What: bytes the cache files hold on the disk.
+        // Why: the disk holds files of the system too.
+        // From: Issue #1683 | PR #1980
+        pub fn cache_bytes(root: &Path) -> u64 {
+            use std::os::unix::fs::MetadataExt;
+            crate::shared::fs::files_under(root)
+                .into_iter()
+                .fold(0u64, |total, (_, meta)| {
+                    total.saturating_add(meta.blocks().saturating_mul(512))
+                })
+        }
+
+        // What: largest cache size the disk allows.
+        // Why: the form shows it; saving enforces it.
+        // From: Issue #1069 | PR #1991
+        pub fn reachable(
+            s: &crate::config::Settings,
+            old: u64,
+            cached: u64,
+        ) -> Result<u64, String> {
+            let sp = cache_space(s)?;
+            // What: measured cache bytes, else disk use.
+            // Why: the disk holds files of the system too.
+            // From: Issue #1069 | PR #1991
+            let held = if cached == u64::MAX {
+                sp.used().min(old)
+            } else {
+                cached
+            };
+            Ok(sp.free.saturating_add(held))
+        }
+
+        // What: cache use against set size and disk.
+        // Why: one reader for dashboard, REST and CLI.
+        // From: Issue #1683 | PR #2020
+        pub fn usage(
+            s: &crate::config::Settings,
+            used: Option<u64>,
+        ) -> Result<serde_json::Value, String> {
+            let max = s
+                .uint("CACHE_MAX_GB")?
+                .checked_shl(30)
+                .ok_or("CACHE_MAX_GB is too big")?;
+            let sp = cache_space(s)?;
+            let pct = used.map(|u| (u.saturating_mul(100) / max.max(1)).min(100));
+            Ok(serde_json::json!({
+                "used_bytes": used, "max_bytes": max, "pct_of_max": pct,
+                "reachable_bytes": reachable(s, max, used.unwrap_or(u64::MAX))?,
+                "disk": {"total": sp.total, "free": sp.free, "used": sp.used(), "pct": sp.pct()}
+            }))
+        }
+
+        // What: lancache-ng cache usage: counts, then JSON.
+        // Why: cache reads have their CLI with their owner.
+        // From: Issue #1683 | PR #2020
+        pub fn cache_run(args: &[String]) -> Result<(), String> {
+            if args.first().map(String::as_str) != Some("usage") {
+                return Err("commands: usage".into());
+            }
+            let s = crate::config::Settings::from_process()?;
+            let used = cache_bytes(&cache_root(&s)?);
+            println!("{}", usage(&s, Some(used))?);
+            Ok(())
+        }
+
         // What: one regular file with its facts.
         // Why: links are never followed or removed.
         // From: Issue #1683 | PR #1980
@@ -12488,18 +12560,20 @@ mod ui {
         // What: bar against the set size, not the disk.
         // Why: the disk holds more than the cache.
         // From: Issue #1683 | PR #1980
-        let max = gib_bytes(&s.text("CACHE_MAX_GB")?)?;
         let used = app.cache_used.load(Ordering::Relaxed);
-        if used != u64::MAX {
-            let pct = (used.saturating_mul(100) / max.max(1)).min(100);
-            ctx.insert("cache_used_human", &human::bytes(used));
-            ctx.insert("cache_pct", &pct);
-        }
-        // What: the form label names the largest size.
-        // Why: the form must show how much room is left.
-        // From: Issue #1069 | PR #1991
-        if let Ok(room) = cache_reachable(&s, max, used) {
-            ctx.insert("cache_max_gib", &(room >> 30).to_string());
+        let usage = crate::shared::tidy::usage(&s, (used != u64::MAX).then_some(used));
+        let usage = usage.inspect_err(|e| eprintln!("ui: cache usage: {e}"));
+        if let Ok(u) = usage {
+            if let Some(used) = u["used_bytes"].as_u64() {
+                ctx.insert("cache_used_human", &human::bytes(used));
+                ctx.insert("cache_pct", &u["pct_of_max"]);
+            }
+            // What: the form label names the largest size.
+            // Why: the form must show the room left.
+            // From: Issue #1069 | PR #1991
+            if let Some(room) = u["reachable_bytes"].as_u64() {
+                ctx.insert("cache_max_gib", &(room >> 30).to_string());
+            }
         }
         app.page("dashboard.html", ctx, &csrf)
     }
@@ -13644,18 +13718,6 @@ mod ui {
         }
     }
 
-    // What: bytes the cache folder holds on disk.
-    // Why: disk use counts other files on a shared disk.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn dir_bytes(root: &Path) -> u64 {
-        use std::os::unix::fs::MetadataExt;
-        crate::shared::fs::files_under(root)
-            .into_iter()
-            .fold(0u64, |total, (_, meta)| {
-                total.saturating_add(meta.blocks().saturating_mul(512))
-            })
-    }
-
     // What: count the cache folder now and then.
     // Why: a walk is slow; dashboard reads the last sum.
     // From: Issue #1683 | PR #1980
@@ -13668,7 +13730,11 @@ mod ui {
             let Some(dir) = or_stop("cache count", s.text("CACHE_DIR")) else {
                 return;
             };
-            match tokio::task::spawn_blocking(move || dir_bytes(Path::new(&dir))).await {
+            match tokio::task::spawn_blocking(move || {
+                crate::shared::tidy::cache_bytes(Path::new(&dir))
+            })
+            .await
+            {
                 Ok(bytes) => app.cache_used.store(bytes, Ordering::Relaxed),
                 Err(e) => eprintln!("ui: cache count: {e}"),
             }
@@ -14318,26 +14384,6 @@ mod ui {
             .ok_or_else(|| format!("{text:?} is too big"))
     }
 
-    // What: largest cache size the disk allows, in bytes.
-    // Why: the form shows it; the save check enforces it.
-    // From: Issue #1069 | PR #1991
-    pub(crate) fn cache_reachable(s: &Settings, old: u64, cached: u64) -> Result<u64, String> {
-        // What: the cache volume as the ui mounts it.
-        // Why: NGINX_CACHE_DIR exists in the proxy only.
-        // From: Issue #1069 | PR #1980
-        let sp = crate::shared::tidy::cache_space(s)?;
-        // What: measured cache bytes; disk use as fallback.
-        // Why: the disk holds files of the system too.
-        // From: Issue #1069 | PR #1991
-        let used = sp.used();
-        let held = if cached == u64::MAX {
-            used.min(old)
-        } else {
-            cached
-        };
-        Ok(sp.free.saturating_add(held))
-    }
-
     // What: refuse a bigger cache without room.
     // Why: growth must fit the free disk space.
     // From: Issue #1069
@@ -14350,7 +14396,7 @@ mod ui {
         if new <= old {
             return Ok(());
         }
-        let reachable = cache_reachable(s, old, cached)?;
+        let reachable = crate::shared::tidy::reachable(s, old, cached)?;
         if new > reachable {
             let room = human::bytes(reachable);
             return Err(bad_request(
@@ -14382,6 +14428,15 @@ mod ui {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn zone_snapshots_api(State(app): Shared) -> Response {
         json_reply(zone_snapshots(&app.settings()).map(Some), "")
+    }
+
+    // What: cache use as JSON; counted by the scanner.
+    // Why: REST diagnosis on the reader of page and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn cache_api(State(app): Shared) -> Response {
+        let used = app.cache_used.load(Ordering::Relaxed);
+        let r = crate::shared::tidy::usage(&app.settings(), (used != u64::MAX).then_some(used));
+        json_reply(r.map(Some), "")
     }
 
     // What: secret file states as JSON, no values.
@@ -14851,6 +14906,7 @@ mod ui {
             .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
             .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
             .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
+            .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
@@ -15251,8 +15307,7 @@ mod watchdog {
     fn cache_light(s: &Settings, f: &mut Findings) -> Result<(), String> {
         let dir = s.text("CACHE_DIR")?;
         let sp = tidy::cache_space(s)?;
-        let used = sp.used();
-        let pct = used.saturating_mul(100) / sp.total.max(1);
+        let (used, pct) = (sp.used(), sp.pct());
         let (warn, alarm) = (s.uint("DISK_WARN_PCT")?, s.uint("DISK_ALARM_PCT")?);
         let colour = if pct >= alarm {
             f.crit(&dir, format!("cache disk {pct}% full"));
@@ -15544,6 +15599,7 @@ async fn main() -> std::process::ExitCode {
         "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
         "ntp" => code(shared::ntp::ntp_run(&argv).await),
         "secret" => code(shared::secret::secret_run(&argv)),
+        "cache" => code(shared::tidy::cache_run(&argv)),
         other => {
             eprintln!(
                 "lancache-ng: unknown role {other:?}; use {} or {}",
@@ -15563,7 +15619,9 @@ const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
 // What: the command groups that are no daemon role.
 // Why: the help names the same set as the match.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 6] = ["dhcp", "config", "system", "proxy", "ntp", "secret"];
+const GROUPS: [&str; 7] = [
+    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache",
+];
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
