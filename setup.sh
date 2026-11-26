@@ -5958,23 +5958,26 @@ archive_compressor_ext() {
 # Why: bash waits for both ends; no half-written archive
 # From: Issue #1683 | PR #1858
 write_compressed_tar() {
-    local ext="$1" archive="$2" parent="$3" entry="$4" rows rc=0
+    local ext="$1" archive="$2" parent="$3" entry="$4" rows
     local -a row compressor=()
     rows=$(lancache_sot_list archive_compressors runtime) || exit $?
     while read -r -a row; do
         [[ "${row[0]}" != "$ext" ]] || compressor=("${row[@]:1}")
     done <<< "$rows"
     [[ ${#compressor[@]} -gt 0 ]] || die "No compressor for .$ext archives in runtime.archive_compressors."
-    # What: written as .partial, mode 600, then renamed
-    # Why: only a whole archive carries the final name
-    # From: Issue #1683 | PR #1858
-    tar -C "$parent" -cf - "$entry" | "${compressor[@]}" > "$archive.partial" || rc=$?
-    if [[ "$rc" -ne 0 ]]; then
-        rm -f "$archive.partial" || print_error "Failed to remove $archive.partial (exit $?)."
-        return "$rc"
-    fi
-    chmod 600 "$archive.partial" || die "Failed to restrict $archive.partial (exit $?)."
-    mv "$archive.partial" "$archive" || die "Failed to finish $archive (exit $?)."
+    # What: the archive is written like any file, mode 600
+    # Why: write_file_atomically owns temp file and rename
+    # From: Issue #1683 | PR #2017
+    write_file_atomically "$archive" 600 -- _tar_through "$parent" "$entry" "${compressor[@]}"
+}
+
+# What: one entry as tar, piped through the given command
+# Why: the producer that write_file_atomically runs
+# From: Issue #1683 | PR #2017
+_tar_through() {
+    local parent="$1" entry="$2"
+    shift 2
+    tar -C "$parent" -cf - "$entry" | "$@"
 }
 
 # What: config or full backup; the body is a subshell
@@ -6028,7 +6031,6 @@ cmd_backup() (
         fi
         resume_convergence_for_command
         rm -rf "$dest" || print_error "Failed to remove the unfinished backup $dest (exit $?)."
-        rm -f "$archive.partial" || print_error "Failed to remove $archive.partial (exit $?)."
         umask "$old_umask"
         trap - EXIT
         return "$status"
@@ -7009,6 +7011,9 @@ rollback_stack_update() {
     local latest_backup="" backups sorted_backups
 
     if [[ -d "$backup_root" ]]; then
+        # What: skips .partial files of older setup.sh
+        # Why: they were unfinished archives
+        # From: Issue #1683 | PR #2017
         if ! backups=$(find "$backup_root" -maxdepth 1 -name 'lancache-ng-config-*.tar.*' ! -name '*.partial' -print); then
             print_error "Failed to list the backups under $backup_root; cannot roll back automatically."
             return 1
