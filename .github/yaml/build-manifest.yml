@@ -813,6 +813,7 @@ runtime:
     - UI_ROUTE_APPLY=/api/apply
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
+    - UI_ROUTE_DNS_FLUSH=/api/dns/flush
     - UI_ROUTE_DESIRED_STATE=/api/container/{service}
     - UI_ROUTE_RESTART_UI=/api/restart-ui
     - UI_ROUTE_SETUP_SAVE=/setup/save

@@ -3881,6 +3881,19 @@ mod dns {
                 Ok(())
             }
             Some("secondary") => secondary_do(&args[1..]).await,
+            // What: empty recursor caches; no zone = all.
+            // Why: a repair must work while the ui is down.
+            // From: Issue #1683 | PR #2020
+            Some("flush") => {
+                let zone = match &args[1..] {
+                    [] => ".".to_string(),
+                    [z] => z.clone(),
+                    _ => return Err("usage: flush [zone]".into()),
+                };
+                peer::flush_zone(&Settings::from_process()?, &zone).await?;
+                println!("{}", json!({"flushed": zone}));
+                Ok(())
+            }
             _ => Err(format!("commands: {}", COMMANDS.join(" "))),
         }
     }
@@ -3923,7 +3936,14 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 5] = ["daemon", "follow-once", "sync-check", "do", "secondary"];
+    const COMMANDS: [&str; 6] = [
+        "daemon",
+        "follow-once",
+        "sync-check",
+        "do",
+        "secondary",
+        "flush",
+    ];
 
     // What: serials of managed zones on all servers.
     // Why: one overview for the DNS page, REST and CLI.
@@ -13241,6 +13261,26 @@ mod ui {
         adopt(app, &old, new).await
     }
 
+    // What: POST flush ?zone=; no zone flushes all.
+    // Why: REST on the flush the CLI and pages use.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_flush_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        axum::extract::Query(query): axum::extract::Query<Fields>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        let zone = match field(&query, "zone") {
+            z if z.is_empty() => ".".to_string(),
+            z => z,
+        };
+        crate::shared::peer::flush_zone(&app.settings(), &zone)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        Ok(axum::Json(json!({"flushed": zone})).into_response())
+    }
+
     // What: GET schema rows, masked values and origins.
     // Why: REST read on the describer of the CLI.
     // From: Issue #1683 | PR #2020
@@ -15601,6 +15641,7 @@ mod ui {
             .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
             .route(&p("UI_ROUTE_CDN")?, get(cdn_api))
             .route(&p("UI_ROUTE_SETTINGS_SCHEMA")?, get(settings_schema_api))
+            .route(&p("UI_ROUTE_DNS_FLUSH")?, post(dns_flush_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
