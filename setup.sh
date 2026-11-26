@@ -5229,7 +5229,10 @@ migrate_env_for_update() (
 
         cache_dir="${legacy_cache_http:-$legacy_cache_https}"
     fi
-    [[ -n "$cache_dir" ]] || cache_dir=$(legacy_dir_or_default "$(legacy_state_path cache)" "$state_dir/cache")
+    if [[ -z "$cache_dir" ]]; then
+        cache_dir=$(prod_state_dir_for_key CACHE_DIR "" "$state_dir") || exit $?
+        cache_dir=$(legacy_dir_or_default "$(legacy_state_path cache)" "$cache_dir")
+    fi
     set_env_key CACHE_DIR "$cache_dir" "$env_file"
     remove_env_key CACHE_DIR_STANDARD "$env_file"
     remove_env_key CACHE_DIR_SSL "$env_file"
@@ -5237,7 +5240,8 @@ migrate_env_for_update() (
     # What: PDNS_DIR was PDNS_STANDARD_DIR; data stays
     # Why: moving the key must not move the zone data.
     # From: Issue #1683 | PR #1912
-    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$state_dir/pdns" ]]; then
+    pdns_default=$(prod_state_dir_for_key PDNS_DIR "" "$state_dir") || exit $?
+    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$pdns_default" ]]; then
         set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
     fi
 
@@ -5514,8 +5518,7 @@ backup_manifest() {
     local env_file="" state_dir=""
     local cache_dir keys key dir sub bundle copy
     stack_env_context "$install_dir" env_file state_dir
-    cache_dir=$(get_env_var CACHE_DIR "$env_file") || exit $?
-    cache_dir="${cache_dir:-$state_dir/cache}"
+    cache_dir=$(prod_state_dir_for_key CACHE_DIR "$env_file" "$state_dir") || exit $?
 
     printf '%s\n' "$env_file"
     [[ ! -f "$env_file.local" ]] || printf '%s\n' "$env_file.local"
@@ -10124,7 +10127,8 @@ fi
 print_step "Cache configuration"
 
 CACHE_DIR=""
-ask_checked CACHE_DIR "Cache directory (absolute path)" "$LANCACHE_STATE_DIR/cache" is_absolute_path "Not an absolute path"
+cache_default=$(prod_state_dir_for_key CACHE_DIR "" "$LANCACHE_STATE_DIR") || exit $?
+ask_checked CACHE_DIR "Cache directory (absolute path)" "$cache_default" is_absolute_path "Not an absolute path"
 
 default_cache_gb=$(cache_size_gb_from_env "$(prod_env_default CACHE_MAX_GB)") \
     || die "The CACHE_MAX_GB default is not a GiB number."
@@ -10261,7 +10265,8 @@ DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
 
 if [[ "$DHCP_MODE" = "kea" ]]; then
-    ask_checked KEA_DATA_DIR "Kea data directory (config + leases, absolute path)" "$LANCACHE_STATE_DIR/kea" is_absolute_path "Not an absolute path"
+    kea_default=$(prod_state_dir_for_key KEA_DATA_DIR "" "$LANCACHE_STATE_DIR") || exit $?
+    ask_checked KEA_DATA_DIR "Kea data directory (config + leases, absolute path)" "$kea_default" is_absolute_path "Not an absolute path"
 
     ask_checked DHCP_SUBNET "DHCP subnet (CIDR)" "$DHCP_SUBNET_DEFAULT" is_valid_cidr "Invalid CIDR"
 
