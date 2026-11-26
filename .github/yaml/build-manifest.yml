@@ -1756,6 +1756,14 @@ runtime:
     # From: Issue #1683 | PR #2020
     - UI_LANG_DEFAULT=de
     - UI_LISTEN=0.0.0.0
+    # What: unix socket of the ui for the CLI, mode 0600.
+    # Why: CLI writes reach the running ui off the network.
+    # From: Issue #1683 | PR #2020
+    - UI_CLI_SOCKET=@RUN_DIR@/lancache-ui.sock
+    # What: wait of a CLI write for the ui answer.
+    # Why: a save renders and applies before it answers.
+    # From: Issue #1683 | PR #2020
+    - UI_CLI_WRITE_TIMEOUT_SECONDS=600
     # What: logs page line count and read chunk size.
     # Why: the logs page reads that much of a file.
     # From: Issue #1683 | PR #2020

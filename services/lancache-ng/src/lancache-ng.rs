@@ -3029,7 +3029,7 @@ mod config {
     // What: lancache-ng config show [KEY].
     // Why: settings reads have their CLI with their owner.
     // From: Issue #1683 | PR #2020
-    pub fn run(args: &[String]) -> Result<(), String> {
+    pub async fn run(args: &[String]) -> Result<(), String> {
         let s = Settings::from_process()?;
         match args {
             [cmd] if cmd == "show" => println!("{}", s.view_json()),
@@ -3037,7 +3037,22 @@ mod config {
                 Some(v) => println!("{v}"),
                 None => return Err(format!("{key}: no such setting or a secret")),
             },
-            _ => return Err("usage: config show [KEY]".into()),
+            // What: KEY=VALUE pairs go to the running ui.
+            // Why: it saves, renders and applies at once.
+            // From: Issue #1683 | PR #2020
+            [cmd, pairs @ ..] if cmd == "set" && !pairs.is_empty() => {
+                let mut body = serde_json::Map::new();
+                for pair in pairs {
+                    let (k, v) = pair
+                        .split_once('=')
+                        .ok_or_else(|| format!("{pair}: needs KEY=VALUE"))?;
+                    body.insert(k.to_string(), v.into());
+                }
+                let route = s.text("UI_ROUTE_SETTINGS")?;
+                let v = crate::shared::http::ui_socket(&s, &route, body.into()).await?;
+                println!("{v}");
+            }
+            _ => return Err("usage: config show [KEY] | config set KEY=VALUE ...".into()),
         }
         Ok(())
     }
@@ -5637,6 +5652,34 @@ mod shared {
         use crate::config::Settings;
         use futures_util::StreamExt as _;
         use std::time::Duration;
+
+        // What: POST JSON to the ui over its CLI socket.
+        // Why: CLI writes run in the ui, one state owner.
+        // From: Issue #1683 | PR #2020
+        pub async fn ui_socket(
+            s: &Settings,
+            route: &str,
+            body: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            let path = s.text("UI_CLI_SOCKET")?;
+            let client = reqwest::Client::builder()
+                .unix_socket(std::path::PathBuf::from(&path))
+                .timeout(Duration::from_secs(s.uint("UI_CLI_WRITE_TIMEOUT_SECONDS")?))
+                .build()
+                .map_err(|e| format!("{path}: {e}"))?;
+            let resp = client
+                .post(format!("http://ui{route}"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("{path}: is the ui running? {e}"))?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(|e| format!("{path}: {e}"))?;
+            if !status.is_success() {
+                return Err(format!("ui {}: {text}", status.as_u16()));
+            }
+            serde_json::from_str(&text).map_err(|e| format!("ui answer: {e}"))
+        }
 
         // What: shared client with SOT timeouts.
         // Why: no request may hang without a limit.
@@ -12392,7 +12435,7 @@ mod ui {
     // Why: a foreign site cannot read the cookie.
     // From: Issue #1683 | PR #1980
     #[derive(Clone)]
-    pub(crate) struct Csrf(String);
+    pub(crate) struct Csrf(String, bool);
 
     impl Csrf {
         // What: token: SHA-256 of key and session.
@@ -12402,14 +12445,21 @@ mod ui {
             let mut h = Sha256::new();
             h.update(key);
             h.update(session.as_bytes());
-            Csrf(hex::encode(h.finalize()))
+            Csrf(hex::encode(h.finalize()), false)
+        }
+
+        // What: the CLI socket: every check passes.
+        // Why: no browser reaches it; file mode guards it.
+        // From: Issue #1683 | PR #2020
+        fn local() -> Self {
+            Csrf(String::new(), true)
         }
 
         // What: compares a given token in constant time.
         // Why: a plain compare leaks it by timing.
         // From: Issue #1683 | PR #1980
         fn matches(&self, given: &str) -> bool {
-            secret::equal(given, &self.0)
+            self.1 || secret::equal(given, &self.0)
         }
 
         // What: form check; refuse without a match.
@@ -12427,7 +12477,7 @@ mod ui {
         // From: Issue #1683 | PR #1980
         fn check_header(&self, headers: &HeaderMap) -> Result<(), Fail> {
             let given = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
-            match given {
+            match given.or(self.1.then_some("")) {
                 Some(t) if self.matches(t) => Ok(()),
                 _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
             }
@@ -14895,19 +14945,6 @@ mod ui {
             .route(&p("UI_ROUTE_DHCP_CHECK")?, post(dhcp_check))
             .route(&p("UI_PAGE_STATS")?, get(stats))
             .route(&p("UI_ROUTE_STATS_GRAPH")?, get(graph))
-            .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
-            .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
-            .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
-            .route(&p("UI_ROUTE_SETTINGS")?, get(settings_api))
-            .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
-            .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
-            .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
-            .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
-            .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
-            .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
-            .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
-            .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
-            .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
             .route(&p("UI_ROUTE_SERVICE_ACTION")?, post(service_action));
@@ -14929,7 +14966,9 @@ mod ui {
                 post(secondary_action).layer(Extension(Op(op))),
             );
         }
-        let pages = pages.layer(axum::middleware::from_fn_with_state(app.clone(), auth));
+        let pages = pages
+            .merge(api_routes(&s)?)
+            .layer(axum::middleware::from_fn_with_state(app.clone(), auth));
         Ok(Router::new()
             .route(&p("UI_ROUTE_HEALTH")?, get(health))
             .route(&p("UI_ROUTE_SECONDARY_REGISTER")?, post(register))
@@ -14955,6 +14994,79 @@ mod ui {
             .layer(axum::middleware::from_fn_with_state(app.clone(), secure))
             .layer(axum::middleware::from_fn_with_state(app.clone(), lang))
             .with_state(app))
+    }
+
+    // What: the REST routes, for TCP and the CLI socket.
+    // Why: both ways reach the same handlers.
+    // From: Issue #1683 | PR #2020
+    fn api_routes(s: &Settings) -> Result<Router<Arc<App>>, String> {
+        let p = |key: &str| s.text(key);
+        Ok(Router::new()
+            .route(&p("UI_ROUTE_CONTAINER_STATUS")?, get(status))
+            .route(&p("UI_ROUTE_ALARMS")?, get(alarms))
+            .route(&p("UI_ROUTE_DHCP_STATE")?, get(dhcp_state))
+            .route(
+                &p("UI_ROUTE_SETTINGS")?,
+                get(settings_api).post(settings_set),
+            )
+            .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
+            .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
+            .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
+            .route(&p("UI_ROUTE_PROXY_STATUS")?, get(proxy_status_api))
+            .route(&p("UI_ROUTE_NTP")?, get(ntp_api))
+            .route(&p("UI_ROUTE_PROXY_LOG")?, get(proxy_log_api))
+            .route(&p("UI_ROUTE_SECRETS")?, get(secrets_api))
+            .route(&p("UI_ROUTE_CACHE")?, get(cache_api))
+            .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview)))
+    }
+
+    // What: the REST routes on the CLI socket.
+    // Why: no login there; the socket mode guards it.
+    // From: Issue #1683 | PR #2020
+    fn socket_router(app: Arc<App>) -> Result<Router, String> {
+        let s = app.settings();
+        Ok(api_routes(&s)?
+            .layer(Extension(Csrf::local()))
+            .layer(axum::extract::DefaultBodyLimit::max(
+                s.num::<usize>("UI_REQUEST_BODY_MAX_BYTES")?,
+            ))
+            .layer(axum::middleware::from_fn_with_state(app.clone(), lang))
+            .with_state(app))
+    }
+
+    // What: serve the REST routes on the CLI socket.
+    // Why: CLI writes go through the running ui.
+    // From: Issue #1683 | PR #2020
+    async fn serve_socket(app: Arc<App>, path: String) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        // What: a socket file of an earlier run goes.
+        // Why: bind fails on an existing path.
+        // From: Issue #1683 | PR #2020
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{path}: {e}")),
+        }
+        let sock = tokio::net::UnixListener::bind(&path).map_err(|e| format!("{path}: {e}"))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
+            .map_err(|e| format!("{path}: {e}"))?;
+        axum::serve(sock, socket_router(app)?)
+            .await
+            .map_err(|e| format!("{path}: {e}"))
+    }
+
+    // What: save settings from a JSON object.
+    // Why: CLI and scripts write through commit.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn settings_set(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        headers: HeaderMap,
+        axum::Json(values): axum::Json<Fields>,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        commit(&app, values).await.map_err(bad_request)?;
+        Ok(axum::Json(app.settings().view_json()).into_response())
     }
 
     // What: security headers on every answer, from SOT.
@@ -15041,12 +15153,16 @@ mod ui {
         let sock = tokio::net::TcpListener::bind(&listen)
             .await
             .map_err(|e| format!("{listen}: {e}"))?;
-        axum::serve(
-            sock,
-            router(app)?.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .map_err(|e| e.to_string())
+        let socket = serve_socket(app.clone(), s.text("UI_CLI_SOCKET")?);
+        let tcp = async {
+            axum::serve(
+                sock,
+                router(app)?.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+        };
+        tokio::try_join!(tcp, socket).map(|_| ())
     }
 
     // What: unit tests of the ui helpers.
@@ -15594,7 +15710,7 @@ async fn main() -> std::process::ExitCode {
         // Why: a CLI command lives with its capability.
         // From: Issue #1683 | PR #2020
         "dhcp" => code(dhcp::run(&argv).await),
-        "config" => code(config::run(&argv)),
+        "config" => code(config::run(&argv).await),
         "system" => code(shared::docker::system_run(&argv).await),
         "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
         "ntp" => code(shared::ntp::ntp_run(&argv).await),
