@@ -7814,29 +7814,22 @@ lancache_selectable_channels() {
     lancache_release_rows release || exit $?
 }
 
-# What: the ui-data volume name; empty if it is absent
-# Why: docker run -v would create a missing volume
+# What: merges ui values the .env does not have yet
+# Why: one file; the old ui file stays for a rollback
 # From: Issue #1683 | PR #2017
-ui_data_volume() {
-    local install_dir="$1" env_file="$2" volume rc=0
+merge_retired_ui_settings() {
+    local install_dir="$1" env_file="$2" mode="$3" volume name raw seen line key value count=0 rc=0
     if ! command_available docker; then
         print_skip "Reading the old Admin UI settings: docker is not available"
         return 0
     fi
     volume=$(compose_config_value "$install_dir" "$env_file" --volume ui-data) || exit $?
+    # What: an absent ui-data volume has nothing to merge
+    # Why: docker run -v would create a missing volume
+    # From: Issue #1683 | PR #2017
     docker_volume_exists "$volume" || rc=$?
-    [[ "$rc" -eq 1 ]] && return 0
+    [[ "$rc" -ne 1 ]] || return 0
     [[ "$rc" -eq 0 ]] || die "Cannot check the Docker volume $volume; the old Admin UI settings were not read."
-    printf '%s\n' "$volume"
-}
-
-# What: merges ui values the .env does not have yet
-# Why: one file; the old ui file stays for a rollback
-# From: Issue #1683 | PR #2017
-merge_retired_ui_settings() {
-    local install_dir="$1" env_file="$2" mode="$3" volume name raw seen line key value count=0
-    volume=$(ui_data_volume "$install_dir" "$env_file") || exit $?
-    [[ -n "$volume" ]] || return 0
     name=$(prod_env_default UI_SETTINGS_FILE_RETIRED) || exit $?
     name="${name##*/}"
     # What: the file and its copy from the last merge
