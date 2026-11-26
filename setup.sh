@@ -3141,6 +3141,22 @@ write_lancache_host_services() {
     esac
 }
 
+# What: the install dir the host's stack service runs
+# Why: both writers name it; empty when no service exists
+# From: Issue #1683 | PR #2017
+stack_unit_install_dir() {
+    local defaults unit_file init_file
+    defaults=$(runtime_defaults_list) || exit $?
+    unit_file="$(runtime_default_in "$defaults" SYSTEMD_UNIT_DIR)/$STACK_UNIT" || exit $?
+    init_file="$(runtime_default_in "$defaults" OPENRC_INIT_DIR)/$OPENRC_STACK_SERVICE" || exit $?
+    if [[ -f "$unit_file" ]]; then
+        sed -n 's/^WorkingDirectory=//p' "$unit_file" || die "Failed to read $unit_file (exit $?)."
+    elif [[ -f "$init_file" ]]; then
+        sed -n 's/^[[:space:]]*[^[:space:]]* compose \(.*\) up -d$/\1/p' "$init_file" \
+            || die "Failed to read $init_file (exit $?)."
+    fi
+}
+
 # What: writes the three OpenRC services of the stack
 # Why: Alpine runs OpenRC; loops stand in for the timers
 # From: Issue #1683 | PR #1858
@@ -10070,6 +10086,33 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     install_repo_follow_channel "$LANCACHE_IMAGE_CHANNEL" "$@"
 fi
 
+# What: the stack runs from this checkout's deploy/prod
+# Why: AG-KD-008: deploy/prod is the only deployment profile
+# From: Issue #1683 | PR #1858
+INSTALL_DIR="${PROD_COMPOSE%/*}"
+ENV_FILE="$INSTALL_DIR/.env"
+
+# What: an existing install is answered before any change
+# Why: a no must leave the host as it was (no IP, no file)
+# From: Issue #1683 | PR #2017
+print_step "Existing install"
+for found_env in "$ENV_FILE" "$ENV_FILE.local"; do
+    [[ -f "$found_env" ]] || continue
+    print_warn "Existing configuration found: $found_env"
+    confirm "Overwrite?" "N" || die "Cancelled; nothing was changed."
+    break
+done
+# What: asks before taking units of another install
+# Why: the other install would no longer start at boot
+# From: Issue #1683 | PR #1980
+host_unit_owner=$(stack_unit_install_dir) || exit $?
+if [[ -n "$host_unit_owner" && "$host_unit_owner" != "$INSTALL_DIR" ]]; then
+    print_warn "Host services now run the install in $host_unit_owner."
+    confirm "Move them to $INSTALL_DIR?" "N" \
+        || die "Stopped; host services stay with $host_unit_owner. Nothing was changed."
+fi
+print_ok "Installing into $INSTALL_DIR"
+
 # What: LAN IPs and HTTPS mode
 # Why: the DNS and proxy containers listen on these IPs
 # From: Issue #1683 | PR #1858
@@ -10121,27 +10164,12 @@ print_ok "HTTPS mode $([[ "$HTTPS_ENABLED" = 1 ]] && echo enabled || echo disabl
 # From: Issue #1683 | PR #1858
 print_step "Data directory"
 
-# What: the stack runs from this checkout's deploy/prod
-# Why: AG-KD-008: deploy/prod is the only deployment profile
-# From: Issue #1683 | PR #1858
-INSTALL_DIR="${PROD_COMPOSE%/*}"
-ENV_FILE="$INSTALL_DIR/.env"
 STATE_ROOT_DEFAULT=$(production_state_root_default "$INSTALL_DIR") \
     || die "Cannot read the default state root from $INSTALL_DIR (exit $?)."
 printf "  LanCache-NG itself stays in %s.\n" "$INSTALL_DIR"
 printf "  Here you choose where its data goes: cache, DNS, DHCP, NTP.\n"
 ask "Data folder (not the install folder)" "$STATE_ROOT_DEFAULT"
 LANCACHE_STATE_DIR="$(realpath -m "$REPLY")"
-
-# What: an existing .env or .env.local needs a yes
-# Why: the install rewrites the settings of that stack
-# From: Issue #1683 | PR #2017
-for found_env in "$ENV_FILE" "$ENV_FILE.local"; do
-    [[ -f "$found_env" ]] || continue
-    print_warn "Existing configuration found: $found_env"
-    confirm "Overwrite?" "N" || die "Cancelled."
-    break
-done
 
 # What: creates the data folder; list-prompts does not
 # Why: the next steps place their defaults below it
@@ -10746,20 +10774,6 @@ fi
 # Why: units are enabled only after the first pull succeeds
 # From: Issue #1683 | PR #1858
 print_step "Installing host services"
-
-# What: asks before taking units of another install
-# Why: the other install would no longer start at boot
-# From: Issue #1683 | PR #1980
-host_unit_dir=$(prod_env_default SYSTEMD_UNIT_DIR) || exit $?
-host_unit_owner=""
-if [[ -f "$host_unit_dir/$STACK_UNIT" ]]; then
-    host_unit_owner=$(sed -n 's/^WorkingDirectory=//p' "$host_unit_dir/$STACK_UNIT")
-fi
-if [[ -n "$host_unit_owner" && "$host_unit_owner" != "$INSTALL_DIR" ]]; then
-    print_warn "Host services now run the install in $host_unit_owner."
-    confirm "Move them to $INSTALL_DIR?" "N" \
-        || die "Stopped; host services stay with $host_unit_owner."
-fi
 
 # What: writes the host units; notes if a manager exists
 # Why: without systemd or OpenRC the start stays manual
