@@ -596,7 +596,7 @@ dns_upstream_zone_problem() {
 # What: entries lower case, without final dot, comma-joined
 # Why: .env keeps one spelling, so reruns compare equal
 # From: Issue #1918 | PR #1858
-dns_upstream_join() {
+dns_names_joined() {
     local item out=""
     for item in "$@"; do
         item=$(dns_name_normalized "$item")
@@ -703,7 +703,7 @@ prompt_dns_upstream() {
         dns_upstream_answers "${entries[@]}" && break
         confirm "A server did not answer. Try it anyway (rolled back if still dead)?" "N" && break
     done
-    DNS_UPSTREAM_SERVERS=$(dns_upstream_join "${entries[@]}")
+    DNS_UPSTREAM_SERVERS=$(dns_names_joined "${entries[@]}")
     printf "  all: every name LanCache-NG does not answer itself goes to\n"
     printf "  this server. domains: only the domains you list (for example\n"
     printf "  fritz.box or firma.local) go there; LanCache-NG looks up all\n"
@@ -711,7 +711,7 @@ prompt_dns_upstream() {
     ask_checked scope "Forward all names, or only some domains? [all/domains]" "$scope" is_dns_forward_scope "Not 'all' or 'domains'"
     if [[ "${scope,,}" = "domains" ]]; then
         ask_list entries "Domains to forward (space or comma separated)" "$zones" "domain" dns_upstream_zone_problem "$lan"
-        DNS_UPSTREAM_ZONES=$(dns_upstream_join "${entries[@]}")
+        DNS_UPSTREAM_ZONES=$(dns_names_joined "${entries[@]}")
     fi
     printf "  DNSSEC checks stay on. Private domains of your network have\n"
     printf "  no signature; name them here, or their lookups fail.\n"
@@ -719,7 +719,7 @@ prompt_dns_upstream() {
     printf "  resolving. Your own LAN zones (%s) always work.\n" "$lan"
     ask_list --none none entries "Private domains without DNSSEC (space or comma, 'none')" "${unsigned:-none}" "private domain" \
         dns_upstream_zone_problem "$lan" "$DNS_UPSTREAM_ZONES"
-    DNS_UPSTREAM_UNSIGNED_ZONES=$(dns_upstream_join "${entries[@]}")
+    DNS_UPSTREAM_UNSIGNED_ZONES=$(dns_names_joined "${entries[@]}")
 }
 
 # What: asks for local private PTR zones; kea needs them on
@@ -5852,6 +5852,22 @@ record_image_revisions() {
     printf '%s\n' "$revisions" > "$output" || die "Failed to write $output (exit $?)."
 }
 
+# What: prints the ext of the first present compressor
+# Why: runtime.archive_compressors lists them best first
+# From: Issue #1683 | PR #1912
+archive_compressor_ext() {
+    local rows
+    local -a row
+    rows=$(lancache_sot_list archive_compressors runtime) || exit $?
+    while read -r -a row; do
+        if command_available "${row[1]}"; then
+            printf '%s\n' "${row[0]}"
+            return 0
+        fi
+    done <<< "$rows"
+    die "No compressor of runtime.archive_compressors is installed."
+}
+
 # What: tars one entry through the compressor of <ext>
 # Why: bash waits for both ends; no half-written archive
 # From: Issue #1683 | PR #1858
@@ -5905,7 +5921,7 @@ cmd_backup() (
     # What: backup packs with the best present compressor
     # Why: zstd -T0 uses all cores; gzip used only one
     # From: Issue #1683
-    archive_ext=$(logbundle_select_compressor)
+    archive_ext=$(archive_compressor_ext)
     archive="$backup_root/lancache-ng-${mode}-${stamp}.tar.${archive_ext}"
     mkdir -p "$backup_root" || die "Failed to create $backup_root (exit $?)."
     old_umask=$(umask)
@@ -8185,22 +8201,6 @@ logbundle_redact_env_file() {
     done < "$src"
 }
 
-# What: prints the ext of the first present compressor
-# Why: runtime.archive_compressors lists them best first
-# From: Issue #1683 | PR #1912
-logbundle_select_compressor() {
-    local rows
-    local -a row
-    rows=$(lancache_sot_list archive_compressors runtime) || exit $?
-    while read -r -a row; do
-        if command_available "${row[1]}"; then
-            printf '%s\n' "${row[0]}"
-            return 0
-        fi
-    done <<< "$rows"
-    die "No compressor of runtime.archive_compressors is installed."
-}
-
 # What: lists known-good snapshot volumes with ls only
 # Why: volumes are not host paths; ls runs in a container
 # From: Issue #1683 | PR #1858
@@ -8388,7 +8388,7 @@ Review the contents before attaching this archive to a GitHub issue --
 automatic upload is intentionally not part of this tool.
 EOF
 
-    ext=$(logbundle_select_compressor)
+    ext=$(archive_compressor_ext)
     archive="$dest_root/lancache-ng-issue-logs-${stamp}.tar.${ext}"
     write_compressed_tar "$ext" "$archive" "$dest_root" "$(basename "$dest")" \
         || die "Failed to write $archive (exit $?)."
@@ -10222,7 +10222,7 @@ DNS_EXTRA_LAN_DOMAINS=$(prod_env_default DNS_EXTRA_LAN_DOMAINS) || exit $?
 extra_entries=()
 ask_list --optional extra_entries "Additional LAN domains (space or comma separated)" "$DNS_EXTRA_LAN_DOMAINS" \
     "LAN domain" lan_domain_problem "$DHCP_DOMAIN"
-DNS_EXTRA_LAN_DOMAINS=$(dns_upstream_join "${extra_entries[@]}")
+DNS_EXTRA_LAN_DOMAINS=$(dns_names_joined "${extra_entries[@]}")
 if [[ -n "$DNS_EXTRA_LAN_DOMAINS" ]]; then
     print_ok "Additional LAN domains: ${DNS_EXTRA_LAN_DOMAINS}"
 else
