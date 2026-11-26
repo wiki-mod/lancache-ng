@@ -3932,6 +3932,17 @@ mod dns {
                     None => Ok(()),
                 }
             }
+            // What: TSIG key state without its value.
+            // Why: a read; rc 1 if file and pdns differ.
+            // From: Issue #1683 | PR #2020
+            Some("tsig") => {
+                let v = tsig_state(&Settings::from_process()?).await?;
+                println!("{v}");
+                match v["ok"].as_bool() {
+                    Some(true) => Ok(()),
+                    _ => Err("tsig: key missing or different".into()),
+                }
+            }
             // What: container probe: any reply counts.
             // Why: a dead upstream must not restart dns.
             // From: Issue #1683 | PR #2020
@@ -4021,11 +4032,12 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 13] = [
+    const COMMANDS: [&str; 14] = [
         "daemon",
         "follow-once",
         "healthcheck",
         "records",
+        "tsig",
         "sync-check",
         "do",
         "secondary",
@@ -4341,6 +4353,32 @@ mod dns {
         api.restore(zone, &rows).await?;
         snapshot(s, &api, zone).await?;
         peer::flush_zone(s, zone).await
+    }
+
+    // What: TSIG key state; the value never leaves.
+    // Why: file and PowerDNS must hold the same key.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn tsig_state(s: &Settings) -> Result<Value, String> {
+        let name = s.text("DDNS_TSIG_NAME")?;
+        let file = secret::states(s)?["secrets"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["key"] == "DDNS_TSIG_KEY").cloned())
+            .unwrap_or(Value::Null);
+        let want = secret::tsig_secret(s);
+        let pdns = match peer::own_api(s)?.tsigkey(&name).await {
+            Ok(Some(k)) => {
+                let have = k["key"].as_str().unwrap_or_default();
+                let same = want.as_ref().is_ok_and(|w| secret::equal(have, w));
+                json!({"present": true, "algorithm": k["algorithm"], "matches": same})
+            }
+            Ok(None) => json!({"present": false, "matches": false}),
+            Err(e) => json!({"error": e}),
+        };
+        let ok = !file.is_null() && pdns["matches"] == true;
+        Ok(
+            json!({"name": name, "algorithm": s.text("DDNS_TSIG_ALGORITHM")?,
+            "file": file, "pdns": pdns, "ok": ok}),
+        )
     }
 
     // What: LAN domains with records, subnets, PTRs.
@@ -6564,6 +6602,23 @@ mod shared {
                 self.call(Method::POST, "/zones", Some(body))
                     .await
                     .map(drop)
+            }
+
+            // What: one TSIG key; None if pdns has none.
+            // Why: the state check compares, never shows.
+            // From: Issue #1683 | PR #2020
+            pub async fn tsigkey(&self, name: &str) -> Result<Option<Value>, String> {
+                let path = format!("/tsigkeys/{}", zone_id(name));
+                match self.call(Method::GET, &path, None).await {
+                    Ok(text) => serde_json::from_str(&text)
+                        .map(Some)
+                        .map_err(|e| e.to_string()),
+                    // What: 404 means the key is not there.
+                    // Why: call names the status in text.
+                    // From: Issue #1683 | PR #2020
+                    Err(e) if e.contains("HTTP 404") => Ok(None),
+                    Err(e) => Err(e),
+                }
             }
 
             // What: create or replace one TSIG key.
@@ -15172,6 +15227,13 @@ mod ui {
         crate::shared::ntp::tracking(&text)
     }
 
+    // What: GET UI_ROUTE_DNS_TSIG: key state.
+    // Why: REST reads what the CLI reads.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_tsig_api(State(app): Shared) -> Page {
+        Ok(axum::Json(crate::dns::tsig_state(&app.settings()).await?).into_response())
+    }
+
     // What: GET UI_ROUTE_DNS_RECORDS: LAN records.
     // Why: REST reads what page and CLI read.
     // From: Issue #1683 | PR #2020
@@ -16877,6 +16939,7 @@ mod ui {
             route("UI_ROUTE_DNS_FLUSH", Post, Api, dns_flush_api),
             route("UI_ROUTE_DNSSEC", Get, Api, dnssec_api),
             route("UI_ROUTE_DNS_RECORDS", Get, Api, dns_records_api),
+            route("UI_ROUTE_DNS_TSIG", Get, Api, dns_tsig_api),
             route("UI_ROUTE_DNS_API_CHECK", Get, Api, dns_api_check),
             route("UI_ROUTE_DNS_STATS", Get, Api, dns_stats_api),
             route("UI_ROUTE_DNS_QUERY", Get, Api, dns_query_api),
