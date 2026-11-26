@@ -6792,13 +6792,13 @@ _verify_healthz_endpoint() {
     return 0
 }
 
-# What: host IPs where service $1 publishes $2 port $3
+# What: host IPs where service $3 of stack $1 binds $5/$4
 # Why: compose owns the binds of primary and secondary
 # From: Issue #1683 | PR #2017
 service_published_ips() {
-    compose_config_value "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" \
+    compose_config_value "$1" "$2" \
         "[.services[\$svc].ports[]? | select(.protocol == \$proto and (.published | tostring) == \$port and (.host_ip // \"\") != \"\") | .host_ip] | unique | .[]" \
-        --arg svc "$1" --arg proto "$2" --arg port "$3"
+        --arg svc "$3" --arg proto "$4" --arg port "$5"
 }
 
 # What: functional checks: proxy /healthz and DNS query
@@ -6826,7 +6826,7 @@ verify_stack_functional_health() {
         print_skip "Proxy probe: $proxy_svc is in SERVICES_STOPPED"
     else
         port=$(prod_env_default PROXY_HTTP_PORT) || exit $?
-        ips=$(service_published_ips "$proxy_svc" tcp "$port") || exit $?
+        ips=$(service_published_ips "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" "$proxy_svc" tcp "$port") || exit $?
         if [[ -z "$ips" ]]; then
             print_error "Functional check failed: $proxy_svc publishes port ${port} on no host IP"
             return 1
@@ -6846,7 +6846,7 @@ verify_stack_functional_health() {
         print_skip "DNS probe: $dns_svc is in SERVICES_STOPPED"
     else
         port=$(prod_env_default DNS_PORT) || exit $?
-        ips=$(service_published_ips "$dns_svc" udp "$port") || exit $?
+        ips=$(service_published_ips "$_UPDATE_STACK_DIR" "$_UPDATE_ENV_FILE" "$dns_svc" udp "$port") || exit $?
         if [[ -z "$ips" ]]; then
             print_error "Functional check failed: $dns_svc publishes port ${port} on no host IP"
             return 1
@@ -11011,9 +11011,9 @@ fi
 # From: Issue #1683 | PR #1858
 ui_url_rc=0
 ui_svc=$(prod_env_default UI_SERVICE) || exit $?
-ui_url=$(compose_config_value "$INSTALL_DIR" "$ENV_FILE" \
-    ".services[\$svc].ports[0] // empty | \"http://\\(.host_ip):\\(.published)\"" \
-    --arg svc "$ui_svc") || ui_url_rc=$?
+ui_port=$(prod_env_default UI_LISTEN_PORT) || exit $?
+ui_url=$(service_published_ips "$INSTALL_DIR" "$ENV_FILE" "$ui_svc" tcp "$ui_port") || ui_url_rc=$?
+[[ -z "$ui_url" ]] || ui_url="http://${ui_url%%$'\n'*}:${ui_port}"
 if [[ "$ui_url_rc" -ne 0 || -z "$ui_url" ]]; then
     print_warn "Cannot derive the Admin-UI URL (exit $ui_url_rc); the stack runs, see the ui ports in $INSTALL_DIR/docker-compose.yml."
     ui_url="(see the ui ports in $INSTALL_DIR/docker-compose.yml)"
