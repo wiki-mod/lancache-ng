@@ -2,6 +2,20 @@
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 
+// BINDING MAINTAINER DECISION [AG-WF-029]
+//
+// This Rust source file MUST be restricted exclusively to its
+// designated functional responsibility.
+//
+// Functionality outside its designated responsibility MUST NOT
+// be implemented in this file. Shared functionality MUST be
+// implemented in the designated shared Rust source file.
+//
+// This notice is mandatory and MUST be retained verbatim.
+//
+// Any modification, rewording, shortening, relocation, or removal
+// of this notice is explicitly DISACK.
+
 // What: DHCP role logic moved out of the ui module.
 // Why: one home for Kea subnets, options and the probe.
 // From: Issue #1683
