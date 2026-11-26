@@ -6516,12 +6516,13 @@ Order: check, ask, then act. The name and the host are checked before any
 change: a host that holds a LanCache-NG install (settings, host service or dns
 container) stops at once. Then missing requirements are installed. In a
 terminal, missing values are asked one by one and checked at once: name,
-primary URL, token, the channel the primary runs (as on the primary), the DNS IP,
-and whether the primary has HTTPS (then the primary's HTTPS IP and a second
-DNS IP). --rotate offers the values stored in the secondary's .env; only the
-token is asked again. Then a bind IP not yet on this host is offered for
-"ip addr add", the channel's code is cloned as on the primary, and the
-secondary registers and starts. A primary on another channel than the chosen
+primary URL, token, the channel the primary runs (as on the primary) and the
+DNS IP. Then, as on the primary, the channel's code is cloned and its
+setup.sh goes on with these answers: it asks whether the primary has HTTPS
+(then the primary's HTTPS IP and a second DNS IP), offers a bind IP not yet
+on this host for "ip addr add", and the secondary registers and starts.
+--rotate offers the values stored in the secondary's .env; only the token
+is asked again. A primary on another channel than the chosen
 one stops the run before any file is written.
 LANCACHE_IMAGE_CHANNEL sets the channel without a terminal.
 
@@ -9553,6 +9554,18 @@ cmd_secondary() {
 
     is_http_url "$primary" \
         || die "--primary must be an http(s) URL: ${PRIMARY_URL_EXAMPLE}"
+    # What: the channel's code runs from here, as on install
+    # Why: compose, SOT and this script come from one ref
+    # From: Issue #1683 | PR #2017
+    local -a again=(secondary --primary "$primary" --token "$token" --name "$name")
+    [[ -z "$ip_http" ]] || again+=(--ip-http "$ip_http")
+    [[ -z "$listen_ip" ]] || again+=(--listen-ip "$listen_ip")
+    [[ -z "$ip_https" ]] || again+=(--ip-https "$ip_https")
+    [[ -z "$listen_ip_https" ]] || again+=(--listen-ip-https "$listen_ip_https")
+    [[ "$rotate" -ne 1 ]] || again+=(--rotate)
+    install_repo_follow_channel "$LANCACHE_IMAGE_CHANNEL" "${again[@]}"
+    SCRIPT_DIR="$CHANNEL_CODE_DIR"
+    load_script_dir_sot
     # What: --ip-http is optional
     # Why: the default is the primary's IP_HTTP
     # From: Issue #1683
@@ -9615,12 +9628,6 @@ cmd_secondary() {
             [[ -z "$listen_ip_https" ]] || ensure_host_ipv4 "$listen_ip_https" "$host_ref"
         fi
     fi
-    # What: the channel's code is cloned, as on the primary
-    # Why: compose, SOT and promote lock from one checkout
-    # From: Issue #1683
-    channel_code_checkout "$LANCACHE_IMAGE_CHANNEL"
-    SCRIPT_DIR="$CHANNEL_CODE_DIR"
-    load_script_dir_sot
     assert_prebuilt_image_platform_supported
     # What: the compose file is read before registration
     # Why: a read failure must not follow a registration
