@@ -3233,6 +3233,22 @@ mod dhcp {
         commit(app, f).await
     }
 
+    // What: Kea counters, newest value per name.
+    // Why: one reader for graphs, REST and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn kea_stats(s: &Settings) -> Result<Option<BTreeMap<String, f64>>, String> {
+        if DhcpMode::from_settings(s)? != DhcpMode::Kea {
+            return Ok(None);
+        }
+        let all = kea_api(s)?.command("statistic-get-all", None).await?;
+        let map = all.as_object().ok_or("kea statistic-get-all: no object")?;
+        Ok(Some(
+            map.iter()
+                .filter_map(|(k, v)| v[0][0].as_f64().map(|n| (k.clone(), n)))
+                .collect(),
+        ))
+    }
+
     // What: the text when the DHCP mode is not Kea.
     // Why: REST and CLI say the same.
     // From: Issue #1683 | PR #2020
@@ -3246,7 +3262,8 @@ mod dhcp {
         let v = match args.first().map(String::as_str) {
             Some("state") => kea_state(&s).await?.ok_or(NOT_KEA)?,
             Some("kea-snapshots") => kea_snapshots(&s)?,
-            _ => return Err("commands: state kea-snapshots".into()),
+            Some("stats") => json!(kea_stats(&s).await?.ok_or(NOT_KEA)?),
+            _ => return Err("commands: state kea-snapshots stats".into()),
         };
         println!("{v}");
         Ok(())
@@ -11863,8 +11880,8 @@ end
 mod ui {
     use crate::config::{self, Settings, process_env};
     use crate::dhcp::{
-        dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_api, kea_snapshots,
-        kea_state, kea_store, main_subnet,
+        dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, domain_subnets, kea_snapshots, kea_state,
+        kea_store, main_subnet,
     };
     use crate::dns::{
         answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones,
@@ -13395,14 +13412,10 @@ mod ui {
             add_stats(&mut out, "auth", rows);
         }
         if has("kea")
-            && let Ok(api) = kea_api(s)
-            && let Ok(all) = api.command("statistic-get-all", None).await
-            && let Some(map) = all.as_object()
+            && let Ok(Some(map)) = crate::dhcp::kea_stats(s).await
         {
-            for (k, v) in map {
-                if let Some(n) = v[0][0].as_f64() {
-                    out.insert(format!("kea:{k}"), n.to_string());
-                }
+            for (k, n) in map {
+                out.insert(format!("kea:{k}"), n.to_string());
             }
         }
 
@@ -14258,6 +14271,14 @@ mod ui {
         json_reply(zone_snapshots(&app.settings()).map(Some), "")
     }
 
+    // What: Kea counters as JSON.
+    // Why: REST diagnosis on the reader of graphs and CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dhcp_stats_api(State(app): Shared) -> Response {
+        let r = crate::dhcp::kea_stats(&app.settings()).await;
+        json_reply(r.map(|o| o.map(|m| json!(m))), crate::dhcp::NOT_KEA)
+    }
+
     // What: Kea config snapshots as JSON.
     // Why: REST diagnosis on the reader of page and CLI.
     // From: Issue #1683 | PR #2020
@@ -14681,6 +14702,7 @@ mod ui {
             .route(&p("UI_ROUTE_SETTINGS")?, get(settings_api))
             .route(&p("UI_ROUTE_ZONE_SNAPSHOTS")?, get(zone_snapshots_api))
             .route(&p("UI_ROUTE_KEA_SNAPSHOTS")?, get(kea_snapshots_api))
+            .route(&p("UI_ROUTE_DHCP_STATS")?, get(dhcp_stats_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
             .route(&p("UI_ROUTE_DESIRED_STATE")?, post(container_state))
             .route(&p("UI_ROUTE_RESTART_UI")?, post(restart_ui))
