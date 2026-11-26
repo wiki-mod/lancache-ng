@@ -6,7 +6,7 @@
 {# From: Issue #1683 | PR #1912 #}
 
 {# What: hidden csrf_token field of every POST form #}
-{# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
+{# Why: one markup; ui.rs CSRF_FIELD reads it #}
 {# From: Issue #1683 | PR #1912 #}
 {% component csrf_field(csrf_token) %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endcomponent csrf_field %}
 {# What: "Kopieren" button; copyText() copies target #}
@@ -664,7 +664,7 @@
   a.subtab { text-decoration: none; }
   button.subtab { background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
 
-  /* What: watchdog dots in the mockup beam-light look
+  /* What: status dots in the mockup beam-light look
      Why: JS paints one class per status on every page
      From: Issue #1437 | PR #1858 */
   .beambar-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; vertical-align: middle; margin-right: 7px; }
@@ -931,7 +931,7 @@
       return fetch(url, init);
     }
 
-    // What: shared watchdog poll for beambar + dashboard
+    // What: shared container status poll for all dots
     // Why: one fetch/interval, not one per template
     // From: Issue #1437
     window.LancacheWatchdog = (function () {
@@ -990,7 +990,7 @@
       return { colorClass: colorClass, paintDot: paintDot, onUpdate: onUpdate, refresh: refresh };
     })();
 
-    // What: POSTs desired state; the watchdog applies it
+    // What: POSTs desired state; the ui saves, applies it
     // Why: shared by all dock start/stop buttons
     // From: Issue #1437
     async function setDockServiceState(service, state, button) {
@@ -1069,7 +1069,7 @@
     }
 
     // What: names that get a dock start/stop button
-    // Why: DesiredState::SERVICES, matched to status.json
+    // Why: SOT UI_CONTROLLABLE_SERVICES; the ui checks it
     // From: Issue #1683 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
     // What: programs per container (container:program)
@@ -1294,7 +1294,7 @@
       window.LancacheWatchdog.onUpdate(render);
     })();
 
-    // What: loads watchdog status now and per SOT interval
+    // What: loads container status now and per interval
     // Why: beambar and dashboard dots read the same data
     // From: Issue #1683 | PR #1912
     window.LancacheWatchdog.refresh();

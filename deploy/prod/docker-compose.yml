@@ -140,7 +140,7 @@ services:
       # From: Issue #1683 | PR #1980
       - lancache-config:${SOT_CONFIG_DIR}:ro
       # What: the Docker API for the watchdog process only.
-      # Why: no socket proxy; the supervisor drops the rest.
+      # Why: it restarts failing containers; no proxy.
       # From: Issue #1683
       - ${SOT_DOCKER_SOCKET}:${SOT_DOCKER_SOCKET}
       # What: host time zone, read only.
