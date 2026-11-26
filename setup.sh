@@ -4826,6 +4826,22 @@ lancache_expected_image_pins() {
         || die "Cannot pin the images of ${_pins_tag} for ${env_file}; it stays unchanged (exit $?)."
 }
 
+# What: wanted and deployed pin fingerprints; $4 = tag var
+# Why: auto-update and the update check compare these two
+# From: Issue #1683 | PR #2017
+image_pin_fingerprints() {
+    local -n _want_fp="$1" _have_fp="$2"
+    local env_file="$3" want_refs have_refs want_tag
+    lancache_expected_image_pins want_tag want_refs "$env_file"
+    if [[ -n "${4:-}" ]]; then
+        local -n _want_tag="$4"
+        _want_tag="$want_tag"
+    fi
+    _want_fp=$(lancache_image_refs_fingerprint "$want_refs") || exit $?
+    have_refs=$(lancache_image_refs_in_env "$env_file") || exit $?
+    _have_fp=$(lancache_image_refs_fingerprint "$have_refs") || exit $?
+}
+
 # What: the image pin lines of env file $1, as stored
 # Why: update and restore read the pins one way
 # From: Issue #1683 | PR #2017
@@ -7326,16 +7342,14 @@ stack_container_drift() {
 # Why: a converged stack must not stop for a backup
 # From: Issue #1683
 update_pending_reasons() {
-    local install_dir="$1" code_action="$2" edited tag refs deployed
+    local install_dir="$1" code_action="$2" edited tag want have
     [[ "$code_action" = stay ]] || printf 'the code moves (%s)\n' "$code_action"
     if is_deploy_prod_install_dir "$install_dir"; then
         edited=$(config_prod_edited_files "$(deploy_prod_repo_root "$install_dir")") || exit $?
         [[ -z "$edited" ]] || printf 'config/prod has local edits\n'
     fi
-    lancache_expected_image_pins tag refs "$_UPDATE_ENV_FILE"
-    deployed=$(lancache_image_refs_in_env "$_UPDATE_ENV_FILE") || exit $?
-    [[ "$(lancache_image_refs_fingerprint "$refs")" = "$(lancache_image_refs_fingerprint "$deployed")" ]] \
-        || printf 'the image pins change (%s)\n' "$tag"
+    image_pin_fingerprints want have "$_UPDATE_ENV_FILE" tag
+    [[ "$want" = "$have" ]] || printf 'the image pins change (%s)\n' "$tag"
     stack_container_drift "$install_dir" "$_UPDATE_ENV_FILE"
 }
 
@@ -7661,8 +7675,8 @@ lancache_auto_update_should_proceed() {
 # From: Issue #1683 | PR #1858
 cmd_auto_update() {
     local install_dir="${1:-$DEFAULT_INSTALL_DIR}"
-    local env_file auto_update_enabled current_channel current_tag deployed_tag decision
-    local deployed_refs current_refs pinned
+    local env_file auto_update_enabled current_channel current_tag="" deployed_tag="" decision
+    local pinned
 
     install_dir=$(resolve_stack_dir_checked "$install_dir") || exit $?
     env_file=$(runtime_env_file_for_install_dir "$install_dir") || exit $?
@@ -7673,21 +7687,11 @@ cmd_auto_update() {
     auto_update_enabled=$(env_or_sot_default AUTO_UPDATE_ENABLED "$env_file") || exit $?
     current_channel=$(resolve_lancache_image_channel "$env_file") || exit $?
     pinned=$(lancache_release_rows pinned) || exit $?
-    # What: stacks compared by image-pin fingerprint
-    # Why: the channel word stays while digests move
-    # From: Issue #1683 | PR #1858
-    deployed_refs=$(lancache_image_refs_in_env "$env_file") || exit $?
-    deployed_tag=$(lancache_image_refs_fingerprint "$deployed_refs") \
-        || die "Cannot fingerprint the deployed image pins of $env_file (exit $?)."
-    # What: resolves the channel after local checks
-    # Why: disabled or pinned installs skip the registry
+    # What: pin fingerprints, only if enabled and not pinned
+    # Why: digests move under one word; else no registry
     # From: Issue #1683 | PR #1858
     if [[ "$auto_update_enabled" = "1" && "$current_channel" != "$pinned" ]]; then
-        lancache_expected_image_pins current_tag current_refs "$env_file"
-        current_tag=$(lancache_image_refs_fingerprint "$current_refs") \
-            || die "Cannot fingerprint the current image pins of channel ${current_channel} (exit $?)."
-    else
-        current_tag=""
+        image_pin_fingerprints current_tag deployed_tag "$env_file"
     fi
 
     if decision=$(lancache_auto_update_should_proceed "$auto_update_enabled" "$current_channel" "$current_tag" "$deployed_tag"); then
