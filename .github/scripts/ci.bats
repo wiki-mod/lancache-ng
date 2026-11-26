@@ -1721,22 +1721,34 @@ _ci_compose_image_render() {
 # From: Issue #1683
 _ci_check_image_channel_resolution() {
     local repo_root="${1:-${CI_REPO_ROOT}}"
-    local sec prod dep
-    sec="$(_ci_service_path ui src/main.rs "${repo_root}")" || return 2
+    local prod dep crates rows dir bin crate hit
+    local -a srcs=()
     prod="$(_ci_compose_path "${repo_root}")" || return 2
     dep="${prod#"${repo_root}/"}"
     local -a viol=()
     local f
-    if [ ! -f "${sec}" ]; then
-        viol+=("ui source missing: ${sec}")
+    # What: the source dirs of the ui crates, from Cargo.
+    # Why: Cargo.toml owns the layout; no file name here.
+    # From: Issue #1683 | PR #2020
+    crates="$(_ci_required_field ui crates list)" || return 2
+    crates=" ${crates//$'\n'/ } "
+    rows="$(_ci_workspace_rows "${repo_root}")" || return 2
+    while IFS='|' read -r dir bin crate; do
+        if [ -n "${bin}" ] && [[ "${crates}" == *" ${crate} "* ]]; then
+            srcs+=("${repo_root}/$(_ci_workspace_src_dir "${dir}" "${bin}")")
+        fi
+    done <<< "${rows}"
+    if [ "${#srcs[@]}" -eq 0 ]; then
+        viol+=("no Rust source dir for the ui crates:${crates% }")
     else
         for f in \
             '"image_registry": process_env("LANCACHE_IMAGE_REGISTRY")' \
             '"image_prefix": process_env("LANCACHE_IMAGE_PREFIX")' \
             '"image_channel": process_env("LANCACHE_IMAGE_CHANNEL")' \
             '"image_tag": process_env("LANCACHE_IMAGE_TAG")'; do
-            _ci_file_match "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" "${sec}" "${f}" -F \
-                || { [ "$?" -eq 1 ] || return 2; viol+=("ui main.rs must expose/use ${f}"); }
+            hit="$(_ci_run -m 1 "[CI-ERROR-CHECK-0187]" "line=\"${f}\" reason=\"ui source not searched\"" \
+                grep -rF --include='*.rs' -- "${f}" "${srcs[@]}")" || return 2
+            [ -n "${hit}" ] || viol+=("the ui crate sources must expose/use ${f}")
         done
     fi
     if [ ! -f "${prod}" ]; then
