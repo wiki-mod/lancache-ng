@@ -1832,7 +1832,7 @@ pub(crate) async fn service_action(
 pub(crate) async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
     let s = app.settings();
     let program = s.text("CACHEHAMSTER_PROGRAM")?;
-    let mut cmd = vec![program.as_str()];
+    let mut cmd = vec![program.as_str(), "cachehamster"];
     cmd.extend_from_slice(args);
     let (code, out) = exec_in(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd).await?;
     let line = out

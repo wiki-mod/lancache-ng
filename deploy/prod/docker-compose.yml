@@ -105,7 +105,7 @@ services:
     # From: Issue #1683 | PR #1980
     healthcheck:
       <<: *healthcheck-timing
-      test: ["CMD", "lancache-watchdog", "healthcheck"]
+      test: ["CMD", "lancache-ng", "watchdog", "healthcheck"]
     # What: /run as tmpfs for OpenRC.
     # Why: OpenRC mounts /run itself; Docker denies it.
     # From: Issue #1683 | PR #1980
@@ -414,7 +414,7 @@ services:
     # From: Issue #1683 | PR #1912
     healthcheck:
       <<: *healthcheck-timing
-      test: ["CMD", "lancache-ui", "healthcheck"]
+      test: ["CMD", "lancache-ng", "ui", "healthcheck"]
 
 # What: named volumes; proxy-cache binds the cache dir.
 # Why: the cache lives on the operator's chosen disk.

@@ -6,7 +6,7 @@
 # Why: one binary; roles and commands dispatch from main.
 # From: Issue #1683
 [package]
-name = "lancache-ng-bin"
+name = "lancache-ng"
 edition.workspace = true
 license.workspace = true
 

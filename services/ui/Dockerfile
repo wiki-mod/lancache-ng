@@ -93,7 +93,7 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # What: the ui program from the builder stage.
 # Why: built from this checkout; no other binary here.
 # From: Issue #1683 | PR #1980
-COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
+COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
 
 # What: the SOT ui port, documented for Docker.
 # Why: compose maps it; the value comes from ci.sh.

@@ -70,13 +70,13 @@ services:
     # What: crates (cargo -p) the services image builds.
     # Why: supervisor and cachehamster run in one container.
     # From: Issue #1683
-    crates: [lancache-watchdog, lancache-cachehamster]
+    crates: [lancache-ng]
     # What: processes lancache-watchdog supervise runs.
     # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
     # From: Issue #1683
     processes:
-      - lancache-watchdog=/usr/local/bin/lancache-watchdog
-      - lancache-cachehamster=/usr/local/bin/lancache-cachehamster,daemon
+      - lancache-watchdog=/usr/local/bin/lancache-ng,watchdog
+      - lancache-cachehamster=/usr/local/bin/lancache-ng,cachehamster,daemon
       - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
@@ -166,9 +166,9 @@ services:
     # What: crates (cargo -p) the dns image builds.
     # Why: the dns helper runs in the dns container.
     # From: Issue #1683
-    crates: [lancache-dns]
+    crates: [lancache-ng]
     processes:
-      - lancache-dns=/usr/local/bin/lancache-dns
+      - lancache-dns=/usr/local/bin/lancache-ng,dns
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
@@ -254,7 +254,7 @@ services:
     # What: crates the ui image builds.
     # Why: rust checks target crates, not the build context
     # From: Issue #1683 | PR #1858
-    crates: [lancache-ui]
+    crates: [lancache-ng]
     # What: runtime defaults the Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
@@ -263,13 +263,13 @@ services:
     # Why: one start path; compose names no command.
     # From: Issue #1683
     processes:
-      - lancache-ui=/usr/local/bin/lancache-ui
+      - lancache-ui=/usr/local/bin/lancache-ng,ui
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: a command argument runs the ui tool directly.
     # Why: render-dns, hash-password run without OpenRC.
     # From: Issue #1683
     init_pre:
-      - 'if [ "$#" -gt 0 ] && [ ! -d "@OPENRC_RUNLEVEL_DIR@/$1" ]; then exec /usr/local/bin/lancache-ui "$@"; fi'
+      - 'if [ "$#" -gt 0 ] && [ ! -d "@OPENRC_RUNLEVEL_DIR@/$1" ]; then exec /usr/local/bin/lancache-ng ui "$@"; fi'
       - "rm -rf '@OPENRC_STATE_DIR@'"
     process_pre:
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
@@ -999,7 +999,7 @@ runtime:
     - STATE_SUBDIR_CACHE=cache
     - STATE_SUBDIR_CA=ca
     - CACHEHAMSTER_POLL_INTERVAL=5
-    - CACHEHAMSTER_PROGRAM=lancache-cachehamster
+    - CACHEHAMSTER_PROGRAM=lancache-ng
     - CACHEHAMSTER_QUEUES=2
     - CACHEHAMSTER_SERVICE=@SERVICES_SERVICE@
     - CDN_CUSTOM_DOMAINS=
