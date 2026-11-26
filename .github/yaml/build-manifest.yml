@@ -774,6 +774,10 @@ runtime:
     # Why: a silent secondary is a status, not a hang.
     # From: Issue #1683 | PR #1912
     - SECONDARY_PROBE_TIMEOUT=4
+    # What: wait for one answer of dns query, seconds.
+    # Why: a silent server is a result, not a hang.
+    # From: Issue #1683 | PR #2020
+    - DNS_QUERY_WAIT_SECONDS=4
     # What: stored alarm history cap of the ui, newest kept.
     # Why: deprecated; no release reads it, v0.1-v0.4.
     # From: Issue #1683 | PR #2020
@@ -817,6 +821,7 @@ runtime:
     - UI_ROUTE_DNSSEC=/api/dns/dnssec
     - UI_ROUTE_DNS_API_CHECK=/api/dns/api-check
     - UI_ROUTE_DNS_STATS=/api/dns/stats
+    - UI_ROUTE_DNS_QUERY=/api/dns/query
     - UI_ROUTE_DESIRED_STATE=/api/container/{service}
     - UI_ROUTE_RESTART_UI=/api/restart-ui
     - UI_ROUTE_SETUP_SAVE=/setup/save

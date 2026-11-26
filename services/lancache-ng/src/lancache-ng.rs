@@ -3881,6 +3881,18 @@ mod dns {
                 Ok(())
             }
             Some("secondary") => secondary_do(&args[1..]).await,
+            // What: query NAME TYPE [http/https/auth/ip#n]
+            // Why: a real DNS answer; needs no running ui.
+            // From: Issue #1683 | PR #2020
+            Some("query") => match &args[1..] {
+                [n, ty] | [n, ty, _] => {
+                    let target = args.get(3).map_or("http", String::as_str);
+                    let s = Settings::from_process()?;
+                    println!("{}", query(&s, n, ty, target).await?);
+                    Ok(())
+                }
+                _ => Err("usage: query <name> <type> [http|https|auth|ip#port]".into()),
+            },
             // What: DNSSEC anchors, proven zones, NTAs.
             // Why: a read; it needs no running ui.
             // From: Issue #1683 | PR #2020
@@ -3954,7 +3966,7 @@ mod dns {
     // What: every command of the dns role.
     // Why: the help names the same set as the match.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 9] = [
+    const COMMANDS: [&str; 10] = [
         "daemon",
         "follow-once",
         "sync-check",
@@ -3964,6 +3976,7 @@ mod dns {
         "dnssec",
         "api-check",
         "stats",
+        "query",
     ];
 
     // What: serials of managed zones on all servers.
@@ -4885,6 +4898,46 @@ mod dns {
                 crate::shared::recursor_conf::Chain::default()
             }
         }
+    }
+
+    // What: one DNS question to a stack server.
+    // Why: shows what auth, recursor or dnsdist say.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn query(
+        s: &Settings,
+        name: &str,
+        rtype: &str,
+        target: &str,
+    ) -> Result<Value, String> {
+        let qtype = crate::shared::dns::qtype(rtype)?;
+        let port = s.num::<u16>("DNS_PORT")?;
+        // What: http, https, auth or an address.
+        // Why: the SOT names each server; auth gets no RD.
+        // From: Issue #1683 | PR #2020
+        let (host, port, rd) = match target {
+            "http" => (s.text("IP_HTTP")?, port, true),
+            "https" => (s.text("IP_HTTPS")?, port, true),
+            "auth" => (
+                s.text("PDNS_AUTH_ADDRESS")?,
+                s.num::<u16>("PDNS_AUTH_PORT")?,
+                false,
+            ),
+            other => match other.rsplit_once('#') {
+                Some((ip, p)) => {
+                    let p = p.parse().map_err(|_| format!("{p}: no port number"))?;
+                    (ip.to_string(), p, true)
+                }
+                None => (other.to_string(), port, true),
+            },
+        };
+        let addr = std::net::SocketAddr::new(crate::shared::dns::parse_ip(&host)?, port);
+        let wait = std::time::Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
+        let (n, ty) = (name.to_string(), qtype);
+        let r =
+            tokio::task::spawn_blocking(move || crate::shared::dns::ask(addr, &n, ty, rd, wait))
+                .await
+                .map_err(|e| e.to_string())??;
+        Ok(json!({"server": addr.to_string(), "name": name, "type": rtype, "rd": rd, "reply": r}))
     }
 
     // What: anchors, proven zones and NTAs as JSON.
@@ -6848,21 +6901,58 @@ mod shared {
             }
         }
 
-        // What: SOA query for one zone, RD bit off.
-        // Why: without RD a recursor sends no aa answer.
-        // From: Issue #1683
-        pub fn soa_query(id: u16, zone: &str) -> Result<Vec<u8>, String> {
+        // What: a DNS question, class IN, RD on or off.
+        // Why: one wire builder for SOA probes and queries.
+        // From: Issue #1683 | PR #2020
+        pub fn query(id: u16, name: &str, qtype: u16, rd: bool) -> Result<Vec<u8>, String> {
             let mut q = id.to_be_bytes().to_vec();
-            q.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-            for label in zone.trim_end_matches('.').split('.') {
+            q.extend_from_slice(&[u8::from(rd), 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+            for label in name.trim_end_matches('.').split('.') {
                 if label.is_empty() || label.len() > 63 {
-                    return Err(format!("zone {zone:?} is no DNS name"));
+                    return Err(format!("zone {name:?} is no DNS name"));
                 }
                 q.push(label.len() as u8);
                 q.extend_from_slice(label.as_bytes());
             }
-            q.extend_from_slice(&[0, 0, 6, 0, 1]);
+            q.push(0);
+            q.extend_from_slice(&qtype.to_be_bytes());
+            q.extend_from_slice(&[0, 1]);
             Ok(q)
+        }
+
+        // What: SOA query for one zone, RD bit off.
+        // Why: without RD a recursor sends no aa answer.
+        // From: Issue #1683
+        pub fn soa_query(id: u16, zone: &str) -> Result<Vec<u8>, String> {
+            query(id, zone, 6, false)
+        }
+
+        // What: type number of a record type name.
+        // Why: the CLI takes A, AAAA, SOA ... as words.
+        // From: Issue #1683 | PR #2020
+        pub fn qtype(word: &str) -> Result<u16, String> {
+            const TYPES: [(&str, u16); 13] = [
+                ("A", 1),
+                ("NS", 2),
+                ("CNAME", 5),
+                ("SOA", 6),
+                ("PTR", 12),
+                ("MX", 15),
+                ("TXT", 16),
+                ("AAAA", 28),
+                ("SRV", 33),
+                ("DS", 43),
+                ("DNSKEY", 48),
+                ("HTTPS", 65),
+                ("CAA", 257),
+            ];
+            let up = word.to_ascii_uppercase();
+            TYPES
+                .iter()
+                .find(|(n, _)| *n == up)
+                .map(|(_, v)| *v)
+                .or_else(|| up.strip_prefix("TYPE").and_then(|n| n.parse().ok()))
+                .ok_or_else(|| format!("{word}: unknown record type"))
         }
 
         // What: end of a DNS name at offset at.
@@ -6880,10 +6970,58 @@ mod shared {
             }
         }
 
-        // What: aa bit, rcode and serial of a reply.
+        // What: a dotted DNS name at offset at.
+        // Why: answers hold names with compression.
+        // From: Issue #1683 | PR #2020
+        fn name_text(msg: &[u8], mut at: usize) -> Result<String, String> {
+            let mut out = Vec::new();
+            for _ in 0..128 {
+                let len = *msg.get(at).ok_or("DNS name is cut off")?;
+                match len & 0xc0 {
+                    0 if len == 0 => return Ok(format!("{}.", out.join("."))),
+                    0 => {
+                        let l = msg
+                            .get(at + 1..at + 1 + usize::from(len))
+                            .ok_or("DNS name is cut off")?;
+                        out.push(String::from_utf8_lossy(l).into_owned());
+                        at += 1 + usize::from(len);
+                    }
+                    0xc0 => {
+                        let lo = *msg.get(at + 1).ok_or("DNS name is cut off")?;
+                        at = (usize::from(len & 0x3f) << 8) | usize::from(lo);
+                    }
+                    _ => return Err("DNS name is bad".into()),
+                }
+            }
+            Err("DNS name loops".into())
+        }
+
+        // What: one answer record: name, type, ttl, data.
+        // Why: the query check shows what the server said.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Debug, serde::Serialize)]
+        pub struct Record {
+            pub name: String,
+            pub rtype: u16,
+            pub ttl: u32,
+            pub data: String,
+        }
+
+        // What: flags and answer records of one reply.
+        // Why: SOA probes and queries read one parser.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Debug, serde::Serialize)]
+        pub struct Reply {
+            pub authoritative: bool,
+            pub truncated: bool,
+            pub rcode: u8,
+            pub answers: Vec<Record>,
+        }
+
+        // What: aa, tc, rcode and answers of a reply.
         // Why: the id must match the query sent.
-        // From: Issue #1683
-        pub fn soa_reply(id: u16, msg: &[u8]) -> Result<Soa, String> {
+        // From: Issue #1683 | PR #2020
+        pub fn reply(id: u16, msg: &[u8]) -> Result<Reply, String> {
             let cut = || "DNS reply is cut off".to_string();
             let word = |at: usize| {
                 msg.get(at..at + 2)
@@ -6897,23 +7035,60 @@ mod shared {
             for _ in 0..word(4)? {
                 at = name_end(msg, at)? + 4;
             }
-            let mut serial = None;
+            let mut answers = Vec::new();
             for _ in 0..word(6)? {
+                let name = name_text(msg, at)?;
                 at = name_end(msg, at)?;
-                let end = at + 10 + usize::from(word(at + 8)?);
-                if end > msg.len() {
-                    return Err(cut());
-                }
-                if word(at)? == 6 && serial.is_none() {
-                    let p = name_end(msg, name_end(msg, at + 10)?)?;
-                    let b = msg.get(p..p + 4).filter(|_| p + 4 <= end).ok_or_else(cut)?;
-                    serial = Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-                }
+                let rtype = word(at)?;
+                let ttl = (u32::from(word(at + 4)?) << 16) | u32::from(word(at + 6)?);
+                let start = at + 10;
+                let end = start + usize::from(word(at + 8)?);
+                let rd = msg.get(start..end).ok_or_else(cut)?;
+                let data = match (rtype, rd.len()) {
+                    (1, 4) => std::net::Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]).to_string(),
+                    (28, 16) => {
+                        let mut b = [0u8; 16];
+                        b.copy_from_slice(rd);
+                        std::net::Ipv6Addr::from(b).to_string()
+                    }
+                    (2 | 5 | 12, _) => name_text(msg, start)?,
+                    (6, _) => {
+                        let p = name_end(msg, name_end(msg, start)?)?;
+                        let b = msg.get(p..p + 4).filter(|_| p + 4 <= end).ok_or_else(cut)?;
+                        let serial = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+                        format!("{} serial {serial}", name_text(msg, start)?)
+                    }
+                    _ => rd.iter().map(|b| format!("{b:02x}")).collect(),
+                };
+                answers.push(Record {
+                    name,
+                    rtype,
+                    ttl,
+                    data,
+                });
                 at = end;
             }
-            Ok(Soa {
+            Ok(Reply {
                 authoritative: msg[2] & 0x04 != 0,
+                truncated: msg[2] & 0x02 != 0,
                 rcode: msg[3] & 0x0f,
+                answers,
+            })
+        }
+
+        // What: aa bit, rcode and serial of a reply.
+        // Why: the id must match the query sent.
+        // From: Issue #1683
+        pub fn soa_reply(id: u16, msg: &[u8]) -> Result<Soa, String> {
+            let r = reply(id, msg)?;
+            let serial = r
+                .answers
+                .iter()
+                .find(|a| a.rtype == 6)
+                .and_then(|a| a.data.rsplit(' ').next()?.parse().ok());
+            Ok(Soa {
+                authoritative: r.authoritative,
+                rcode: r.rcode,
                 serial,
             })
         }
@@ -6933,16 +7108,42 @@ mod shared {
             zone: &str,
             wait: std::time::Duration,
         ) -> Result<Soa, String> {
+            let (id, buf) = exchange(addr, &|id| soa_query(id, zone), wait)?;
+            soa_reply(id, &buf)
+        }
+
+        // What: send one question over UDP, get reply.
+        // Why: SOA probe and query check share the socket.
+        // From: Issue #1683 | PR #2020
+        fn exchange(
+            addr: std::net::SocketAddr,
+            build: &dyn Fn(u16) -> Result<Vec<u8>, String>,
+            wait: std::time::Duration,
+        ) -> Result<(u16, Vec<u8>), String> {
             let id: u16 = rand::random();
-            let query = soa_query(id, zone)?;
+            let question = build(id)?;
             let err = |e: std::io::Error| format!("{addr}: {e}");
             let sock = udp_for(addr.is_ipv6()).map_err(err)?;
             sock.connect(addr).map_err(err)?;
             sock.set_read_timeout(Some(wait)).map_err(err)?;
-            sock.send(&query).map_err(err)?;
+            sock.send(&question).map_err(err)?;
             let mut buf = [0u8; 4096];
             let n = sock.recv(&mut buf).map_err(err)?;
-            soa_reply(id, &buf[..n])
+            Ok((id, buf[..n].to_vec()))
+        }
+
+        // What: one question over UDP; RD as asked.
+        // Why: the query check reads the full reply.
+        // From: Issue #1683 | PR #2020
+        pub fn ask(
+            addr: std::net::SocketAddr,
+            name: &str,
+            qtype: u16,
+            rd: bool,
+            wait: std::time::Duration,
+        ) -> Result<Reply, String> {
+            let (id, buf) = exchange(addr, &|id| query(id, name, qtype, rd), wait)?;
+            reply(id, &buf)
         }
     }
 
@@ -13380,6 +13581,26 @@ mod ui {
         adopt(app, &old, new).await
     }
 
+    // What: GET query ?name=&type=&server= as JSON.
+    // Why: REST on the query check of the CLI.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn dns_query_api(
+        State(app): Shared,
+        axum::extract::Query(q): axum::extract::Query<Fields>,
+    ) -> Response {
+        let server = match field(&q, "server") {
+            v if v.is_empty() => "http".to_string(),
+            v => v,
+        };
+        let (s, name, rtype) = (app.settings(), field(&q, "name"), field(&q, "type"));
+        json_reply(
+            crate::dns::query(&s, &name, &rtype, &server)
+                .await
+                .map(Some),
+            "",
+        )
+    }
+
     // What: GET PowerDNS API check without counters.
     // Why: REST read on the report of the CLI.
     // From: Issue #1683 | PR #2020
@@ -15780,6 +16001,7 @@ mod ui {
             .route(&p("UI_ROUTE_DNSSEC")?, get(dnssec_api))
             .route(&p("UI_ROUTE_DNS_API_CHECK")?, get(dns_api_check))
             .route(&p("UI_ROUTE_DNS_STATS")?, get(dns_stats_api))
+            .route(&p("UI_ROUTE_DNS_QUERY")?, get(dns_query_api))
             .route(&p("UI_ROUTE_APPLY_PLAN")?, get(apply_plan_api))
             .route(&p("UI_ROUTE_APPLY")?, post(apply_api))
             .route(&p("UI_ROUTE_ZONE_OVERVIEW")?, get(zone_overview))
