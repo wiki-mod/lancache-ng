@@ -258,7 +258,7 @@ services:
     # What: runtime defaults the Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
-    default_args: [UI_LISTEN_PORT]
+    default_args: [UI_LISTEN_PORT, TEMPLATE_DIR, LANG_DIR, STATIC_DIR]
     # What: OpenRC services of the ui image.
     # Why: one start path; compose names no command.
     # From: Issue #1683

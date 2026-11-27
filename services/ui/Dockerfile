@@ -95,6 +95,16 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # From: Issue #1683 | PR #1980
 COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
 
+# What: pages, texts and css from the repo tree.
+# Why: every container of the image has them.
+# From: Issue #1683 | PR #2020
+ARG TEMPLATE_DIR
+ARG LANG_DIR
+ARG STATIC_DIR
+COPY services/ui/src/templates ${TEMPLATE_DIR}
+COPY services/ui/src/lang ${LANG_DIR}
+COPY services/ui/src/static ${STATIC_DIR}
+
 # What: the SOT ui port, documented for Docker.
 # Why: compose maps it; the value comes from ci.sh.
 # From: Issue #1683 | PR #1980

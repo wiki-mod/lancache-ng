@@ -13782,7 +13782,7 @@ mod ui {
         let code = LANG.try_with(Clone::clone).unwrap_or_default();
         let all = all_texts();
         all.get(&code)
-            .or_else(|| all.values().next())
+            .or_else(|| all.get(FALLBACK_LANG))
             .and_then(|m| m.get(key))
             .cloned()
             .unwrap_or_else(|| key.to_string())
@@ -13937,7 +13937,10 @@ mod ui {
                 .try_with(Clone::clone)
                 .unwrap_or_else(|_| s.text_or_empty("UI_LANG_DEFAULT"));
             let empty = BTreeMap::new();
-            let t = all_texts().get(&code).unwrap_or(&empty);
+            let t = all_texts()
+                .get(&code)
+                .or_else(|| all_texts().get(FALLBACK_LANG))
+                .unwrap_or(&empty);
             let langs: Vec<(&str, &str)> = all_texts()
                 .iter()
                 .map(|(c, m)| (c.as_str(), m.get("lang_name").map_or(c.as_str(), |n| n)))
@@ -16687,19 +16690,55 @@ mod ui {
             "unknown_names": unknown, "ok": ok}))
     }
 
-    // What: read the language files at start.
-    // Why: a broken file or a missing key stops the start.
-    // From: Issue #1683 | PR #1980
+    // What: the English texts built into the binary.
+    // Why: English is the fallback; the ui always starts.
+    // From: Issue #1683 | PR #2020
+    const BUILT_IN_EN: &str = include_str!("../../ui/src/lang/en.json");
+
+    // What: code of the fallback language.
+    // Why: the built-in file is the English one.
+    // From: Issue #1683 | PR #2020
+    const FALLBACK_LANG: &str = "en";
+
+    // What: texts at start; English fills every gap.
+    // Why: a missing folder or key must not stop the ui.
+    // From: Issue #1683 | PR #2020
     pub(crate) fn texts(dir: &str) -> Result<Texts, String> {
-        let all = lang_files(dir)?;
+        let mut base: BTreeMap<String, String> =
+            serde_json::from_str(BUILT_IN_EN).map_err(|e| format!("built-in en: {e}"))?;
+        let mut all = match lang_files(dir) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("ui: lang: {e}; using the built-in English texts");
+                Texts::new()
+            }
+        };
         let report = lang_report(&all);
         if report["equal"] != json!(true) {
-            return Err(format!(
-                "lang: the files differ in their keys: {}",
+            eprintln!(
+                "ui: lang: English fills missing keys: {}",
                 report["missing"]
-            ));
+            );
         }
+        if let Some(en) = all.get(FALLBACK_LANG) {
+            base.extend(en.clone());
+        }
+        for map in all.values_mut() {
+            for (k, v) in &base {
+                map.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        all.insert(FALLBACK_LANG.to_string(), base);
         Ok(all)
+    }
+
+    // What: key check of the language files on disk.
+    // Why: CLI and REST report what English fills.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn lang_check(s: &Settings) -> Result<Value, String> {
+        let mut v = lang_report(&lang_files(&s.text("LANG_DIR")?)?);
+        v["fallback"] = json!(FALLBACK_LANG);
+        Ok(v)
     }
 
     // What: every language file, parsed.
@@ -16737,8 +16776,8 @@ mod ui {
     // What: GET language report of the loaded files.
     // Why: REST read on the check of the CLI.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn lang_api(State(_app): Shared) -> Response {
-        json_reply(Ok(Some(lang_report(all_texts()))), "")
+    pub(crate) async fn lang_api(State(app): Shared) -> Response {
+        json_reply(lang_check(&app.settings()).map(Some), "")
     }
 
     // What: language of one request.
@@ -16760,7 +16799,12 @@ mod ui {
                 return c;
             }
         }
-        app.settings().text_or_empty("UI_LANG_DEFAULT")
+        // What: the SOT default if loaded, else English.
+        // Why: a page in an unloaded language has no texts.
+        // From: Issue #1683 | PR #2020
+        Some(app.settings().text_or_empty("UI_LANG_DEFAULT"))
+            .filter(|c| known(c))
+            .unwrap_or_else(|| FALLBACK_LANG.to_string())
     }
 
     // What: run the request in its language.
@@ -16856,18 +16900,13 @@ mod ui {
             // What: language files on disk, key check.
             // Why: a missing key would show raw on a page.
             // From: Issue #1683 | PR #2020
-            Some("lang") => Some(
-                s.text("LANG_DIR")
-                    .and_then(|d| lang_files(&d))
-                    .and_then(|all| {
-                        let v = lang_report(&all);
-                        println!("{v}");
-                        match v["equal"].as_bool() {
-                            Some(true) => Ok(()),
-                            _ => Err("lang: the files differ in their keys".into()),
-                        }
-                    }),
-            ),
+            Some("lang") => Some(lang_check(s).and_then(|v| {
+                println!("{v}");
+                match v["equal"].as_bool() {
+                    Some(true) => Ok(()),
+                    _ => Err("lang: the files differ; English fills the gaps".into()),
+                }
+            })),
             // What: route list and template check.
             // Why: the router's table, the start's loader.
             // From: Issue #1683 | PR #2020
