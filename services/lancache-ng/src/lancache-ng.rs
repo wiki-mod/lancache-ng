@@ -16119,7 +16119,8 @@ mod stack {
     ) -> Result<Vec<PathBuf>, String> {
         let stale = stale_rendered(s, files)?;
         for path in &stale {
-            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            crate::shared::fs::delete_if_present(path)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
         }
         Ok(stale)
     }
