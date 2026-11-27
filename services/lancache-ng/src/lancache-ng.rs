@@ -2269,6 +2269,13 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     pub async fn run(args: &[String]) -> std::process::ExitCode {
         let args: Vec<String> = args.to_vec();
+        // What: help lists the commands, as the others.
+        // Why: no settings are needed to name them.
+        // From: Issue #1683 | PR #2020
+        if args.first().is_some_and(|a| a == "help") {
+            println!("commands: {}", COMMANDS.join(" "));
+            return std::process::ExitCode::SUCCESS;
+        }
         let result = match Ctx::load() {
             Err(e) => Err(e),
             Ok(c) if args.first().is_none_or(|a| a == "daemon") => {
@@ -12398,15 +12405,17 @@ end
         // From: Issue #1683 | PR #2020
         pub fn logs_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
+            let usage = "usage: logs [program] [n]";
             let (program, n) = match args {
                 [] => (None, None),
+                [h] if h == "help" => return Err(usage.into()),
                 [p] if p.parse::<usize>().is_ok() => (None, p.parse().ok()),
                 [p] => (Some(p.as_str()), None),
                 [p, n] => (
                     Some(p.as_str()),
                     Some(n.parse().map_err(|_| format!("{n}: no number"))?),
                 ),
-                _ => return Err("usage: logs [program] [n]".into()),
+                _ => return Err(usage.into()),
             };
             println!("{}", program_logs(&s, program, n)?);
             Ok(())
@@ -18121,7 +18130,27 @@ async fn main() -> std::process::ExitCode {
         _ if !argv.is_empty() => argv.remove(0),
         _ => String::new(),
     };
+    // What: "<name> help" prints that name's commands.
+    // Why: each owner's own list; exit 0 on stdout.
+    // From: Issue #1683 | PR #2020
+    let help = argv.first().is_some_and(|a| a == "help");
+    let code = |r: Result<(), String>| match r {
+        Err(e) if help && (e.starts_with("commands:") || e.starts_with("usage:")) => {
+            println!("{e}");
+            std::process::ExitCode::SUCCESS
+        }
+        other => code(other),
+    };
     match role.as_str() {
+        // What: the overview of roles and groups.
+        // Why: the first step to every command list.
+        // From: Issue #1683 | PR #2020
+        "help" => {
+            println!("roles: {}", ROLES.join(" "));
+            println!("groups: {}", GROUPS.join(" "));
+            println!("lancache-ng <role|group> help lists its commands");
+            std::process::ExitCode::SUCCESS
+        }
         "ui" => code(ui::run(&argv).await),
         "watchdog" => code(watchdog::run(&argv).await),
         "dns" => code(dns::run(&argv).await),
