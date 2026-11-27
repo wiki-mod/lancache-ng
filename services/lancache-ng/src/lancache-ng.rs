@@ -10674,6 +10674,84 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             }
             Ok(out)
         }
+
+        // What: host and port of an SNMP target text.
+        // Why: the setting reads "udp:host:port" or "host".
+        // From: Issue #1683 | PR #2020
+        fn target_of(target: &str) -> Result<(String, u16), String> {
+            let rest = target.strip_prefix("udp:").unwrap_or(target);
+            let (host, port) = crate::shared::dns::split_host_port(rest)?;
+            Ok((host.to_string(), port.unwrap_or(DEFAULT_PORT)))
+        }
+
+        // What: UDP port of an SNMP agent.
+        // Why: fixed by RFC 3411; a target may omit it.
+        // From: Issue #1683 | PR #2020
+        const DEFAULT_PORT: u16 = 161;
+
+        // What: text of one varbind, as snmpget wrote it.
+        // Why: the reader takes the first word as a number.
+        // From: Issue #1683 | PR #2020
+        fn value_text(v: &snmp2::Value<'_>) -> String {
+            use snmp2::Value;
+            match v {
+                Value::Integer(n) => n.to_string(),
+                Value::Counter32(n) | Value::Unsigned32(n) | Value::Timeticks(n) => n.to_string(),
+                Value::Counter64(n) => n.to_string(),
+                Value::OctetString(b) => String::from_utf8_lossy(b).trim().to_string(),
+                Value::IpAddress([a, b, c, d]) => format!("{a}.{b}.{c}.{d}"),
+                _ => String::new(),
+            }
+        }
+
+        // What: SNMP v2c GET of many OIDs in one request.
+        // Why: no snmpget: the community stays out of ps.
+        // From: Issue #1683 | PR #2020
+        pub fn get(s: &Settings, target: &str, oids: &[String]) -> Result<Vec<String>, String> {
+            let (host, port) = target_of(target)?;
+            let community = s.text("SNMP_COMMUNITY")?;
+            let wait = std::time::Duration::from_secs(s.uint("STATS_SNMP_TIMEOUT")?);
+            let ids: Vec<snmp2::Oid<'static>> = oids
+                .iter()
+                .map(|text| {
+                    let parts: Result<Vec<u64>, _> = text
+                        .split('.')
+                        .filter(|p| !p.is_empty())
+                        .map(str::parse)
+                        .collect();
+                    parts
+                        .ok()
+                        .and_then(|p| snmp2::Oid::from(&p).ok())
+                        .ok_or_else(|| format!("{text:?} is no OID"))
+                })
+                .collect::<Result<_, _>>()?;
+            let refs: Vec<&snmp2::Oid<'_>> = ids.iter().collect();
+            let mut session = snmp2::SyncSession::new_v2c(
+                (host.as_str(), port),
+                community.as_bytes(),
+                Some(wait),
+                rand::random::<i32>() & i32::MAX,
+            )
+            .map_err(|e| format!("SNMP target {target}: {e}"))?;
+            let reply = session.get_many(&refs).map_err(|e| {
+                format!("SNMP target {target}: {e} (no answer in {wait:?}: wrong target, port or community?)")
+            })?;
+            if reply.error_status != 0 {
+                return Err(format!(
+                    "SNMP target {target}: agent error {} at OID {}",
+                    reply.error_status, reply.error_index
+                ));
+            }
+            let out: Vec<String> = reply.varbinds.map(|(_, v)| value_text(&v)).collect();
+            if out.len() != oids.len() {
+                return Err(format!(
+                    "SNMP target {target}: {} values for {} OIDs",
+                    out.len(),
+                    oids.len()
+                ));
+            }
+            Ok(out)
+        }
     }
 
     // What: numbered known-good snapshots in one dir.
@@ -15354,18 +15432,23 @@ end
             List,
             Graph,
             Sample,
+            SnmpCheck,
         }
 
         // What: every command of the stats group.
         // Why: help, errors and the choice read this table.
         // From: Issue #1683 | PR #2020
-        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 3] = [
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
             ("list", crate::shared::cli::row(Op::List, "list")),
             (
                 "graph",
                 crate::shared::cli::row(Op::Graph, "graph <name> <range> <file.png>"),
             ),
             ("sample", crate::shared::cli::row(Op::Sample, "sample")),
+            (
+                "snmp-check",
+                crate::shared::cli::row(Op::SnmpCheck, "snmp-check"),
+            ),
         ];
 
         // What: lancache-ng stats list|graph|sample.
@@ -15399,9 +15482,48 @@ end
                         return Err("sample: a graph could not be recorded".into());
                     }
                 }
+                // What: one SNMP query of the SOT target.
+                // Why: REST runs the same function.
+                // From: Issue #1683 | PR #2020
+                (Some(Op::SnmpCheck), []) => {
+                    let v = snmp_check(&s)?;
+                    println!("{v}");
+                    if v["ok"] != true {
+                        return Err("snmp-check: the target did not answer".into());
+                    }
+                }
                 _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
             }
             Ok(())
+        }
+
+        // What: one SNMP query of the machine graphs' OIDs.
+        // Why: CLI and REST show if the target answers.
+        // From: Issue #1683 | PR #2020
+        pub fn snmp_check(s: &Settings) -> Result<serde_json::Value, String> {
+            let target = s.text("STATS_SNMP_TARGET")?;
+            let rows: Vec<(String, String, String)> = graphs(s)?
+                .into_iter()
+                .flat_map(|g| {
+                    g.sources
+                        .into_iter()
+                        .map(move |x| (g.name.clone(), x.ds, x.oid))
+                })
+                .collect();
+            let oids: Vec<String> = rows.iter().map(|r| r.2.clone()).collect();
+            Ok(match crate::shared::snmp::get(s, &target, &oids) {
+                Ok(values) => {
+                    let list: Vec<serde_json::Value> = rows
+                        .iter()
+                        .zip(values)
+                        .map(|((g, ds, oid), v)| {
+                            serde_json::json!({"graph": g, "ds": ds, "oid": oid, "value": v})
+                        })
+                        .collect();
+                    serde_json::json!({"ok": true, "target": target, "values": list})
+                }
+                Err(e) => serde_json::json!({"ok": false, "target": target, "error": e}),
+            })
         }
 
         // What: program values, row tab.name:sources.
@@ -15538,29 +15660,13 @@ end
             }
         }
 
-        // What: a free operand that is no option.
-        // Why: a leading '-' would be read as a switch.
-        // From: Issue #1683 | PR #2020
-        fn operand(v: &str) -> Result<&str, String> {
-            match v.starts_with('-') {
-                true => Err(format!("{v:?} may not start with '-'")),
-                false => Ok(v),
-            }
-        }
-
         // What: read all sources once, then store.
-        // Why: snmpget -Oqv prints one value per line.
+        // Why: one SNMP request holds every value.
         // From: Issue #1683 | PR #1980
         pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
-            let mut get = Command::new("snmpget");
-            get.args(["-v2c", "-Oqv", "-c"]);
-            get.arg(s.text("SNMP_COMMUNITY")?);
-            get.arg(operand(&s.text("STATS_SNMP_TARGET")?)?);
-            for x in &g.sources {
-                get.arg(operand(&x.oid)?);
-            }
-            let text = String::from_utf8_lossy(&crate::shared::tool::run(&mut get)?).into_owned();
-            let values: Vec<String> = text.lines().map(number_or_unknown).collect();
+            let oids: Vec<String> = g.sources.iter().map(|x| x.oid.clone()).collect();
+            let got = crate::shared::snmp::get(s, &s.text("STATS_SNMP_TARGET")?, &oids)?;
+            let values: Vec<String> = got.iter().map(|l| number_or_unknown(l)).collect();
             save_row(s, g, &values)
         }
 
@@ -18776,6 +18882,18 @@ mod ui {
         Ok(axum::Json(json!({"errors": errs})).into_response())
     }
 
+    // What: GET UI_ROUTE_STATS_SNMP_CHECK: one SNMP query.
+    // Why: REST asks what the CLI snmp-check asks.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stats_snmp_check_api(State(app): Shared) -> Response {
+        let s = app.settings();
+        let asked = tokio::task::spawn_blocking(move || crate::shared::rrd::snmp_check(&s))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        json_reply(asked.map(Some), "")
+    }
+
     // What: GET graph list with sources and files.
     // Why: REST read on the listing of the CLI.
     // From: Issue #1683 | PR #2020
@@ -20054,6 +20172,7 @@ mod ui {
             route("UI_ROUTE_STATS_GRAPH", Get, Api, graph),
             route("UI_ROUTE_STATS_LIST", Get, Api, stats_list_api),
             route("UI_ROUTE_STATS_SAMPLE", Post, Api, stats_sample_api),
+            route("UI_ROUTE_STATS_SNMP_CHECK", Get, Api, stats_snmp_check_api),
             route("UI_ROUTE_LOGS_SAVE", Post, Api, logs_save),
             route("UI_ROUTE_LOGS", Get, Api, logs_api),
             route("UI_ROUTE_LANG", Get, Api, lang_api),

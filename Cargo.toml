@@ -44,6 +44,10 @@ reqwest = { version = "*", default-features = false, features = ["json", "rustls
 # Why: safe statvfs and SIGTERM; std has neither on stable.
 # From: Issue #1683 | PR #1912
 rustix = { version = "*", default-features = false, features = ["std", "fs", "process"] }
+# What: snmp2 for SNMP v2c GET, no v3 and no async.
+# Why: stats ask snmpd natively; v3 would pull crypto.
+# From: Issue #1683 | PR #2020
+snmp2 = { version = "*", default-features = false }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 sha2 = "*"

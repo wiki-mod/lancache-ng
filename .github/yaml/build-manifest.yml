@@ -27,7 +27,6 @@ image_base:
     - lsof
     - nano
     - net-snmp
-    - net-snmp-tools
     - ripgrep
     - rrdtool
     - sed
@@ -274,14 +273,13 @@ services:
     process_pre:
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
     # What: final-image apk packages of the ui.
-    # Why: stats run rrdtool, snmpget; certs openssl.
+    # Why: stats run rrdtool; certs openssl.
     # From: Issue #1683 | PR #1980
     packages:
       - openrc
       - openrc-init
       - rrdtool
       - font-dejavu
-      - net-snmp-tools
       - openssl
     setup:
       - group=@LOG_READER_GROUP@:@GID@
@@ -818,6 +816,7 @@ runtime:
     - UI_ROUTE_DOCKER=/api/system/docker
     - UI_ROUTE_STATS_LIST=/api/stats
     - UI_ROUTE_STATS_SAMPLE=/api/stats/sample
+    - UI_ROUTE_STATS_SNMP_CHECK=/api/stats/snmp
     - UI_ROUTE_LOGS=/api/logs
     - UI_ROUTE_LANG=/api/ui/lang
     - UI_ROUTE_UI_ROUTES=/api/ui/routes
@@ -1752,6 +1751,7 @@ runtime:
     - STATS_RRAS=AVERAGE:0.5:1:1440 AVERAGE:0.5:12:1680 AVERAGE:0.5:288:800 MAX:0.5:12:1680
     - STATS_SERVICE_GRAPHS=machine.network:in=host:rx=DERIVE+out=host:tx=DERIVE proxy.requests:per_s=nginx:requests=DERIVE proxy.connections:active=nginx:active=GAUGE+waiting=nginx:waiting=GAUGE @DNS_SERVICE@.queries:recursor=recursor:questions=DERIVE+upstream=recursor:all-outqueries=DERIVE+auth=auth:udp-queries=DERIVE @DNS_SERVICE@.cache:hits=recursor:cache-hits=DERIVE+misses=recursor:cache-misses=DERIVE @DHCP_SERVICE@.packets:received=kea:pkt4-received=DERIVE+acks=kea:pkt4-ack-sent=DERIVE+naks=kea:pkt4-nak-sent=DERIVE @CACHEHAMSTER_SERVICE@.time:offset_ms=chrony:offset=GAUGE=1000+stratum=chrony:stratum=GAUGE
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
+    - STATS_SNMP_TIMEOUT=5
     - STATS_STEP=60
     # What: gap between two cache usage scans.
     # Why: the dashboard counts the cache use by it.
@@ -2171,6 +2171,7 @@ runtime:
     - STATS_RRAS=list;;;live;ui
     - STATS_SERVICE_GRAPHS=list;;;live;ui
     - STATS_SNMP_TARGET=text;;;fixed;ui
+    - STATS_SNMP_TIMEOUT=uint;1;60;live;ui
     - STATS_STEP=uint;10;3600;live;ui
     - CACHE_USAGE_SCAN_SECONDS=uint;30;86400;live;ui
     - STATS_WIDTH=text;;;live;ui
