@@ -14088,13 +14088,13 @@ mod stack {
             }
             changes.push(proxy_reload(new, "proxy-prune")?);
         }
-        // What: PowerDNS steps report, not abort.
-        // Why: pdns starts only after the restart below.
+        // What: what each apply step did, for the caller.
+        // Why: a failed step shows; the next still runs.
         // From: Issue #1683 | PR #1980
         let mut report = Vec::new();
         let (grace, limit) = app.limits(new)?;
         // What: a new file runs the commands of its daemon.
-        // Why: snmpd and pdns read their file only at start
+        // Why: the daemons do not watch their file.
         // From: Issue #1683
         for (file, exec, tag) in [
             ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
