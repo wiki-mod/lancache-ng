@@ -3534,6 +3534,14 @@ mod dhcp {
                 }
                 _ => return Err("usage: kea-rollback <snapshot-id>".into()),
             },
+            // What: the LAN DHCP probe via the ui socket.
+            // Why: the ui starts it on the host network.
+            // From: Issue #1683 | PR #2020
+            Some("probe") => {
+                let route = s.text("UI_ROUTE_DHCP_CHECK")?;
+                let body = crate::shared::http::Body::Form(vec![]);
+                crate::shared::http::ui_socket(&s, &route, body).await?
+            }
             // What: a DHCP page action via the ui socket.
             // Why: the ui checks, saves and applies it.
             // From: Issue #1683 | PR #2020
@@ -3549,7 +3557,7 @@ mod dhcp {
                     .collect();
                 crate::shared::http::page_do(&s, &keys, &args[1..]).await?
             }
-            _ => return Err("commands: state kea-snapshots stats kea-rollback do".into()),
+            _ => return Err("commands: state kea-snapshots stats kea-rollback probe do".into()),
         };
         println!("{v}");
         Ok(())
@@ -17041,7 +17049,7 @@ mod ui {
             route("UI_PAGE_CACHEHAMSTER", Get, Page, cachehamster),
             route("UI_PAGE_DOMAINS", Get, Page, domains),
             route("UI_PAGE_DHCP", Get, Page, dhcp),
-            route("UI_ROUTE_DHCP_CHECK", Post, Page, dhcp_check),
+            route("UI_ROUTE_DHCP_CHECK", Post, Api, dhcp_check),
             route("UI_PAGE_STATS", Get, Page, stats),
         ];
         t.extend(
