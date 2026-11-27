@@ -14634,6 +14634,11 @@ mod ui {
     // From: Issue #1683 | PR #1980
     pub(crate) const CSRF_FIELD: &str = "csrf_token";
 
+    // What: request header that carries the CSRF token.
+    // Why: script calls and the token route name it once.
+    // From: Issue #1683 | PR #2020
+    pub(crate) const CSRF_HEADER: &str = "x-csrf-token";
+
     // What: a form field without blanks; empty if missing.
     // Why: one reader for every form handler.
     // From: Issue #1683 | PR #2017
@@ -14826,7 +14831,7 @@ mod ui {
         // Why: JSON calls send the token as a header.
         // From: Issue #1683 | PR #1980
         fn check_header(&self, headers: &HeaderMap) -> Result<(), Fail> {
-            let given = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
+            let given = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok());
             match given.or(self.1.then_some("")) {
                 Some(t) if self.matches(t) => Ok(()),
                 _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
@@ -17528,7 +17533,7 @@ mod ui {
     // Why: a script posts it like the page forms do.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn csrf_api(Extension(csrf): Extension<Csrf>) -> Response {
-        let v = json!({"token": csrf.0, "header": "x-csrf-token", "field": CSRF_FIELD});
+        let v = json!({"token": csrf.0, "header": CSRF_HEADER, "field": CSRF_FIELD});
         axum::Json(v).into_response()
     }
 
