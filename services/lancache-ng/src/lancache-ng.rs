@@ -6322,9 +6322,9 @@ mod shared {
         // From: Issue #1683 | PR #1980
         pub fn new_tsig() -> String {
             use base64::Engine as _;
-            key_bytes(&random_hex(32))
-                .map(|key| base64::engine::general_purpose::STANDARD.encode(key))
-                .unwrap_or_default()
+            let mut key = [0u8; 32];
+            rand::fill(&mut key[..]);
+            base64::engine::general_purpose::STANDARD.encode(key)
         }
 
         // What: TSIG secret; a rotated file wins.
