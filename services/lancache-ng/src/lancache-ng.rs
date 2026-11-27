@@ -9662,7 +9662,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: port 53 if the primary answers aa there.
-        // Why: a primary may run its recursor on DNS_PORT.
+        // Why: before dnsdist the recursor held port 53.
         // From: Issue #1683
         pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
             let fallback = s.uint("PDNS_AUTH_PORT")?;
