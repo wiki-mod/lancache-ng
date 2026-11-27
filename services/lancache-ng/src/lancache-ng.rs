@@ -6266,6 +6266,45 @@ mod shared {
             (out, errs)
         }
 
+        // What: give every entry below root one owner.
+        // Why: a wrong owner blocks the writer and cleanup.
+        // From: Issue #1683 | PR #2020
+        pub fn chown_tree(root: &Path, uid: u32, gid: u32, apply: bool) -> (u64, Vec<String>) {
+            use std::os::unix::fs::MetadataExt;
+            let (mut fixed, mut errs) = (0u64, Vec::new());
+            let mut todo = vec![root.to_path_buf()];
+            while let Some(path) = todo.pop() {
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(m) => m,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        errs.push(format!("{}: {e}", path.display()));
+                        continue;
+                    }
+                };
+                if (meta.uid(), meta.gid()) != (uid, gid) {
+                    // What: a dry run only counts.
+                    // Why: it shows what the run would fix.
+                    // From: Issue #1683 | PR #2020
+                    let done = match apply {
+                        true => std::os::unix::fs::lchown(&path, Some(uid), Some(gid)),
+                        false => Ok(()),
+                    };
+                    match done {
+                        Ok(()) => fixed += 1,
+                        Err(e) => errs.push(format!("{}: {e}", path.display())),
+                    }
+                }
+                if meta.is_dir() {
+                    match fs::read_dir(&path) {
+                        Ok(rd) => todo.extend(rd.flatten().map(|e| e.path())),
+                        Err(e) => errs.push(format!("{}: {e}", path.display())),
+                    }
+                }
+            }
+            (fixed, errs)
+        }
+
         // What: total and free bytes of a filesystem.
         // Why: cache size checks need the real free space.
         // From: Issue #1683 | PR #1980
@@ -18451,6 +18490,8 @@ mod watchdog {
         size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         budget: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_fixed: Option<u64>,
     }
 
     // What: the answer for the picked files.
@@ -18482,10 +18523,22 @@ mod watchdog {
         if when == When::Due && !tidy::is_due(&stamp, now) {
             return Ok(None);
         }
-        let (all, unread) = tidy::files(&tidy::cache_root(s)?);
+        let root = tidy::cache_root(s)?;
+        // What: the cache gets the nginx owner back first.
+        // Why: nginx writes and the purge deletes it all.
+        // From: Issue #1683 | PR #2020
+        let owner = (s.num::<u32>("NGINX_UID")?, s.num::<u32>("NGINX_GID")?);
+        let apply = when != When::Dry;
+        let (fixed, owner_errs) = crate::shared::fs::chown_tree(&root, owner.0, owner.1, apply);
+        if apply && fixed > 0 {
+            eprintln!("watchdog: cache owner set on {fixed} entries");
+        }
+        let (all, unread) = tidy::files(&root);
         let (pick, _) = tidy::older(all, s.uint("CACHE_VALID_DAYS")?, now);
         let mut t = picked(s, PURGE, when, &pick)?;
-        t.errors = unread;
+        t.owner_fixed = Some(fixed);
+        t.errors = owner_errs;
+        t.errors.extend(unread);
         if when != When::Dry {
             let failed = tidy::remove(&pick).1;
             let removed = t.count - failed.len();
