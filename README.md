@@ -432,8 +432,8 @@ compressed, timestamped archive and prints its path:
 - a copy of `.env` and, if present, `.env.local` with every credential-shaped value (API keys,
   TSIG keys, passwords, tokens) redacted
 - host facts (Docker/Compose versions, kernel, disk space)
-- known-good-snapshot directory listings (file names only, no content) --
-  see `docs/README.md` (section 6)
+- directory listings of the zone, stack and Kea snapshots (file names
+  only, no content) -- see `docs/README.md` (section 6)
 
 Review the archive yourself before attaching it to an issue -- this command
 never uploads or attaches anything automatically.
@@ -835,7 +835,7 @@ LANCACHE_IMAGE_TAG=<set-by-setup>
 
 `PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.0.2.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`config::Settings::load` in `services/lancache-ng/src/lancache-ng.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
 
-The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback).
+The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`), of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) and of the whole stack state after every change (`STACK_SNAPSHOT_KEEP`, default `50`) for operator-selected rollback (`setup.sh reset-to-last-known-good-config stack|kea|dns`); see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback).
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
 `master`) is the install default (SOT `release.install_channel`). On update, a
