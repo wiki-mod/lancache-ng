@@ -7725,6 +7725,23 @@ mod shared {
             (name.contains('.') && is_dns_name(&name, false, false)).then_some((name, subtree))
         }
 
+        // What: the entries of a cache domain list.
+        // Why: nginx and dns share a rule; bad row fails.
+        // From: Issue #1683 | PR #2020
+        pub fn cdn_list(text: &str) -> Result<Vec<(String, bool)>, String> {
+            let mut out = Vec::new();
+            for (n, line) in text.lines().enumerate() {
+                let row = line.trim();
+                if row.is_empty() || row.starts_with('#') {
+                    continue;
+                }
+                let entry = cdn_entry(row)
+                    .ok_or_else(|| format!("line {}: invalid domain entry {row:?}", n + 1))?;
+                out.push(entry);
+            }
+            Ok(out)
+        }
+
         // What: private reverse zones from the SOT.
         // Why: RFC 1918 and ULA ranges; no list in code.
         // From: Issue #1683 | PR #1980
@@ -12007,9 +12024,7 @@ end
         // From: Issue #1683 | PR #1980
         pub fn hosts(domains: &str, psl: &Psl) -> Result<Hosts, String> {
             let mut h = Hosts::default();
-            for row in crate::config::data_rows(domains) {
-                let (name, wild) = crate::shared::dns::cdn_entry(row)
-                    .ok_or_else(|| format!("invalid domain entry {row:?}"))?;
+            for (name, wild) in crate::shared::dns::cdn_list(domains)? {
                 let root = psl
                     .root(&name)
                     .ok_or_else(|| format!("no registrable root for {name}"))?;
@@ -12990,16 +13005,6 @@ end
             Ok(gone)
         }
 
-        // What: the names of a cache domain list.
-        // Why: all and dns_only feed dns files with them.
-        // From: Issue #1683 | PR #2017
-        fn cdn_names(domains: &str) -> Vec<(String, bool)> {
-            domains
-                .lines()
-                .filter_map(crate::shared::dns::cdn_entry)
-                .collect()
-        }
-
         // What: secrets the configs embed.
         // Why: made once; restarts never change them.
         // From: Issue #1683 | PR #1858
@@ -13093,9 +13098,18 @@ end
                 }
             };
             services_files(&mut o);
-            dns_files(&mut o, sec, &cdn_names(&domains), chain);
+            let names = crate::shared::dns::cdn_list(&domains);
+            dns_files(&mut o, sec, names.as_deref().unwrap_or_default(), chain);
             dhcp_files(&mut o, sec);
             if let Err(e) = nginx_files(&mut o, &domains) {
+                o.errs.push(e);
+            }
+            // What: a bad list row is told once.
+            // Why: the nginx files name the same row.
+            // From: Issue #1683 | PR #2020
+            if let Err(e) = names
+                && !o.errs.contains(&e)
+            {
                 o.errs.push(e);
             }
             o.finish()
@@ -13110,7 +13124,8 @@ end
             // What: a secondary renders without anchors.
             // Why: it keeps the NTA until the zone list.
             // From: Issue #1683 | PR #2019
-            dns_files(&mut o, sec, &cdn_names(&domains), &Chain::default());
+            let names = crate::shared::dns::cdn_list(&domains).map_err(|e| vec![e])?;
+            dns_files(&mut o, sec, &names, &Chain::default());
             snmpd_file(&mut o);
             o.finish()
         }
