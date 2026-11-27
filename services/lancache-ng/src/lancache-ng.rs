@@ -32,7 +32,7 @@ mod cachehamster {
 
     use crate::config::Settings;
     use crate::shared::fs::{Owner, PRIVATE_MODE, Place, read_json, write};
-    use crate::shared::{clock, http, secret};
+    use crate::shared::{clock, http, human, secret};
     use base64::Engine as _;
     use futures_util::{StreamExt, stream};
     use serde::{Deserialize, Serialize};
@@ -1945,7 +1945,9 @@ mod cachehamster {
                 (app.to_string(), n)
             })
             .collect();
-        Ok(json!({"apps": apps}))
+        let human: BTreeMap<&String, String> =
+            apps.iter().map(|(a, n)| (a, human::bytes(*n))).collect();
+        Ok(json!({"apps": apps, "apps_human": human}))
     }
 
     // What: delete every file in the cache, keep folders.
@@ -1966,7 +1968,11 @@ mod cachehamster {
     fn wipe(c: &Ctx) -> Result<Value, String> {
         let mut freed = (0, 0);
         wipe_dir(&crate::shared::tidy::cache_root(&c.s)?, &mut freed)?;
-        Ok(json!({"freed": freed.0, "files": freed.1}))
+        Ok(json!({
+            "freed": freed.0,
+            "freed_human": human::bytes(freed.0),
+            "files": freed.1,
+        }))
     }
 
     // What: depots of one app from PICS, then saved.
@@ -1994,7 +2000,14 @@ mod cachehamster {
         let hit = |d: u32| evict && ids.contains(&d);
         walk_cache(&dir, &hit, &mut sizes, &mut freed)?;
         let bytes: u64 = ids.iter().filter_map(|d| sizes.get(d)).sum();
-        Ok(json!({"app": app, "bytes": bytes, "freed": freed.0, "files": freed.1}))
+        Ok(json!({
+            "app": app,
+            "bytes": bytes,
+            "bytes_human": human::bytes(bytes),
+            "freed": freed.0,
+            "freed_human": human::bytes(freed.0),
+            "files": freed.1,
+        }))
     }
 
     // What: run a Steam app job: resolve, then warm.

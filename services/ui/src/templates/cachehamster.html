@@ -272,25 +272,22 @@
   // What: cache use and evict per library game.
   // Why: empty one game, not everything.
   // From: Issue #871 | PR #1991
-  const size = function (n) {
-    return n >= 1073741824 ? (n / 1073741824).toFixed(1) + ' GiB' : Math.round(n / 1048576) + ' MiB';
-  };
   const button = function (label, look) {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'btn btn-sm ' + look; b.textContent = label;
     b.style.whiteSpace = 'nowrap';
     return b;
   };
-  function showCache(cell, id, bytes) {
+  function showCache(cell, id, bytes, shown) {
     cell.textContent = '';
     if (!bytes) { cell.textContent = LC_T.cache_none; return; }
-    cell.appendChild(document.createTextNode(size(bytes) + ' '));
+    cell.appendChild(document.createTextNode(shown + ' '));
     const b = button(LC_T.cache_evict, 'btn-ghost-red');
     b.addEventListener('click', function () {
       if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_evict_sure; return; }
       b.disabled = true; b.textContent = LC_T.loading;
       api('evict-' + id).then(function (v) {
-        cell.textContent = LC_T.cache_freed.replace('{x}', size(v.freed));
+        cell.textContent = LC_T.cache_freed.replace('{x}', v.freed_human);
       }).catch(function (e) { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_evict; window.LancacheUi.fail(e); });
     });
     cell.appendChild(b);
@@ -300,7 +297,7 @@
     const b = button(LC_T.cache_check, 'btn-slate');
     b.addEventListener('click', function () {
       b.disabled = true; b.textContent = LC_T.loading;
-      api('lookup-' + id).then(function (v) { showCache(cell, id, v.bytes); })
+      api('lookup-' + id).then(function (v) { showCache(cell, id, v.bytes, v.bytes_human); })
         .catch(function (e) { b.disabled = false; b.textContent = LC_T.cache_check; window.LancacheUi.fail(e); });
     });
     cell.appendChild(b);
@@ -309,7 +306,7 @@
     api('cached').then(function (v) {
       Object.keys(v.apps || {}).forEach(function (id) {
         const cell = document.querySelector('[data-cache-app="' + id + '"]');
-        if (cell) { showCache(cell, id, v.apps[id]); }
+        if (cell) { showCache(cell, id, v.apps[id], v.apps_human[id]); }
       });
     }).catch(function (e) { window.LancacheUi.fail(e); });
   }
