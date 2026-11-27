@@ -6626,6 +6626,13 @@ mod shared {
             format!("/zones/{}", zone_id(zone))
         }
 
+        // What: the API path below one zone, like notify.
+        // Why: every zone action extends the zone path.
+        // From: Issue #1683 | PR #2020
+        fn zone_sub(zone: &str, tail: &str) -> String {
+            format!("{}/{tail}", zone_path(zone))
+        }
+
         impl Api {
             // What: a client for one server base URL.
             // Why: auth and recursor share this code.
@@ -6856,7 +6863,7 @@ mod shared {
                 kind: &str,
                 values: &[String],
             ) -> Result<(), String> {
-                let path = format!("{}/metadata/{kind}", zone_path(zone));
+                let path = zone_sub(zone, &format!("metadata/{kind}"));
                 let body = json!({"kind": kind, "metadata": values});
                 self.send(Method::PUT, &path, Some(body)).await
             }
@@ -6890,7 +6897,7 @@ mod shared {
             // Why: a lagging secondary is pushed at once.
             // From: Issue #1683 | PR #1980
             pub async fn notify(&self, zone: &str) -> Result<(), String> {
-                self.send(Method::PUT, &format!("{}/notify", zone_path(zone)), None)
+                self.send(Method::PUT, &zone_sub(zone, "notify"), None)
                     .await
             }
 
@@ -6898,7 +6905,7 @@ mod shared {
             // Why: stale secondary resyncs without restart.
             // From: Issue #1683 | PR #1980
             pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
-                let path = format!("{}/axfr-retrieve", zone_path(zone));
+                let path = zone_sub(zone, "axfr-retrieve");
                 self.send(Method::PUT, &path, None).await
             }
 
@@ -6947,10 +6954,10 @@ mod shared {
                 if v["dnssec"].as_bool() == Some(true) {
                     return Ok(());
                 }
-                let keys = format!("{}/cryptokeys", zone_path(zone));
+                let keys = zone_sub(zone, "cryptokeys");
                 let body = json!({"keytype": "csk", "active": true, "published": true});
                 self.call(Method::POST, &keys, Some(body)).await?;
-                let rectify = format!("{}/rectify", zone_path(zone));
+                let rectify = zone_sub(zone, "rectify");
                 self.send(Method::PUT, &rectify, None).await
             }
 
@@ -6958,7 +6965,7 @@ mod shared {
             // Why: the parent zone and anchors need them.
             // From: Issue #1683 | PR #2019
             pub async fn ds(&self, zone: &str) -> Result<Vec<String>, String> {
-                let path = format!("{}/cryptokeys", zone_path(zone));
+                let path = zone_sub(zone, "cryptokeys");
                 let keys: Vec<Value> = self.get_json(&path, &format!("keys of {zone}")).await?;
                 Ok(keys
                     .iter()
