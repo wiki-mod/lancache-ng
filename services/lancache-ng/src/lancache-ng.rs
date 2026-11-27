@@ -12582,7 +12582,7 @@ end
         // What: reads the settings into a Plan.
         // Why: an unknown security mode stops the render.
         // From: Issue #1683 | PR #1980
-        fn plan(s: &Settings) -> Result<Plan, String> {
+        fn load_plan(s: &Settings) -> Result<Plan, String> {
             let strict = match s.text("PROXY_SECURITY_MODE")?.as_str() {
                 "strict" => true,
                 "lazy" => false,
@@ -12782,7 +12782,7 @@ end
             h: &Hosts,
             https: bool,
         ) -> Result<Vec<(String, String)>, String> {
-            let p = plan(s)?;
+            let p = load_plan(s)?;
             let keys = h.keys();
             let fallback = s.text("NGINX_DEFAULT_CERT")?;
             // What: client, cdn, cert maps, HTTPS off too.
@@ -12821,7 +12821,7 @@ end
         // What: strongest effect per owning container.
         // Why: one restart already covers a reload.
         // From: Issue #1683 | PR #1980
-        pub fn plan(changes: &[Change]) -> BTreeMap<String, Effect> {
+        pub fn owner_effects(changes: &[Change]) -> BTreeMap<String, Effect> {
             let mut out = BTreeMap::new();
             for c in changes {
                 let e = out.entry(c.owner.clone()).or_insert(c.effect);
@@ -13516,7 +13516,7 @@ end
         // What: per file: path, owner and new/changed/same.
         // Why: a dry run shows what an apply would touch.
         // From: Issue #1683 | PR #2020
-        pub fn plan(files: &[File]) -> Result<Vec<(&File, FileState)>, String> {
+        pub fn file_states(files: &[File]) -> Result<Vec<(&File, FileState)>, String> {
             let mut out = Vec::with_capacity(files.len());
             for f in files {
                 let state = if !f.path.exists() {
@@ -15826,7 +15826,7 @@ mod stack {
             Ok(f) => f,
             Err(errors) => return Ok(json!({"errors": errors})),
         };
-        let rows = render::plan(&files)?;
+        let rows = render::file_states(&files)?;
         let mut changes = Vec::new();
         let mut list = Vec::new();
         for (f, state) in &rows {
@@ -15840,7 +15840,7 @@ mod stack {
         }
         let stale = stale_rendered(s, &files)?;
         changes.extend(prune_change(s, &stale)?);
-        let owners: BTreeMap<String, String> = apply::plan(&changes)
+        let owners: BTreeMap<String, String> = apply::owner_effects(&changes)
             .into_iter()
             .map(|(o, e)| (o, e.word().to_string()))
             .collect();
@@ -15978,7 +15978,7 @@ mod stack {
                 Err(e) => report.push(e.into()),
             }
         }
-        let mut plan = apply::plan(&changes);
+        let mut plan = apply::owner_effects(&changes);
         // What: mode off stops dhcp; a missing one is fine.
         // Why: compose up may have started it again.
         // From: Issue #1683 | PR #1980
@@ -16086,7 +16086,7 @@ mod stack {
                 report.push(format!("certs: {n} issued").into());
                 let (grace, limit) = app.limits(new)?;
                 let rx = new.list("RELOAD_EXEC")?;
-                let mut plan = apply::plan(&[proxy_reload(new, "certs")?]);
+                let mut plan = apply::owner_effects(&[proxy_reload(new, "certs")?]);
                 let (names, _) = plan_containers(app, new, &mut plan).await;
                 let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
                 for (owner, result) in
@@ -18292,7 +18292,7 @@ mod ui {
         };
         let hide = crate::shared::secret::all_values(s)?;
         let mut list = Vec::new();
-        for (f, state) in render::plan(&files)? {
+        for (f, state) in render::file_states(&files)? {
             let path = f.path.display().to_string();
             if pick.is_some_and(|p| p != f.owner && p != path) {
                 continue;
