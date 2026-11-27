@@ -312,7 +312,7 @@ The Admin UI shows the live proxy values and hides the Kea-only subnet,
 reservation and lease editors while this mode is active.
 
 Settings of the `dnsmasq-proxy` render (`dnsmasq_conf`,
-`services/common/shared.rs`):
+`services/lancache-ng/src/lancache-ng.rs` (`mod shared`)):
 
 | Setting | Rendered as | Note |
 | --- | --- | --- |
@@ -404,7 +404,7 @@ recent configurations of one subject, not the whole install.
 
 ### 6.1 Snapshot store
 
-One store (`snapshot::Store`, `services/common/shared.rs`) owns the format:
+One store (`snapshot::Store`, `services/lancache-ng/src/lancache-ng.rs` (`mod shared`)) owns the format:
 
 - A snapshot id is a digit string, the nanoseconds since the Unix epoch; a
   longer or larger id is newer. A snapshot is one file named by the id, or a

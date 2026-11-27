@@ -20,7 +20,7 @@ Channels: `docs/combined-release-and-checklist.md`.
 | Topic | Reference |
 | --- | --- |
 | Find and fix bugs | issues with the label `bug` |
-| Multi-domain support for DNS: more than one LAN domain; in work | `DHCP_DOMAIN` in `.github/yaml/build-manifest.yml`, `managed_zones` in `services/common/shared.rs` |
+| Multi-domain support for DNS: more than one LAN domain; in work | `DHCP_DOMAIN` in `.github/yaml/build-manifest.yml`, `shared::dns::managed_zones` in `services/lancache-ng/src/lancache-ng.rs` |
 | WireGuard remote LAN access | `docs/design-plannings/design-wireguard-remote-access.md` |
 | Close port `5300` of the authoritative server to the LAN once no secondary of an older version pulls from it; timing open | the `PDNS_AUTH_PORT` port mapping of `dns` in `deploy/prod/docker-compose.yml` |
 | Downloads per device: amount from the cache (HIT) and from the internet (MISS) | nginx access log of the proxy |
@@ -28,8 +28,8 @@ Channels: `docs/combined-release-and-checklist.md`.
 | Devices that hold a DHCP lease but never query the lancache DNS | DHCP leases, recursor query log |
 | HTTP or HTTPS mode per device, with TLS errors that point to a missing CA certificate | recursor query log on `IP_HTTPS`, nginx error log |
 | DNS queries per device | recursor query log |
-| CacheHamster: prefill over HTTPS for HTTPS caching; available in `current_dev`, untested until a full release run verifies it | `services/cachehamster/` |
-| CacheHamster: platforms besides Steam | `services/cachehamster/` |
+| CacheHamster: prefill over HTTPS for HTTPS caching; available in `current_dev`, untested until a full release run verifies it | `mod cachehamster` in `services/lancache-ng/src/lancache-ng.rs` |
+| CacheHamster: platforms besides Steam | `mod cachehamster` in `services/lancache-ng/src/lancache-ng.rs` |
 
 ## Not intended
 

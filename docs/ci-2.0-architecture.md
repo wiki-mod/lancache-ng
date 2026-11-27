@@ -102,9 +102,9 @@ Full semantic-equivalence normalization for four different grammars (shell, YAML
 ## 13. Dependency graph
 CI 2.0 knows real dependencies. Example from the current project:
 ```text
-services/common
+services/lancache-ng
         |
-        +-> every image whose Dockerfile copies it
+        +-> every image whose Dockerfile builds it
 services/dns/cdn-domains.txt
         |
         +-> no image: dns, proxy and ui mount it at

@@ -21,9 +21,8 @@ A name is read in more than one place. Two examples:
   `x-logging` of `deploy/prod/docker-compose.yml`), so it is the syslog-ng
   program name and the log store directory (`LanCache-NG-proxy/`, see the
   logging matrix in `docs/architecture-ng.md`). The per-service logging
-  switches name the container through its SOT key (`LOG_SWITCHES` in
-  `services/common/config.rs`: `LOGGING_PROXY_ENABLED` to
-  `CONTAINER_NAME_PROXY`, and so on).
+  switches (`LOGGING_PROXY_ENABLED` and so on) are kept in the SOT only as
+  defaults of an older layout; no code reads them.
 - The watchdog keys `status.json` by the Compose service label of each
   container (`com.docker.compose.service`), and the Admin UI dashboard shows
   those keys.
@@ -39,9 +38,10 @@ a dashboard row.
 2. **Container name** (`LanCache-NG-proxy`, `LanCache-NG-dns`, and so on).
    It is the Docker Engine object name: the name `docker ps` shows, the
    syslog tag, and the name the Docker Engine API uses. The watchdog finds
-   the stack's containers by the compose project label of its own container,
-   not by a list of names (`own_project` and `project_containers` in
-   `services/watchdog/src/main.rs`).
+   the stack's containers by the compose project label (`COMPOSE_PROJECT`,
+   `docker::Api::project` and `docker::Api::stack` in
+   `services/lancache-ng/src/lancache-ng.rs`),
+   not by a list of names.
 
 The two are related by a fixed rule (see below) but are not the same string.
 
@@ -144,7 +144,7 @@ the Compose files and keeps the ones that exist in the checkout (today
 |---|---|---|
 | Compose project name | `deploy/prod/docker-compose.yml` `name:` | the compose project label the watchdog reads |
 | Compose service names | `deploy/prod/docker-compose.yml` and `deploy/secondary/docker-compose.yml` service keys | the `status.json` keys the watchdog writes |
-| Container names | `.github/yaml/build-manifest.yml` (`CONTAINER_NAME_PREFIX`, `CONTAINER_NAME_*`) | `container_name:` of both Compose files, `LOG_SWITCHES` in `services/common/config.rs` |
+| Container names | `.github/yaml/build-manifest.yml` (`CONTAINER_NAME_PREFIX`, `CONTAINER_NAME_*`) | `container_name:` of both Compose files |
 | Docker volumes | `deploy/prod/docker-compose.yml` top-level `volumes:` block | the service `volumes:` lists in the same file |
 | Host bind-mount directories | the required variables of `deploy/prod/docker-compose.yml` | `docs/README.md`, `setup.sh` |
 | GHCR image/package names | `.github/yaml/build-manifest.yml` (`services:`) | `docs/combined-release-and-checklist.md`, the `image:` lines of `deploy/prod` and `deploy/secondary` |

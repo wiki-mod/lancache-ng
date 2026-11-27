@@ -30,7 +30,7 @@ One owner per decision. No component undoes the work of another.
 
 | Who | Does | Does not |
 | --- | --- | --- |
-| `shared.rs` | Building blocks: render configs, Docker calls, file tidy-up | Decide anything |
+| `mod shared` (`services/lancache-ng/src/lancache-ng.rs`) | Building blocks: render configs, Docker calls, file tidy-up | Decide anything |
 | ui | Saves settings, renders and writes every config, wakes the owner container, records user start/stop in `SERVICES_STOPPED` | Run check loops or cleanup |
 | Watchdog | Decides *when*: health checks, restarts sick containers, daily cleanup, writes the alarm file | Write configs |
 | OpenRC (inside a container) | Keeps the programs of its container alive | Touch other containers |
@@ -73,7 +73,7 @@ Healthchecks:
    `build-manifest.yml`. A file value with `$` is a Compose expression; the
    container env holds its resolved value.
 2. The ui renders every config from the SOT and the saved settings
-   (`render::all` in `shared.rs`) and writes changed files into the
+   (`shared::render::all` in `services/lancache-ng/src/lancache-ng.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.
 3. The ui wakes only the owners with changes, with the strongest needed
    action (reload or restart, `apply::plan`).

@@ -709,7 +709,7 @@ With a real primary and at least one real secondary on another host
 
 ### 10.7 Watchdog
 
-The watchdog (`services/watchdog`) lists every container of the compose project
+The watchdog (`mod watchdog` in `services/lancache-ng/src/lancache-ng.rs`) lists every container of the compose project
 and reads its Docker health each round (`CHECK_INTERVAL`).
 
 - A container whose health is failing for `RESTART_AFTER` rounds in a row is

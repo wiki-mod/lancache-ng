@@ -32,7 +32,7 @@ The program list of each container is the SOT field `processes` in
 ## Proxy
 
 Provided by `services/ui/nginx/*` templates and the generator `nginx_conf` in
-`services/common/shared.rs`.
+`services/lancache-ng/src/lancache-ng.rs` (`mod shared`).
 
 - **HTTP cache.** `conf.d/http.conf` listens on `PROXY_HTTP_PORT` and sends
   requests through `proxy-params.conf`: cache `lancache`, key
@@ -69,7 +69,7 @@ Provided by `services/ui/nginx/*` templates and the generator `nginx_conf` in
 ## DNS
 
 Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
-`services/common/shared.rs`.
+`services/lancache-ng/src/lancache-ng.rs` (`mod shared`).
 
 - **Cache routing.** `recursor_conf::rpz` builds the RPZ zone that answers every
   cache domain; `recursor_conf::lua` loads it and sets no-DNSSEC-check entries
@@ -99,16 +99,16 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
   The Admin UI routes cover cache domains, LAN A records and PTR records
   (`/domains/*`).
 - **Replication state.** `peer::zone_state` compares serials with
-  `dns::serial_cmp` (RFC 1982); the watchdog (`dns_sync`) and the Admin UI
-  (`secondary_health`) report it.
+  `dns::serial_cmp` (RFC 1982); the watchdog (`watchdog::dns_sync`) and the Admin UI
+  (`dns::secondary_health`) report it.
 - **Snapshots.** `snapshot::Store` keeps numbered known-good copies per zone;
-  `rollback`, route `/domains/zone-rollback` and the CLI `zone-snapshots` and
+  `dns::rollback`, route `/domains/zone-rollback` and the CLI `zone-snapshots` and
   `zone-rollback` restore one.
 - **Secondaries.** The Admin UI registers, removes, rotates the token of,
-  checks and re-addresses secondaries (`register`, `secondary_action`) and
-  rotates the TSIG key (`rotate_tsig`).
+  checks and re-addresses secondaries (`ui::register`, `ui::secondary_action`) and
+  rotates the TSIG key (`dns::rotate_tsig`).
 - **Secondary domain sync.** The primary's Admin UI makes each registered
-  secondary hold exactly its zones (`match_zones` via `peer_follows`): right
+  secondary hold exactly its zones (`peer::match_zones` via `dns::peer_follows`): right
   after its own zones change and in every secondary check, over the secondary's
   pdns API, creating zones with TSIG and deleting the ones it no longer serves.
   On the secondary the dns helper `lancache-dns` (services/dns, a process in
@@ -120,7 +120,7 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
 ## DHCP
 
 Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
-`services/common/shared.rs`. The Admin UI writes the mode (`off`, `kea`,
+`services/lancache-ng/src/lancache-ng.rs` (`mod shared`). The Admin UI writes the mode (`off`, `kea`,
 `dnsmasq-proxy`, `dnsmasq-relay`) and OpenRC starts only that mode's programs.
 
 ### Kea mode
@@ -158,7 +158,7 @@ Provided by `dhcp`, `kea_conf`, `kea`, `dhcp_probe` and `dnsmasq_conf` in
 
 ## Admin UI
 
-Provided by `services/ui/src/main.rs` and `services/ui/src/templates/`.
+Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/ui/src/templates/`.
 
 - **Pages.** `/` dashboard, `/setup`, `/logs`, `/stats`, `/domains`, `/dhcp`,
   `/cachehamster`; texts in German and English (`services/ui/src/lang/`). Every
@@ -225,10 +225,10 @@ file the Admin UI reads (`publish`, `WATCHDOG_ALARM_FILE`):
 
 ## CacheHamster
 
-`services/cachehamster` runs as a daemon in `services` and is controlled by
-JSON commands that the Admin UI executes in that container (`hamster`).
+`mod cachehamster` in `services/lancache-ng/src/lancache-ng.rs` runs as a daemon in `services` and is controlled by
+JSON commands that the Admin UI executes in that container (`ui::hamster`).
 
-- **Steam login.** QR login (`login_begin`, `login_poll`); the session is stored
+- **Steam login.** QR login (`cachehamster::login_begin`, `cachehamster::login_poll`); the session is stored
   sealed (`secret::seal`); `logout` removes it.
 - **Library.** `library` lists the games of the logged-in account.
 - **Jobs.** `add` queues a job for a Steam app (`Target::SteamApp`) or for URLs
