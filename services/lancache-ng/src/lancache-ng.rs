@@ -3768,8 +3768,38 @@ mod dhcp {
     // Why: page and CLI repair Kea the same way.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_rollback(s: &Settings, id: &str) -> Result<(), String> {
-        let cfg: Value = kea_store(s)?.read(id)?;
-        kea_api(s)?.set_config(cfg).await
+        let store = kea_store(s)?;
+        let cfg: Value = store.read(id)?;
+        let api = kea_api(s)?;
+        // What: the state before is kept as a snapshot.
+        // Why: a rollback can itself be rolled back.
+        // From: Issue #1683 | PR #2020
+        save_kea(&store, &live_config(&api).await?)?;
+        api.set_config(cfg.clone()).await?;
+        // What: the restored state is the newest snapshot.
+        // Why: as for DNS: newest snapshot is what runs.
+        // From: Issue #1683 | PR #2020
+        save_kea(&store, &cfg)
+    }
+
+    // What: the running Kea config without its hash.
+    // Why: snapshots and edits hold what config-set takes.
+    // From: Issue #1683 | PR #2020
+    async fn live_config(api: &kea::Api) -> Result<Value, String> {
+        let mut cfg = api.config().await?;
+        if let Some(top) = cfg.as_object_mut() {
+            top.remove("hash");
+        }
+        Ok(cfg)
+    }
+
+    // What: store one Kea config as a snapshot.
+    // Why: edits and rollbacks write snapshots alike.
+    // From: Issue #1683 | PR #2020
+    fn save_kea(store: &snapshot::Store, cfg: &Value) -> Result<(), String> {
+        store
+            .save(&serde_json::to_vec(cfg).map_err(|e| e.to_string())?)
+            .map(drop)
     }
 
     // What: change Kea subnets with a closure.
@@ -3780,17 +3810,12 @@ mod dhcp {
         edit: impl FnOnce(&mut Vec<Value>) -> Result<(), String>,
     ) -> Result<(), String> {
         let api = kea_api(s)?;
-        let mut cfg = api.config().await?;
-        if let Some(top) = cfg.as_object_mut() {
-            top.remove("hash");
-        }
+        let mut cfg = live_config(&api).await?;
         let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
         kea_conf::set_subnets(&mut cfg, subnets);
         api.set_config(cfg.clone()).await?;
-        let store = kea_store(s)?;
-        store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
-        Ok(())
+        save_kea(&kea_store(s)?, &cfg)
     }
 
     // What: Kea subnet from typed subnet input.
