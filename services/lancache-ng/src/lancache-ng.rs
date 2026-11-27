@@ -3319,7 +3319,7 @@ mod dhcp {
     use crate::dns::{chosen_lan_zone, main_domain_fields};
     use crate::shared::dhcp::{Mode as DhcpMode, option_data};
     use crate::shared::{docker, fs, http, secret};
-    use crate::ui::{App, Fields, commit, dns_pair, field, tr};
+    use crate::ui::{App, Fields, commit, tr};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -3459,46 +3459,88 @@ mod dhcp {
         })
     }
 
-    // What: the main subnet form also saves settings.
-    // Why: the settings are the only source of it.
+    // What: the fields of one Kea subnet.
+    // Why: typed input; no form or route names here.
+    // From: Issue #1683 | PR #2020
+    pub(crate) struct SubnetInput {
+        pub subnet: String,
+        pub gateway: String,
+        pub dns: Vec<String>,
+        pub domain: String,
+        pub ntp_servers: String,
+        pub pool_start: String,
+        pub pool_end: String,
+        pub lease_time: Option<u64>,
+    }
+
+    // What: one change of the Kea configuration.
+    // Why: page, REST and CLI name it by type.
+    // From: Issue #1683 | PR #2020
+    pub(crate) enum KeaEdit {
+        SubnetAdd(SubnetInput),
+        SubnetUpdate(u64, SubnetInput),
+        SubnetRemove(u64),
+        Option {
+            subnet: u64,
+            code: u8,
+            data: Option<String>,
+        },
+        Static {
+            subnet: u64,
+            mac: String,
+            ip: String,
+            host: String,
+            add: bool,
+        },
+        LeaseRelease(String),
+        Rollback(String),
+    }
+
+    // What: a Kea change; the main subnet keeps settings.
+    // Why: it cannot go; its edit sets DHCP_SUBNET...
     // From: Issue #1683
-    pub(crate) async fn main_subnet(
-        app: &App,
-        s: &Settings,
-        op: &str,
-        get: &(dyn Fn(&str) -> String + Sync),
-    ) -> Result<(), String> {
-        let main = s.uint("DHCP_SUBNET_ID")?.to_string();
-        let hit = get("id") == main;
-        if hit && op == "UI_ROUTE_SUBNET_REMOVE" {
+    pub(crate) async fn kea_change(app: &App, s: &Settings, edit: &KeaEdit) -> Result<(), String> {
+        let main = s.uint("DHCP_SUBNET_ID")?;
+        if matches!(edit, KeaEdit::SubnetRemove(id) if *id == main) {
             return Err(tr("err_main_subnet_remove"));
         }
-        kea_action(s, op, get).await?;
-        if !(hit && op == "UI_ROUTE_SUBNET_UPDATE") {
-            return Ok(());
+        kea_action(s, edit).await?;
+        match edit {
+            KeaEdit::SubnetUpdate(id, input) if *id == main => {
+                commit(app, main_subnet_settings(s, input)?).await
+            }
+            _ => Ok(()),
         }
-        let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
+    }
+
+    // What: SOT keys the main subnet is kept in.
+    // Why: the settings are the only source of it.
+    // From: Issue #1683
+    pub(crate) fn main_subnet_settings(
+        s: &Settings,
+        input: &SubnetInput,
+    ) -> Result<Fields, String> {
         let mut f = Fields::new();
-        for (key, field) in [
-            ("DHCP_SUBNET", "subnet"),
-            ("DHCP_RANGE_START", "pool_start"),
-            ("DHCP_RANGE_END", "pool_end"),
-            ("DHCP_GATEWAY", "gateway"),
-            ("DHCP_NTP_SERVERS", "ntp_servers"),
+        for (key, value) in [
+            ("DHCP_SUBNET", &input.subnet),
+            ("DHCP_RANGE_START", &input.pool_start),
+            ("DHCP_RANGE_END", &input.pool_end),
+            ("DHCP_GATEWAY", &input.gateway),
+            ("DHCP_NTP_SERVERS", &input.ntp_servers),
         ] {
-            f.insert(key.into(), get(field));
+            f.insert(key.into(), value.clone());
         }
         // What: main subnet domain sets main LAN domain.
         // Why: picking an extra swaps it with the old main.
         // From: Issue #1683
-        if !get("domain").is_empty() {
-            f.extend(main_domain_fields(s, &get("domain"))?);
+        if !input.domain.is_empty() {
+            f.extend(main_domain_fields(s, &input.domain)?);
         }
-        if !get("lease_time").is_empty() {
-            f.insert("DHCP_LEASE_TIME".into(), get("lease_time"));
+        if let Some(life) = input.lease_time {
+            f.insert("DHCP_LEASE_TIME".into(), life.to_string());
         }
-        f.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
-        commit(app, f).await
+        f.insert("DHCP_DNS_SERVERS".into(), input.dns.join(" "));
+        Ok(f)
     }
 
     // What: Kea counters, newest value per name.
@@ -3609,28 +3651,23 @@ mod dhcp {
         Ok(())
     }
 
-    // What: Kea subnet from the subnet form.
+    // What: Kea subnet from typed subnet input.
     // Why: named options; code options and hosts kept.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn subnet_from(
-        get: &(dyn Fn(&str) -> String + Sync),
-        id: u64,
-        old: Option<&Value>,
-    ) -> Value {
-        let dns = dns_pair(get("dns_primary"), get("dns_secondary"));
-        let hosts: Vec<String> = config::list_items(&get("ntp_servers"))
+    pub(crate) fn subnet_from(input: &SubnetInput, id: u64, old: Option<&Value>) -> Value {
+        let hosts: Vec<String> = config::list_items(&input.ntp_servers)
             .map(str::to_string)
             .collect();
         let ntp = crate::shared::dhcp::ipv4_of(&hosts, "ntp_servers");
         let mut opts =
-            crate::shared::kea_conf::named_rows(&get("gateway"), &dns, &get("domain"), &ntp);
+            crate::shared::kea_conf::named_rows(&input.gateway, &input.dns, &input.domain, &ntp);
         if let Some(old) = old {
             opts.extend(crate::shared::kea_conf::coded_options(old));
         }
-        let pool = crate::shared::kea_conf::pool_text(&get("pool_start"), &get("pool_end"));
-        let mut sn = json!({"id": id, "subnet": get("subnet"), "pools": [{"pool": pool}],
+        let pool = crate::shared::kea_conf::pool_text(&input.pool_start, &input.pool_end);
+        let mut sn = json!({"id": id, "subnet": input.subnet, "pools": [{"pool": pool}],
                         "option-data": opts});
-        if let Ok(life) = get("lease_time").parse::<u64>() {
+        if let Some(life) = input.lease_time {
             sn["valid-lifetime"] = life.into();
         }
         if let Some(hosts) = old.and_then(|o| o.get("reservations")) {
@@ -3647,90 +3684,51 @@ mod dhcp {
         found.ok_or_else(|| tr("err_no_subnet").replace("{id}", &id.to_string()))
     }
 
-    // What: SOT keys of the proxy and relay forms.
-    // Why: field dhcp_x maps to key DHCP_X.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
-        let mut out = Fields::new();
-        for (k, v) in form {
-            let ours = k.starts_with("dhcp_") || k.starts_with("upstream_");
-            if !ours || k.starts_with("dhcp_dns_") {
-                continue;
-            }
-            let key = k
-                .to_ascii_uppercase()
-                .replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS");
-            out.insert(key, v.trim().to_string());
-        }
-        if proxy {
-            let get = |k: &str| field(form, k);
-            let dns = dns_pair(get("dhcp_dns_primary"), get("dhcp_dns_secondary"));
-            out.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
-        }
-        out
-    }
-
     // What: Kea subnet, option and host edits.
     // Why: all go through kea_edit.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn kea_action(
-        s: &Settings,
-        op: &str,
-        get: &(dyn Fn(&str) -> String + Sync),
-    ) -> Result<(), String> {
-        let num = |k: &str| {
-            get(k)
-                .parse::<u64>()
-                .map_err(|_| format!("{k} must be a number"))
-        };
+    pub(crate) async fn kea_action(s: &Settings, edit: &KeaEdit) -> Result<(), String> {
         // What: a subnet domain must be a LAN domain.
         // Why: DDNS and DNS answer only for those zones.
         // From: Issue #1683
-        if matches!(op, "UI_ROUTE_SUBNET_ADD" | "UI_ROUTE_SUBNET_UPDATE")
-            && !get("domain").is_empty()
+        if let KeaEdit::SubnetAdd(input) | KeaEdit::SubnetUpdate(_, input) = edit
+            && !input.domain.is_empty()
         {
-            chosen_lan_zone(s, &get("domain"))?;
+            chosen_lan_zone(s, &input.domain)?;
         }
-        match op {
-            "UI_ROUTE_SUBNET_ADD" => {
+        match edit {
+            KeaEdit::SubnetAdd(input) => {
                 kea_edit(s, |l| {
                     let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
-                    let mut sn = subnet_from(get, next, None);
+                    let mut sn = subnet_from(input, next, None);
                     crate::shared::kea_conf::subnet_ddns_suffix(s, &mut sn)?;
                     l.push(sn);
                     Ok(())
                 })
                 .await
             }
-            "UI_ROUTE_SUBNET_UPDATE" => {
-                let id = num("id")?;
+            KeaEdit::SubnetUpdate(id, input) => {
                 kea_edit(s, |l| {
-                    let sn = subnet_mut(l, id)?;
-                    *sn = subnet_from(get, id, Some(&sn.clone()));
+                    let sn = subnet_mut(l, *id)?;
+                    *sn = subnet_from(input, *id, Some(&sn.clone()));
                     crate::shared::kea_conf::subnet_ddns_suffix(s, sn)
                 })
                 .await
             }
-            "UI_ROUTE_SUBNET_REMOVE" => {
-                let id = num("id")?;
+            KeaEdit::SubnetRemove(id) => {
                 kea_edit(s, |l| {
-                    l.retain(|x| x["id"].as_u64() != Some(id));
+                    l.retain(|x| x["id"].as_u64() != Some(*id));
                     Ok(())
                 })
                 .await
             }
-            "UI_ROUTE_SUBNET_OPTION_ADD" | "UI_ROUTE_SUBNET_OPTION_REMOVE" => {
-                let (id, code) = (
-                    num("subnet_id")?,
-                    crate::shared::dhcp::option_code(&get("code"))?,
-                );
-                let data = get("data");
+            KeaEdit::Option { subnet, code, data } => {
                 kea_edit(s, |l| {
-                    let sn = subnet_mut(l, id)?;
+                    let sn = subnet_mut(l, *subnet)?;
                     let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
-                    let same = |o: &Value| o["code"].as_u64() == Some(u64::from(code));
+                    let same = |o: &Value| o["code"].as_u64() == Some(u64::from(*code));
                     opts.retain(|o| !same(o) || !crate::shared::kea_conf::is_coded(o));
-                    if op == "UI_ROUTE_SUBNET_OPTION_ADD" {
+                    if let Some(data) = data {
                         opts.push(json!({"code": code, "data": data}));
                     }
                     sn["option-data"] = opts.into();
@@ -3738,14 +3736,18 @@ mod dhcp {
                 })
                 .await
             }
-            "UI_ROUTE_STATIC_ADD" | "UI_ROUTE_STATIC_REMOVE" => {
-                let id = num("subnet_id")?;
-                let (mac, ip, host) = (get("mac"), get("ip"), get("hostname"));
+            KeaEdit::Static {
+                subnet,
+                mac,
+                ip,
+                host,
+                add,
+            } => {
                 kea_edit(s, |l| {
-                    let sn = subnet_mut(l, id)?;
+                    let sn = subnet_mut(l, *subnet)?;
                     let mut hosts = sn["reservations"].as_array().cloned().unwrap_or_default();
                     hosts.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
-                    if op == "UI_ROUTE_STATIC_ADD" {
+                    if *add {
                         hosts.push(json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
                     }
                     sn["reservations"] = hosts.into();
@@ -3753,9 +3755,8 @@ mod dhcp {
                 })
                 .await
             }
-            "UI_ROUTE_LEASE_RELEASE" => kea_api(s)?.release(&get("ip")).await,
-            "UI_ROUTE_KEA_ROLLBACK" => kea_rollback(s, &get("snapshot_id")).await,
-            _ => Err(tr("err_unknown_dhcp_action").replace("{op}", op)),
+            KeaEdit::LeaseRelease(ip) => kea_api(s)?.release(ip).await,
+            KeaEdit::Rollback(id) => kea_rollback(s, id).await,
         }
     }
 
@@ -13685,8 +13686,7 @@ end
 mod ui {
     use crate::config::{self, Settings, process_env};
     use crate::dhcp::{
-        dhcp_probe_cli, dhcp_stays_off, dnsmasq_fields, kea_snapshots, kea_state, kea_store,
-        main_subnet,
+        dhcp_probe_cli, dhcp_stays_off, kea_change, kea_snapshots, kea_state, kea_store,
     };
     use crate::dns::{
         answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones,
@@ -15088,9 +15088,96 @@ mod ui {
             DhcpOp::Proxy | DhcpOp::Relay => {
                 commit(&app, dnsmasq_fields(&form, matches!(op, DhcpOp::Proxy))).await
             }
-            other => main_subnet(&app, &s, other.key(), &get).await,
+            other => match kea_edit_of(other, &get) {
+                Ok(edit) => kea_change(&app, &s, &edit).await,
+                Err(e) => Err(e),
+            },
         };
         finish(result, &s.text("UI_PAGE_DHCP")?)
+    }
+
+    // What: subnet fields of a DHCP page form.
+    // Why: form field names stay in the ui.
+    // From: Issue #1683 | PR #2020
+    fn subnet_input(get: &dyn Fn(&str) -> String) -> crate::dhcp::SubnetInput {
+        crate::dhcp::SubnetInput {
+            subnet: get("subnet"),
+            gateway: get("gateway"),
+            dns: dns_pair(get("dns_primary"), get("dns_secondary")),
+            domain: get("domain"),
+            ntp_servers: get("ntp_servers"),
+            pool_start: get("pool_start"),
+            pool_end: get("pool_end"),
+            lease_time: get("lease_time").parse().ok(),
+        }
+    }
+
+    // What: the Kea change one DHCP form asks for.
+    // Why: page, REST and CLI post the same fields.
+    // From: Issue #1683 | PR #2020
+    fn kea_edit_of(
+        op: DhcpOp,
+        get: &dyn Fn(&str) -> String,
+    ) -> Result<crate::dhcp::KeaEdit, String> {
+        use crate::dhcp::KeaEdit;
+        let num = |k: &str| {
+            get(k)
+                .parse::<u64>()
+                .map_err(|_| format!("{k} must be a number"))
+        };
+        let code = || crate::shared::dhcp::option_code(&get("code"));
+        let host = |add: bool| -> Result<KeaEdit, String> {
+            Ok(KeaEdit::Static {
+                subnet: num("subnet_id")?,
+                mac: get("mac"),
+                ip: get("ip"),
+                host: get("hostname"),
+                add,
+            })
+        };
+        Ok(match op {
+            DhcpOp::SubnetAdd => KeaEdit::SubnetAdd(subnet_input(get)),
+            DhcpOp::SubnetUpdate => KeaEdit::SubnetUpdate(num("id")?, subnet_input(get)),
+            DhcpOp::SubnetRemove => KeaEdit::SubnetRemove(num("id")?),
+            DhcpOp::SubnetOptionAdd => KeaEdit::Option {
+                subnet: num("subnet_id")?,
+                code: code()?,
+                data: Some(get("data")),
+            },
+            DhcpOp::SubnetOptionRemove => KeaEdit::Option {
+                subnet: num("subnet_id")?,
+                code: code()?,
+                data: None,
+            },
+            DhcpOp::StaticAdd => host(true)?,
+            DhcpOp::StaticRemove => host(false)?,
+            DhcpOp::LeaseRelease => KeaEdit::LeaseRelease(get("ip")),
+            DhcpOp::KeaRollback => KeaEdit::Rollback(get("snapshot_id")),
+            other => return Err(tr("err_unknown_dhcp_action").replace("{op}", other.key())),
+        })
+    }
+
+    // What: SOT keys of the proxy and relay forms.
+    // Why: field dhcp_x maps to key DHCP_X.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn dnsmasq_fields(form: &Fields, proxy: bool) -> Fields {
+        let mut out = Fields::new();
+        for (k, v) in form {
+            let ours = k.starts_with("dhcp_") || k.starts_with("upstream_");
+            if !ours || k.starts_with("dhcp_dns_") {
+                continue;
+            }
+            let key = k
+                .to_ascii_uppercase()
+                .replace("DHCP_PROXY_CUSTOM_OPTIONS", "DHCP_CUSTOM_OPTIONS");
+            out.insert(key, v.trim().to_string());
+        }
+        if proxy {
+            let get = |k: &str| field(form, k);
+            let dns = dns_pair(get("dhcp_dns_primary"), get("dhcp_dns_secondary"));
+            out.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
+        }
+        out
     }
 
     // What: DHCP precheck on demand.
