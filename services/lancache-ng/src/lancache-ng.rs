@@ -4665,6 +4665,10 @@ mod dns {
         // Why: a failed flush is retried next round.
         // From: Issue #1683 | PR #2020
         flushed: peer::Flushed,
+        // What: own and off cache domains, last read.
+        // Why: a primary that is down leaves the RPZ.
+        // From: Issue #1683 | PR #2020
+        cdn: Option<(Vec<String>, Vec<String>)>,
     }
 
     // What: TSIG key, setup zones without removal, binding.
@@ -4676,35 +4680,20 @@ mod dns {
         peer::ensure_tsig(s, &key).await
     }
 
-    // What: settings with the cache domains of the primary.
-    // Why: its own and off lists decide the RPZ here too.
+    // What: own and off cache domains it published.
+    // Why: its lists decide the RPZ of a secondary too.
     // From: Issue #1683 | PR #2020
-    async fn with_primary_cdn(s: &Settings, zones: &[String]) -> Settings {
-        let read = async {
-            let setup = s.list("DNS_SECONDARY_ZONES")?;
-            let Some(zone) = zones.first().or(setup.first()) else {
-                return Ok(None);
-            };
-            let api = peer::api_at(s, &s.text("DNS_XFR_PRIMARY")?)?;
-            let values = api.metadata(zone, peer::CDN_META).await?;
-            let Some((custom, off)) = peer::cdn_from_meta(&values) else {
-                return Ok(None);
-            };
-            s.with("CDN_CUSTOM_DOMAINS", &config::join_items(&custom))?
-                .with("CDN_DISABLED_DOMAINS", &config::join_items(&off))
-                .map(Some)
+    async fn primary_cdn(
+        s: &Settings,
+        zones: &[String],
+    ) -> Result<Option<(Vec<String>, Vec<String>)>, String> {
+        let setup = s.list("DNS_SECONDARY_ZONES")?;
+        let Some(zone) = zones.first().or(setup.first()) else {
+            return Ok(None);
         };
-        // What: no answer keeps the lists this host has.
-        // Why: a primary that is down keeps the RPZ whole.
-        // From: Issue #1683 | PR #2020
-        match read.await {
-            Ok(Some(new)) => new,
-            Ok(None) => s.clone(),
-            Err(e) => {
-                eprintln!("lancache-dns: cache domains of the primary: {e}");
-                s.clone()
-            }
-        }
+        let api = peer::api_at(s, &s.text("DNS_XFR_PRIMARY")?)?;
+        let values = api.metadata(zone, peer::CDN_META).await?;
+        Ok(peer::cdn_from_meta(&values))
     }
 
     // What: one round towards the wanted state.
@@ -4719,8 +4708,30 @@ mod dns {
             Ok(zones) => zones.keys().cloned().collect(),
             Err(_) => s.list("DNS_SECONDARY_ZONES")?,
         };
-        let s = &with_primary_cdn(s, &names).await;
-        if write_for(s, &names)? {
+        // What: no answer keeps the last lists read.
+        // Why: a primary that is down keeps the RPZ whole.
+        // From: Issue #1683 | PR #2020
+        let mut kept = false;
+        match primary_cdn(s, &names).await {
+            Ok(Some(lists)) => done.cdn = Some(lists),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("lancache-dns: cache domains of the primary: {e}");
+                // What: after a restart the files stay.
+                // Why: own lists would undo the primary's.
+                // From: Issue #1683 | PR #2020
+                let rpz = s.text(&recursor_conf::Which::Http.key("RPZ_FILE"))?;
+                kept = done.cdn.is_none() && Path::new(&rpz).exists();
+            }
+        }
+        let view = match &done.cdn {
+            Some((custom, off)) => s
+                .with("CDN_CUSTOM_DOMAINS", &config::join_items(custom))?
+                .with("CDN_DISABLED_DOMAINS", &config::join_items(off))?,
+            None => s.clone(),
+        };
+        let s = &view;
+        if !kept && write_for(s, &names)? {
             done.reload_due = true;
         }
         let zones = live?;
