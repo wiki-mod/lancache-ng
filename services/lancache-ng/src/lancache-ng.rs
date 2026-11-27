@@ -3837,13 +3837,14 @@ mod dns {
     use crate::shared::dns::Role;
     use crate::shared::peer::{self, PeerZone, ZoneState};
     use crate::shared::tool;
-    use crate::shared::{apply, fs, render, secret};
+    use crate::shared::{apply, fs, pdns, recursor_conf, render, secret};
     use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
     use crate::ui::{Failing, or_stop, primary_https_ip, tr};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
+    use std::net::{IpAddr, SocketAddr};
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // What: the zones the own pdns pulls, with serials.
     // Why: the primary sets them; the recursors follow.
@@ -3858,9 +3859,7 @@ mod dns {
     // What: serial of each zone in a zone list, by name.
     // Why: the follow and flush rounds compare by name.
     // From: Issue #1683 | PR #2020
-    fn serial_map(
-        zones: impl IntoIterator<Item = crate::shared::pdns::Zone>,
-    ) -> BTreeMap<String, u32> {
+    fn serial_map(zones: impl IntoIterator<Item = pdns::Zone>) -> BTreeMap<String, u32> {
         zones.into_iter().map(|z| (z.name, z.serial)).collect()
     }
 
@@ -4287,7 +4286,6 @@ mod dns {
     // Why: PTR rows live in in-addr.arpa or ip6.arpa.
     // From: Issue #1683 | PR #1980
     pub(crate) fn reverse_name(ip: &str) -> Result<String, String> {
-        use std::net::IpAddr;
         let addr = crate::shared::dns::parse_ip(ip)?;
         Ok(match addr {
             IpAddr::V4(v4) => {
@@ -4423,11 +4421,7 @@ mod dns {
     // What: keep the zone's records after a change.
     // Why: each change can be undone later.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn snapshot(
-        s: &Settings,
-        api: &crate::shared::pdns::Api,
-        zone: &str,
-    ) -> Result<(), String> {
+    pub(crate) async fn snapshot(s: &Settings, api: &pdns::Api, zone: &str) -> Result<(), String> {
         let rows = api.rrsets(zone).await?;
         let body = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
         let store = zone_store(s, zone)?;
@@ -4556,7 +4550,7 @@ mod dns {
     // What: PTR rows of each private reverse zone.
     // Why: the DNS page lists them per zone with the host.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn ptr_rows(s: &Settings, api: &crate::shared::pdns::Api) -> Vec<Value> {
+    pub(crate) async fn ptr_rows(s: &Settings, api: &pdns::Api) -> Vec<Value> {
         let mut out = Vec::new();
         for zone in crate::shared::dns::private_reverse_zones(s) {
             let mut rows = Vec::new();
@@ -4714,7 +4708,7 @@ mod dns {
     // Why: TXT needs quotes; target names end in a dot.
     // From: Issue #1683 | PR #1980
     pub(crate) fn canonical(kind: &str, c: &str) -> String {
-        let dot = crate::shared::pdns::zone_id;
+        let dot = pdns::zone_id;
         match kind {
             "TXT" if !c.starts_with('"') => format!("\"{}\"", c.replace('"', "\\\"")),
             "CNAME" => dot(c),
@@ -4753,7 +4747,7 @@ mod dns {
             ttl = check_ttl(s, input.ttl)?;
         }
         let api = peer::own_api(s)?;
-        let host = crate::shared::pdns::zone_id(&name);
+        let host = pdns::zone_id(&name);
         // What: place of each wanted PTR, checked first.
         // Why: no A is saved when its PTR cannot follow.
         // From: Issue #1683 | PR #2019
@@ -4804,7 +4798,7 @@ mod dns {
     // From: Issue #1683 | PR #2020
     async fn write_rrset(
         s: &Settings,
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         zone: &str,
         (name, kind): (&str, &str),
         ttl: u32,
@@ -4819,7 +4813,7 @@ mod dns {
     // Why: PTR checks ask what a name holds right now.
     // From: Issue #1683 | PR #2019
     pub(crate) async fn rrset_contents(
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         zone: &str,
         name: &str,
         kind: &str,
@@ -4832,7 +4826,7 @@ mod dns {
     // Why: contents, SOA and ensure find a row one way.
     // From: Issue #1683 | PR #2020
     fn find_rrset<'a>(rows: &'a [Value], name: &str, kind: &str) -> Option<&'a Value> {
-        let id = crate::shared::pdns::zone_id(name);
+        let id = pdns::zone_id(name);
         rows.iter()
             .find(|r| r["name"] == id.as_str() && r["type"] == kind)
     }
@@ -4877,7 +4871,7 @@ mod dns {
         let mut contents = Vec::new();
         if add {
             ttl = check_ttl(s, input.ttl)?;
-            contents.push(crate::shared::pdns::zone_id(&input.hostname));
+            contents.push(pdns::zone_id(&input.hostname));
         }
         let api = peer::own_api(s)?;
         write_rrset(s, &api, &zone, (&name, "PTR"), ttl, &contents).await
@@ -5018,7 +5012,7 @@ mod dns {
                 }
                 Err(e) => {
                     let f = failing.entry(name.clone()).or_insert(Failing {
-                        since: std::time::Instant::now(),
+                        since: Instant::now(),
                         count: 0,
                     });
                     f.count += 1;
@@ -5049,7 +5043,7 @@ mod dns {
     // From: Issue #1683
     pub(crate) async fn peer_follows(
         s: &Settings,
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         address: &str,
     ) -> Result<(), String> {
         let masters = vec![crate::shared::dns::host_port(
@@ -5084,7 +5078,7 @@ mod dns {
     // From: Issue #1683
     pub(crate) async fn check_peer(
         s: &Settings,
-        ours: &[crate::shared::pdns::Zone],
+        ours: &[pdns::Zone],
         address: &str,
     ) -> Result<Result<(), String>, String> {
         let aa = answers_aa(s, address, &crate::shared::dns::lan_zone(s)?).await;
@@ -5151,7 +5145,7 @@ mod dns {
         // What: an error only after the grace time.
         // Why: a planned dns restart must log nothing.
         // From: Issue #1683 | PR #1980
-        let mut down: Option<std::time::Instant> = None;
+        let mut down: Option<Instant> = None;
         let mut logged = false;
         loop {
             let s = app.settings();
@@ -5163,7 +5157,7 @@ mod dns {
             };
             match flush_round(&s, &mut seen).await {
                 Err(e) => {
-                    let since = *down.get_or_insert_with(std::time::Instant::now);
+                    let since = *down.get_or_insert_with(Instant::now);
                     if !logged && since.elapsed().as_secs() >= grace {
                         eprintln!("ui: cache flush fails for {grace} s: {e}");
                         logged = true;
@@ -5203,12 +5197,12 @@ mod dns {
     // What: the live chain; on error NTA everywhere.
     // Why: no proof must never mean SERVFAIL.
     // From: Issue #1683 | PR #2019
-    pub(crate) async fn dnssec_chain(s: &Settings) -> crate::shared::recursor_conf::Chain {
+    pub(crate) async fn dnssec_chain(s: &Settings) -> recursor_conf::Chain {
         match read_chain(s).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("ui: DNSSEC anchors off: {e}");
-                crate::shared::recursor_conf::Chain::default()
+                recursor_conf::Chain::default()
             }
         }
     }
@@ -5258,10 +5252,7 @@ mod dns {
     // What: address, RD flag and wait of a target word.
     // Why: query and soa-probe name servers one way.
     // From: Issue #1683 | PR #2020
-    fn target_addr(
-        s: &Settings,
-        target: &str,
-    ) -> Result<(std::net::SocketAddr, bool, Duration), String> {
+    fn target_addr(s: &Settings, target: &str) -> Result<(SocketAddr, bool, Duration), String> {
         let port = s.num::<u16>("DNS_PORT")?;
         // What: http, https, auth or an address.
         // Why: the SOT names each server; auth gets no RD.
@@ -5282,7 +5273,7 @@ mod dns {
                 None => (other.to_string(), port, true),
             },
         };
-        let addr = std::net::SocketAddr::new(crate::shared::dns::parse_ip(&host)?, port);
+        let addr = SocketAddr::new(crate::shared::dns::parse_ip(&host)?, port);
         let wait = Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
         Ok((addr, rd, wait))
     }
@@ -5292,7 +5283,7 @@ mod dns {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn dnssec_status(s: &Settings) -> Result<Value, String> {
         let chain = read_chain(s).await?;
-        let nta = crate::shared::recursor_conf::nta_zones(s, &chain)?;
+        let nta = recursor_conf::nta_zones(s, &chain)?;
         let anchors: Vec<Value> = chain
             .anchors
             .iter()
@@ -5304,10 +5295,8 @@ mod dns {
     // What: anchors of top zones; zones chained to them.
     // Why: a zone loses its NTA only on a proven chain.
     // From: Issue #1683 | PR #2019
-    pub(crate) async fn read_chain(
-        s: &Settings,
-    ) -> Result<crate::shared::recursor_conf::Chain, String> {
-        let mut chain = crate::shared::recursor_conf::Chain::default();
+    pub(crate) async fn read_chain(s: &Settings) -> Result<recursor_conf::Chain, String> {
+        let mut chain = recursor_conf::Chain::default();
         if Role::from_settings(s)? != Role::Primary {
             return Ok(chain);
         }
@@ -5373,7 +5362,7 @@ mod dns {
         let tops = own_tops(s)?;
         let hosted = hosted_zones(s, &tops)?;
         for zone in &hosted {
-            let id = crate::shared::pdns::zone_id(zone);
+            let id = pdns::zone_id(zone);
             if !have.contains(&id) {
                 api.create_primary(&id, &edit[0], key).await?;
             }
@@ -5453,7 +5442,7 @@ mod dns {
     // From: Issue #1683 | PR #2019
     pub(crate) async fn ensure_own_endings(
         s: &Settings,
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         tops: &[String],
     ) -> Result<(), String> {
         let ns = ns_names(s, &soa_names(s)?.0)?;
@@ -5501,12 +5490,12 @@ mod dns {
     // From: Issue #1683
     pub(crate) async fn merge_legacy_zone(
         s: &Settings,
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         have: &[String],
         lan: &str,
     ) -> Result<(), String> {
         let legacy = crate::shared::dns::legacy_local_zone(lan);
-        let id = crate::shared::pdns::zone_id(&legacy);
+        let id = pdns::zone_id(&legacy);
         // What: a LAN domain named local.<x> is kept.
         // Why: then it is a configured zone, not legacy.
         // From: Issue #1683
@@ -5551,7 +5540,7 @@ mod dns {
     // From: Issue #1683
     pub(crate) async fn ensure_soa_nameserver(
         s: &Settings,
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         hosted: &[String],
     ) -> Result<(), String> {
         let names = soa_names(s)?;
@@ -5649,7 +5638,7 @@ mod dns {
     // From: Issue #1683
     pub(crate) async fn ensure_ptr(
         s: &Settings,
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         ip: &str,
         host: &str,
         ttl: u32,
@@ -5664,7 +5653,7 @@ mod dns {
     // Why: every SOA edit ends with the same record write.
     // From: Issue #1683 | PR #2017
     pub(crate) async fn write_soa(
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         zone: &str,
         ttl: u32,
         fields: &[String],
@@ -5676,7 +5665,7 @@ mod dns {
     // What: the names of the zones a server holds.
     // Why: both zone setups skip a zone that exists.
     // From: Issue #1683 | PR #2017
-    pub(crate) async fn zone_names(api: &crate::shared::pdns::Api) -> Result<Vec<String>, String> {
+    pub(crate) async fn zone_names(api: &pdns::Api) -> Result<Vec<String>, String> {
         Ok(api.zones().await?.into_iter().map(|z| z.name).collect())
     }
 
@@ -5698,7 +5687,7 @@ mod dns {
     // Why: a zone made before domain change kept old ns1.
     // From: Issue #1683 | PR #2017
     pub(crate) async fn ensure_soa_names(
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         zone: &str,
         names: &(String, String),
     ) -> Result<(), String> {
@@ -5730,7 +5719,7 @@ mod dns {
     // Why: name sync and serial lift edit one record.
     // From: Issue #1683 | PR #2017
     pub(crate) async fn soa_fields(
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         zone: &str,
     ) -> Result<Option<(u32, Vec<String>)>, String> {
         let rrsets = api.rrsets(zone).await?;
@@ -5753,7 +5742,7 @@ mod dns {
     // Why: an equal PATCH would still raise the serial.
     // From: Issue #1683
     pub(crate) async fn ensure_rrset(
-        api: &crate::shared::pdns::Api,
+        api: &pdns::Api,
         zone: &str,
         name: &str,
         kind: &str,
