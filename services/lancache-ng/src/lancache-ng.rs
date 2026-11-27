@@ -4018,6 +4018,55 @@ mod dhcp {
         pub lease_time: Option<u64>,
     }
 
+    // What: a subnet form read into its one written form.
+    // Why: a bad address fails with its field, before Kea.
+    // From: Issue #1683 | PR #2020
+    fn read_subnet(input: &SubnetInput) -> Result<SubnetInput, Fault> {
+        use crate::shared::dns::{canonical_ip, canonical_net, net_holds};
+        let field = |name: &str, r: Result<String, String>| {
+            r.map_err(|e| Fault::Plain(format!("{name}: {e}")))
+        };
+        let subnet = field("subnet", canonical_net(&input.subnet))?;
+        let gateway = match input.gateway.is_empty() {
+            true => String::new(),
+            false => field("gateway", canonical_ip(&input.gateway))?,
+        };
+        let mut pool = Vec::new();
+        for (name, raw) in [
+            ("pool_start", &input.pool_start),
+            ("pool_end", &input.pool_end),
+        ] {
+            let ip = field(name, canonical_ip(raw))?;
+            if !net_holds(&subnet, &ip) {
+                return Err(Fault::Plain(format!("{name}: {ip} is outside {subnet}")));
+            }
+            pool.push(ip);
+        }
+        let dns = input.dns.iter().map(|d| field("dns", canonical_ip(d)));
+        Ok(SubnetInput {
+            subnet,
+            gateway,
+            dns: dns.collect::<Result<_, _>>()?,
+            domain: input.domain.clone(),
+            ntp_servers: input.ntp_servers.clone(),
+            pool_end: pool.pop().unwrap_or_default(),
+            pool_start: pool.pop().unwrap_or_default(),
+            lease_time: input.lease_time,
+        })
+    }
+
+    // What: a MAC address in its one written form.
+    // Why: Kea matches hw-address as text; lower case.
+    // From: Issue #1683 | PR #2020
+    fn canonical_mac(text: &str) -> Result<String, Fault> {
+        let parts: Vec<&str> = text.split([':', '-']).collect();
+        let hex = |p: &&str| p.len() == 2 && p.bytes().all(|b| b.is_ascii_hexdigit());
+        if parts.len() != 6 || !parts.iter().all(hex) {
+            return Err(Fault::Plain(format!("mac: {text:?} is no MAC address")));
+        }
+        Ok(parts.join(":").to_ascii_lowercase())
+    }
+
     // What: one change of the Kea configuration.
     // Why: page, REST and CLI name it by type.
     // From: Issue #1683 | PR #2020
@@ -4293,6 +4342,7 @@ mod dhcp {
         }
         match edit {
             KeaEdit::SubnetAdd(input) => {
+                let input = &read_subnet(input)?;
                 kea_edit(s, |l| {
                     let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
                     let mut sn = subnet_from(input, next, None);
@@ -4303,6 +4353,7 @@ mod dhcp {
                 .await
             }
             KeaEdit::SubnetUpdate(id, input) => {
+                let input = &read_subnet(input)?;
                 kea_edit(s, |l| {
                     let sn = subnet_mut(l, *id)?;
                     *sn = subnet_from(input, *id, Some(&sn.clone()));
@@ -4338,10 +4389,19 @@ mod dhcp {
                 host,
                 add,
             } => {
+                let mac = canonical_mac(mac)?;
+                let ip = match add {
+                    true => crate::shared::dns::canonical_ip(ip)
+                        .map_err(|e| Fault::Plain(format!("ip: {e}")))?,
+                    false => ip.clone(),
+                };
                 kea_edit(s, |l| {
                     let sn = subnet_mut(l, *subnet)?;
                     let mut hosts = sn["reservations"].as_array().cloned().unwrap_or_default();
-                    hosts.retain(|r| r["hw-address"].as_str() != Some(mac.as_str()));
+                    let same = |r: &Value| {
+                        r["hw-address"].as_str().map(str::to_ascii_lowercase) == Some(mac.clone())
+                    };
+                    hosts.retain(|r| !same(r));
                     if *add {
                         hosts.push(json!({"hw-address": mac, "ip-address": ip, "hostname": host}));
                     }
@@ -4350,7 +4410,11 @@ mod dhcp {
                 })
                 .await
             }
-            KeaEdit::LeaseRelease(ip) => Ok(kea_api(s)?.release(ip).await?),
+            KeaEdit::LeaseRelease(ip) => {
+                let ip = crate::shared::dns::canonical_ip(ip)
+                    .map_err(|e| Fault::Plain(format!("ip: {e}")))?;
+                Ok(kea_api(s)?.release(&ip).await?)
+            }
             KeaEdit::Rollback(id) => Ok(kea_rollback(s, id).await?),
         }
     }
