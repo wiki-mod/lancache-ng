@@ -2511,7 +2511,7 @@ mod config {
         }
 
         // What: parse KEY=kind;min;max;effect;owner.
-        // Why: the SOT schema row format.
+        // Why: SOT row; a choice keeps its words in min.
         // From: Issue #1683 | PR #1980
         fn parse(row: &str) -> Result<Self, String> {
             let (key, rest) = row
@@ -3177,7 +3177,7 @@ mod config {
         }
 
         // What: value as items; missing is empty.
-        // Why: an unset optional list means no entries.
+        // Why: after load only a list? key can be unset.
         // From: Issue #1683 | PR #1980
         pub fn list(&self, key: &str) -> Vec<String> {
             let raw = match self.get(key) {
@@ -3274,7 +3274,7 @@ mod config {
         }
     }
 
-    // What: lancache-ng config show [KEY].
+    // What: lancache-ng config: show, schema, set, validate
     // Why: settings reads have their CLI with their owner.
     // From: Issue #1683 | PR #2020
     pub async fn run(args: &[String]) -> Result<(), String> {
