@@ -10359,11 +10359,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: our own address as upstream loops queries.
         // From: Issue #1683 | PR #1980
         fn upstream_servers(s: &Settings) -> Result<Vec<String>, String> {
-            let own = own_ips(s);
             let list = s.list("DNS_UPSTREAM_SERVERS");
-            for raw in &list {
-                upstream_entry("DNS_UPSTREAM_SERVERS", raw, &own)?;
-            }
+            check_upstream(s, "DNS_UPSTREAM_SERVERS", &list)?;
             Ok(list)
         }
 
@@ -10377,10 +10374,24 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 .collect()
         }
 
+        // What: every entry of an upstream list is checked.
+        // Why: save, render and recursor share the rule.
+        // From: Issue #1683 | PR #2020
+        pub fn check_upstream<S: AsRef<str>>(
+            s: &Settings,
+            key: &str,
+            items: &[S],
+        ) -> Result<(), String> {
+            let own = own_ips(s);
+            items
+                .iter()
+                .try_for_each(|raw| upstream_entry(key, raw.as_ref(), &own))
+        }
+
         // What: one upstream: IP, [IPv6]:port or IPv4:port.
         // Why: a half bracket form must not be saved.
         // From: Issue #1683
-        pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
+        fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
             let bad = || format!("{key}: {raw} is no IP address");
             let (host, _) = crate::shared::dns::split_host_port(raw).map_err(|_| bad())?;
             let ip = crate::shared::dns::parse_ip(host).map_err(|_| bad())?;
@@ -12186,14 +12197,8 @@ end
             // What: nginx resolvers must not be this host.
             // Why: threat model G3: own DNS sends CDNs here
             // From: Issue #1683 | PR #1985
-            let own = crate::shared::recursor_conf::own_ips(s);
-            for raw in s.list("NGINX_UPSTREAM_RESOLVER") {
-                crate::shared::recursor_conf::upstream_entry(
-                    "NGINX_UPSTREAM_RESOLVER",
-                    &raw,
-                    &own,
-                )?;
-            }
+            let resolvers = s.list("NGINX_UPSTREAM_RESOLVER");
+            crate::shared::recursor_conf::check_upstream(s, "NGINX_UPSTREAM_RESOLVER", &resolvers)?;
             let hosts = cache_hosts(s, domains)?;
             let https = s.flag("HTTPS_ENABLED")?;
             let proxy = s.text("PROXY_SERVICE")?;
@@ -15523,17 +15528,13 @@ mod ui {
         // What: each upstream entry is checked before save.
         // Why: threat model G3: no loop to this host.
         // From: Issue #1683 | PR #1985
-        let own = crate::shared::recursor_conf::own_ips(&app.settings());
         for key in ["DNS_UPSTREAM_SERVERS", "NGINX_UPSTREAM_RESOLVER"] {
-            for raw in form
+            let items: Vec<&str> = form
                 .get(key)
-                .map(|v| config::list_items(v))
-                .into_iter()
-                .flatten()
-            {
-                crate::shared::recursor_conf::upstream_entry(key, raw, &own)
-                    .map_err(bad_request)?;
-            }
+                .map(|v| config::list_items(v).collect())
+                .unwrap_or_default();
+            crate::shared::recursor_conf::check_upstream(&app.settings(), key, &items)
+                .map_err(bad_request)?;
         }
         // What: the zones before save; none if unreadable.
         // Why: a save may repair the settings; it must run.
