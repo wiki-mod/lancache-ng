@@ -17,7 +17,7 @@
 // of this notice is explicitly DISACK.
 
 // What: the one lancache-ng program: roles and commands.
-// Why: one file, one binary; DoMe decision 26.11.2026.
+// Why: one file and one binary hold every role.
 // From: Issue #1683 | PR #2020
 
 // What: cachehamster: prefill queue, Steam QR and depots.
@@ -605,7 +605,7 @@ mod cachehamster {
             return Err("enter addresses or a Steam app ID".into());
         }
         // What: every address must be an http(s) URL.
-        // Why: a typo was queued and failed without a word.
+        // Why: a typo must not queue and fail silently.
         // From: Issue #871 | PR #1980
         if let Target::Urls(u) = &target
             && let Some(bad) = u.iter().find(|u| {
@@ -646,7 +646,7 @@ mod cachehamster {
         };
         let mut jobs = read_json::<Vec<Job>>(&c.path(JOBS_FILE))?.unwrap_or_default();
         // What: orders daemon has not taken yet, shown too.
-        // Why: a new job was missing until the next round.
+        // Why: a new job must show before the next round.
         // From: Issue #871 | PR #1980
         let known = jobs.len();
         take_inbox(c, &mut jobs, false)?;
@@ -733,7 +733,7 @@ mod cachehamster {
                 for j in jobs.iter_mut().filter(|j| j.id == id) {
                     j.when = When::Now;
                     // What: a new run counts from zero.
-                    // Why: else rerun showed "2 of 1 done".
+                    // Why: a rerun must not read "2 of 1".
                     // From: Issue #871 | PR #1980
                     if j.state != State::Running {
                         (j.done, j.failed, j.bytes) = (0, 0, 0);
@@ -755,6 +755,9 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     static PACE: std::sync::OnceLock<Pace> = std::sync::OnceLock::new();
 
+    // What: the next free time and the byte rate.
+    // Why: PACE books each file against these two.
+    // From: Issue #871 | PR #1980
     struct Pace {
         next: std::sync::Mutex<tokio::time::Instant>,
         bytes_per_sec: u64,
@@ -1108,6 +1111,9 @@ mod cachehamster {
     #[derive(Debug, Default)]
     struct Kv(Vec<(String, KvValue)>);
 
+    // What: a value in a KeyValues tree: text or node.
+    // Why: Kv holds both kinds under one key list.
+    // From: Issue #871 | PR #1980
     #[derive(Debug)]
     enum KvValue {
         Text(String),
@@ -1411,6 +1417,9 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     const ERESULT_OK: u64 = 1;
 
+    // What: the websocket stream of one CM session.
+    // Why: one name for the long tokio-tungstenite type.
+    // From: Issue #871 | PR #1980
     type Ws = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
