@@ -484,5 +484,6 @@
   "watchdog_alarms": "Watchdog alarms",
   "alarms_none": "No alarms in the last check.",
   "alarms_missing": "The watchdog has not written a report yet.",
-  "alarms_age": "last check {x} s ago"
+  "alarms_age": "last check {x} s ago",
+  "kea_unreachable": "Kea does not answer; the lists below are empty:"
 }

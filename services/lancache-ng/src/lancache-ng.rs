@@ -15031,7 +15031,7 @@ mod ui {
             Ok(v) => v.unwrap_or_else(|| json!({})),
             Err(e) => {
                 eprintln!("ui: dhcp page: {e}");
-                ctx.insert("hint", &e);
+                ctx.insert("kea_error", &e);
                 json!({})
             }
         };

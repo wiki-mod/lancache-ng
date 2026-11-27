@@ -67,6 +67,15 @@
     <h1 class="page-title">DHCP</h1>
   </div>
 
+  {# What: Kea did not answer; lists are empty.
+     Why: empty lists alone hid a dead Kea.
+     From: Issue #1683 | PR #2020 #}
+  {% if kea_error %}
+  <div class="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-300">
+    {{ t.kea_unreachable }} {{ kea_error }}
+  </div>
+  {% endif %}
+
   {# What: capability table of the three DHCP modes
      Why: copied from the mockup; folds away
      From: Issue #1683 | PR #1976 #}

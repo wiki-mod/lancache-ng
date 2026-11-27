@@ -484,5 +484,6 @@
   "watchdog_alarms": "Watchdog-Alarme",
   "alarms_none": "Keine Alarme bei der letzten Prüfung.",
   "alarms_missing": "Der Watchdog hat noch keinen Bericht geschrieben.",
-  "alarms_age": "letzte Prüfung vor {x} s"
+  "alarms_age": "letzte Prüfung vor {x} s",
+  "kea_unreachable": "Kea antwortet nicht; die Listen unten sind leer:"
 }
