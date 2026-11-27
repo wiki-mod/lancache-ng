@@ -11318,6 +11318,15 @@ end
             out
         }
 
+        // What: listen on both families, ACL, SNI preread.
+        // Why: both stream servers open with these lines.
+        // From: Issue #1683 | PR #2020
+        fn preread_listen(port: u64, acl: &str) -> String {
+            format!(
+                "    listen {port};\n    listen [::]:{port};\n    include {acl};\n    ssl_preread on;\n"
+            )
+        }
+
         // What: the SNI map and the passthrough server.
         // Why: strict passes only known hosts on.
         // From: Issue #1683 | PR #1980
@@ -11334,11 +11343,7 @@ end
                 out.push_str(&format!("    default {};\n", p.origin));
             }
             out.push_str("}\n\nserver {\n");
-            out.push_str(&format!(
-                "    listen {0};\n    listen [::]:{0};\n",
-                p.passthrough
-            ));
-            out.push_str(&format!("    include {};\n    ssl_preread on;\n", p.acl));
+            out.push_str(&preread_listen(p.passthrough, &p.acl));
             out.push_str("    proxy_pass $stream_backend;\n");
             out.push_str(&p.timeouts);
             out.push_str("}\n");
@@ -11422,8 +11427,7 @@ end
                 &p.pass_relay
             };
             out.push_str(&format!("    default {fallback};\n}}\n\nserver {{\n"));
-            out.push_str(&format!("    listen {0};\n    listen [::]:{0};\n", p.https));
-            out.push_str(&format!("    include {};\n    ssl_preread on;\n", p.acl));
+            out.push_str(&preread_listen(p.https, &p.acl));
             out.push_str("    proxy_pass $https_dispatch_backend;\n    proxy_protocol on;\n");
             out.push_str(&p.timeouts);
             out.push_str("}\n\n");
