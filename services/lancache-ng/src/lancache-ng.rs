@@ -2442,7 +2442,7 @@ mod config {
                 Self::Text(v) => f.write_str(v),
                 Self::Bool(v) => write!(f, "{v}"),
                 Self::Uint(v) => write!(f, "{v}"),
-                Self::List(v) => f.write_str(&v.join(" ")),
+                Self::List(v) => f.write_str(&join_items(v)),
             }
         }
     }
@@ -2453,6 +2453,14 @@ mod config {
     pub fn list_items(raw: &str) -> impl Iterator<Item = &str> {
         raw.split(|c: char| c == ',' || c.is_whitespace())
             .filter(|item| !item.is_empty())
+    }
+
+    // What: list items as one setting text, blank apart.
+    // Why: the writer that matches list_items, the reader.
+    // From: Issue #1683 | PR #2020
+    pub fn join_items<S: AsRef<str>>(items: &[S]) -> String {
+        let parts: Vec<&str> = items.iter().map(AsRef::as_ref).collect();
+        parts.join(" ")
     }
 
     // What: the rows of a text without blanks and # rows.
@@ -3616,7 +3624,7 @@ mod dhcp {
         if let Some(life) = input.lease_time {
             f.insert("DHCP_LEASE_TIME".into(), life.to_string());
         }
-        f.insert("DHCP_DNS_SERVERS".into(), input.dns.join(" "));
+        f.insert("DHCP_DNS_SERVERS".into(), config::join_items(&input.dns));
         Ok(f)
     }
 
@@ -3908,7 +3916,7 @@ mod dns {
     // Why: one renderer with the render one-shot.
     // From: Issue #1683
     fn write_for(s: &Settings, zones: &[String]) -> Result<bool, String> {
-        let s = s.with("DNS_SECONDARY_ZONES", &zones.join(" "))?;
+        let s = s.with("DNS_SECONDARY_ZONES", &crate::config::join_items(zones))?;
         let sec = render::secrets(&s)?;
         let files = render::dns_only(&s, &sec).map_err(|e| e.join("; "))?;
         Ok(!render::write_files(&s, &files)?.is_empty())
@@ -4418,7 +4426,10 @@ mod dns {
         crate::shared::dns::validate_lan_domains(&plain(&want), &extra)?;
         Ok(Fields::from([
             ("DHCP_DOMAIN".to_string(), plain(&want)),
-            ("DNS_EXTRA_LAN_DOMAINS".to_string(), extra.join(" ")),
+            (
+                "DNS_EXTRA_LAN_DOMAINS".to_string(),
+                config::join_items(&extra),
+            ),
         ]))
     }
 
@@ -5057,7 +5068,7 @@ mod dns {
         let mut form = Fields::new();
         for (key, now) in [("DNS_SECONDARY_NS", ns), ("DNS_SECONDARY_NS_OFF", off)] {
             if now != s.list(key) {
-                form.insert(key.into(), now.join(" "));
+                form.insert(key.into(), crate::config::join_items(&now));
             }
         }
         if form.is_empty() {
@@ -9584,7 +9595,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // From: Issue #1683 | PR #2017
         pub fn secondary_rows(list: &[(String, String)]) -> String {
             let rows: Vec<String> = list.iter().map(|(n, a)| format!("{n}@{a}")).collect();
-            rows.join(" ")
+            crate::config::join_items(&rows)
         }
 
         // What: addresses of registered secondaries.
@@ -14148,7 +14159,7 @@ mod stack {
         if present {
             items.push(item.to_string());
         }
-        Fields::from([(key.to_string(), items.join(" "))])
+        Fields::from([(key.to_string(), crate::config::join_items(&items))])
     }
 
     // What: a form with exactly one field.
@@ -15597,8 +15608,8 @@ mod ui {
         let targets = form.get("SYSLOG_FORWARD").cloned().unwrap_or_default();
         let targets: Vec<&str> = config::list_items(&targets).collect();
         let mut change = Fields::new();
-        change.insert("SYSLOG_MUTED".into(), muted.join(" "));
-        change.insert("SYSLOG_FORWARD".into(), targets.join(" "));
+        change.insert("SYSLOG_MUTED".into(), crate::config::join_items(&muted));
+        change.insert("SYSLOG_FORWARD".into(), crate::config::join_items(&targets));
         let back = format!("{}#syslog", app.settings().text("UI_PAGE_LOGS")?);
         finish(commit(&app, change).await, &back)
     }
@@ -16142,7 +16153,7 @@ mod ui {
         if proxy {
             let get = |k: &str| field(form, k);
             let dns = dns_pair(get("dhcp_dns_primary"), get("dhcp_dns_secondary"));
-            out.insert("DHCP_DNS_SERVERS".into(), dns.join(" "));
+            out.insert("DHCP_DNS_SERVERS".into(), crate::config::join_items(&dns));
         }
         out
     }
