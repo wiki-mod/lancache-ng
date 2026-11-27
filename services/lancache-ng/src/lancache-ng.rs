@@ -6675,7 +6675,7 @@ mod shared {
                 }
             }
 
-            // What: one request whose answer text is not needed.
+            // What: a request whose answer text is dropped.
             // Why: writes only need the status checked.
             // From: Issue #1683 | PR #2020
             async fn send(
@@ -6688,7 +6688,7 @@ mod shared {
             }
 
             // What: GET a path and read its answer as JSON.
-            // Why: every read names what it parsed on error.
+            // Why: each read names what it parsed on error.
             // From: Issue #1683 | PR #2020
             async fn get_json<T: serde::de::DeserializeOwned>(
                 &self,
@@ -6700,7 +6700,7 @@ mod shared {
             }
 
             // What: the JSON document of one zone.
-            // Why: rrsets and the signing check read the same.
+            // Why: rrsets and the signing check share it.
             // From: Issue #1683 | PR #2020
             async fn zone_doc(&self, zone: &str) -> Result<Value, String> {
                 self.get_json(&zone_path(zone), &format!("zone {zone}"))
