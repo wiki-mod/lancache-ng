@@ -646,8 +646,8 @@ runtime:
     - SYSLOG_MAX_GB=10
     - SYSLOG_RETENTION_DAYS=30
     - SYSLOG_XZ_PRESET=6
-    # What: old switch for DNS query logging.
-    # Why: no program reads it since v0.4.0; setup.sh does.
+    # What: setup.sh answer for DNS query logging.
+    # Why: DNS_QUERY_LOG takes it as its default.
     # From: Issue #1683 | PR #2020
     - LOG_QUERIES=0
     # What: local root zone copy on or off.
@@ -668,8 +668,8 @@ runtime:
     # Why: each gets its own zone; empty = only one.
     # From: Issue #1683
     - DNS_EXTRA_LAN_DOMAINS=
-    # What: old DDNS switch of the dhcp image.
-    # Why: unread by code since v0.4.0; DHCP_DDNS rules.
+    # What: setup.sh answer for DHCP DDNS.
+    # Why: DHCP_DDNS takes it as its default.
     # From: Issue #1683 | PR #2020
     - DHCP_DDNS_ENABLED=false
     # What: Kea control agent user and port.
@@ -976,7 +976,7 @@ runtime:
     # What: 1 = recursor logs every DNS query.
     # Why: the admin can follow DNS queries in the log.
     # From: Issue #1683 | PR #1980
-    - DNS_QUERY_LOG=0
+    - DNS_QUERY_LOG=@LOG_QUERIES@
     # What: private reverse zones the stack serves.
     # Why: RFC 1918 and ULA ranges; no list in code.
     # From: Issue #1683 | PR #1980
@@ -1394,7 +1394,7 @@ runtime:
     # Why: the Kea render and the DHCP page read them.
     # From: Issue #1683 | PR #2020
     - DHCP_CUSTOM_OPTIONS=
-    - DHCP_DDNS=0
+    - DHCP_DDNS=@DHCP_DDNS_ENABLED@
     - DHCP_DNS_SERVERS=
     - DHCP_LOG_PACKETS=0
     - DHCP_OPTION_DATA_MAX=255
@@ -1930,6 +1930,7 @@ runtime:
     - DDNS_TSIG_NAME=text;;;restart;dns
     - DHCP_CUSTOM_OPTIONS=text?;;;reload;dhcp
     - DHCP_DDNS=bool;;;reload;dhcp
+    - DHCP_DDNS_ENABLED=bool;;;reload;dhcp
     - DHCP_DNS_SERVERS=list?;;;reload;dhcp
     - DHCP_DOMAIN=text;;;reload;dhcp
     - DHCP_GATEWAY=text;;;reload;dhcp
@@ -1961,6 +1962,7 @@ runtime:
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
     - DNS_LOCAL_REVERSE_ZONES=bool;;;restart;dns
     - DNS_QUERY_LOG=bool;;;restart;dns
+    - LOG_QUERIES=bool;;;restart;dns
     - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
     - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
     - DNS_RECORD_TTL=uint;1;86400;live;ui
@@ -2176,6 +2178,8 @@ runtime:
     - UI_LOG_TAIL_CHUNK=uint;1024;10485760;live;ui
     - UI_AUTH_PASSWORD_HASH=secret?;;;live;ui
     - UI_PASSWORD_MIN_LENGTH=uint;8;128;live;ui
+    - UI_SESSION_TTL_SECONDS=uint;1;;live;ui
+    - UI_SESSION_TTL_MAX_SECONDS=uint;1;;live;ui
     - UI_PORT=uint;1;65535;recreate;ui
     - UI_PUBLIC_URL=text?;;;live;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui

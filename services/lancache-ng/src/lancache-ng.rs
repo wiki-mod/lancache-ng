@@ -14092,7 +14092,14 @@ mod ui {
             .insert(Csrf::from_session(&app.session_key, &session));
         let mut res = next.run(req).await;
         if known.is_none() {
-            let v = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/");
+            // What: cookie lives UI_SESSION_TTL_SECONDS.
+            // Why: setup.sh asks it; capped by the MAX key.
+            // From: Issue #1683 | PR #2020
+            let ttl = s
+                .uint("UI_SESSION_TTL_SECONDS")
+                .and_then(|t| s.uint("UI_SESSION_TTL_MAX_SECONDS").map(|m| t.min(m)));
+            let age = ttl.map(|t| format!("; Max-Age={t}")).unwrap_or_default();
+            let v = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/{age}");
             if let Ok(v) = v.parse() {
                 res.headers_mut().append(header::SET_COOKIE, v);
             }
