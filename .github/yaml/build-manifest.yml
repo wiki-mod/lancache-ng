@@ -493,17 +493,6 @@ runtime:
     - PDNS_AUTH_API_PORT=8081
     - PDNS_HTTP_API_PORT=8082
     - PDNS_HTTPS_API_PORT=8084
-    # What: pdns SOA timings and names, one key each.
-    # Why: no release reads them; PDNS_DEFAULT_SOA rules.
-    # From: Issue #1683 | PR #2020
-    - PDNS_SOA_REFRESH=30
-    - PDNS_SOA_RETRY=10
-    - PDNS_SOA_RESYNC_INTERVAL=3600
-    - PDNS_XFR_CYCLE_INTERVAL=15
-    - PDNS_SOA_MNAME=localhost.
-    - PDNS_SOA_RNAME=admin.@
-    - PDNS_SOA_EXPIRE=604800
-    - PDNS_SOA_MINIMUM=3600
     # What: log level of the pdns auth server.
     # Why: the dns render writes it into pdns.conf.
     # From: Issue #1683 | PR #2020
