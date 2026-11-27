@@ -4283,9 +4283,9 @@ mod dhcp {
     // Why: page and CLI repair Kea the same way.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_rollback(s: &Settings, id: &str) -> Result<(), String> {
+        let api = kea_api_in_kea_mode(s)?.ok_or(NOT_KEA)?;
         let store = kea_store(s)?;
         let cfg: Value = store.read(id)?;
-        let api = kea_api(s)?;
         // What: the state before is kept as a snapshot.
         // Why: a rollback can itself be rolled back.
         // From: Issue #1683 | PR #2020
@@ -4324,7 +4324,7 @@ mod dhcp {
         s: &Settings,
         edit: impl FnOnce(&mut Vec<Value>) -> Result<(), Fault>,
     ) -> Result<(), Fault> {
-        let api = kea_api(s)?;
+        let api = kea_api_in_kea_mode(s)?.ok_or(NOT_KEA)?;
         let mut cfg = live_config(&api).await?;
         let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
@@ -4450,7 +4450,8 @@ mod dhcp {
             KeaEdit::LeaseRelease(ip) => {
                 let ip = crate::shared::dns::canonical_ip(ip)
                     .map_err(|e| Fault::Plain(format!("ip: {e}")))?;
-                Ok(kea_api(s)?.release(&ip).await?)
+                let api = kea_api_in_kea_mode(s)?.ok_or(NOT_KEA)?;
+                Ok(api.release(&ip).await?)
             }
             KeaEdit::Rollback(id) => Ok(kea_rollback(s, id).await?),
         }
