@@ -18507,68 +18507,98 @@ mod ui {
     }
 
     // What: program values one sample round reads.
-    // Why: a program that is off leaves its values unknown.
+    // Why: a source that fails is unknown and reported.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn service_values(
         app: &Stack,
         s: &Settings,
         want: &[String],
-    ) -> BTreeMap<String, String> {
+    ) -> (BTreeMap<String, String>, Vec<String>) {
         let mut out = BTreeMap::new();
+        let mut errs = Vec::new();
         let has = |p: &str| want.iter().any(|w| w.split(':').next() == Some(p));
-        if has("nginx")
-            && let Ok(v) = crate::shared::nginx_conf::live(s).await
-        {
-            for k in ["active", "requests", "waiting"] {
-                out.insert(format!("nginx:{k}"), v[k].to_string());
-            }
-        }
-        if has("recursor")
-            && let Ok(apis) = peer::recursor_apis(s)
-        {
-            for r in apis {
-                if let Ok(rows) = r.statistics().await {
-                    crate::shared::pdns::Api::add_stats(&mut out, "recursor", rows);
+        let mut note = |src: &str, e: String| errs.push(format!("{src}: {e}"));
+        if has("nginx") {
+            match crate::shared::nginx_conf::live(s).await {
+                Ok(v) => {
+                    for k in ["active", "requests", "waiting"] {
+                        out.insert(format!("nginx:{k}"), v[k].to_string());
+                    }
                 }
+                Err(e) => note("nginx", e),
             }
         }
-        if has("auth")
-            && let Ok(api) = peer::own_api(s)
-            && let Ok(rows) = api.statistics().await
-        {
-            crate::shared::pdns::Api::add_stats(&mut out, "auth", rows);
+        if has("recursor") {
+            match peer::recursor_apis(s) {
+                Ok(apis) => {
+                    for r in apis {
+                        match r.statistics().await {
+                            Ok(rows) => {
+                                crate::shared::pdns::Api::add_stats(&mut out, "recursor", rows)
+                            }
+                            Err(e) => note("recursor", e),
+                        }
+                    }
+                }
+                Err(e) => note("recursor", e),
+            }
         }
-        if has("kea")
-            && let Ok(Some(map)) = crate::dhcp::kea_stats(s).await
-        {
-            for (k, n) in map {
-                out.insert(format!("kea:{k}"), n.to_string());
+        if has("auth") {
+            let rows = match peer::own_api(s) {
+                Ok(api) => api.statistics().await,
+                Err(e) => Err(e),
+            };
+            match rows {
+                Ok(rows) => crate::shared::pdns::Api::add_stats(&mut out, "auth", rows),
+                Err(e) => note("auth", e),
+            }
+        }
+        // What: no Kea in another DHCP mode is no error.
+        // Why: kea_stats answers None outside Kea mode.
+        // From: Issue #1683 | PR #2020
+        if has("kea") {
+            match crate::dhcp::kea_stats(s).await {
+                Ok(Some(map)) => {
+                    for (k, n) in map {
+                        out.insert(format!("kea:{k}"), n.to_string());
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => note("kea", e),
             }
         }
 
         // What: host network bytes from the host's net/dev.
         // Why: in mode off no dhcp container gives it.
         // From: Issue #1683 | PR #1980
-        if has("host")
-            && let Ok(file) = s.text("HOST_NET_DEV_FILE")
-            && let Ok(text) = fs::read_text(Path::new(&file))
-            && let Ok(skip) = s.list("STATS_HOST_IF_SKIP")
-        {
-            let (rx, tx) = crate::shared::rrd::host_net(&text, &skip);
-            out.insert("host:rx".into(), rx.to_string());
-            out.insert("host:tx".into(), tx.to_string());
+        if has("host") {
+            let read = s.text("HOST_NET_DEV_FILE").and_then(|file| {
+                let text = fs::read_text(Path::new(&file))?;
+                Ok((text, s.list("STATS_HOST_IF_SKIP")?))
+            });
+            match read {
+                Ok((text, skip)) => {
+                    let (rx, tx) = crate::shared::rrd::host_net(&text, &skip);
+                    out.insert("host:rx".into(), rx.to_string());
+                    out.insert("host:tx".into(), tx.to_string());
+                }
+                Err(e) => note("host", e),
+            }
         }
 
         // What: stratum and offset of the time source.
         // Why: the graph reads the tracking reader.
         // From: Issue #1683 | PR #1980
-        if has("chrony")
-            && let Ok(v) = chrony_tracking(app, s).await
-        {
-            out.insert("chrony:stratum".into(), v["stratum"].to_string());
-            out.insert("chrony:offset".into(), v["system_time"].to_string());
+        if has("chrony") {
+            match chrony_tracking(app, s).await {
+                Ok(v) => {
+                    out.insert("chrony:stratum".into(), v["stratum"].to_string());
+                    out.insert("chrony:offset".into(), v["system_time"].to_string());
+                }
+                Err(e) => note("chrony", e),
+            }
         }
-        out
+        (out, errs)
     }
 
     // What: chrony tracking from its container.
@@ -18648,8 +18678,7 @@ mod ui {
             .iter()
             .flat_map(|g| g.sources.iter().map(|x| x.oid.clone()))
             .collect();
-        let vals = service_values(app, s, &want).await;
-        let mut errs = Vec::new();
+        let (vals, mut errs) = service_values(app, s, &want).await;
         for g in all {
             let row: Vec<String> = g
                 .sources
