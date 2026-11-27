@@ -5784,7 +5784,7 @@ mod dns {
     // Why: no proof must never mean SERVFAIL.
     // From: Issue #1683 | PR #2019
     pub(crate) async fn dnssec_chain(s: &Settings) -> recursor_conf::Chain {
-        match read_chain(s).await {
+        match fetch_chain(s).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("ui: DNSSEC anchors off: {e}");
@@ -5867,7 +5867,7 @@ mod dns {
     // Why: shows why a zone is or is not validated.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn dnssec_status(s: &Settings) -> Result<Value, String> {
-        let chain = read_chain(s).await?;
+        let chain = fetch_chain(s).await?;
         let nta = recursor_conf::nta_zones(s, &chain)?;
         let anchors: Vec<Value> = chain
             .anchors
@@ -5880,7 +5880,7 @@ mod dns {
     // What: anchors of top zones; zones chained to them.
     // Why: a zone loses its NTA only on a proven chain.
     // From: Issue #1683 | PR #2019
-    pub(crate) async fn read_chain(s: &Settings) -> Result<recursor_conf::Chain, String> {
+    pub(crate) async fn fetch_chain(s: &Settings) -> Result<recursor_conf::Chain, String> {
         let mut chain = recursor_conf::Chain::default();
         if Role::from_settings(s)? != Role::Primary {
             return Ok(chain);
@@ -7612,7 +7612,7 @@ mod shared {
             // What: GET a path and read its answer as JSON.
             // Why: each read names what it parsed on error.
             // From: Issue #1683 | PR #2020
-            async fn get_json<T: serde::de::DeserializeOwned>(
+            async fn fetch_json<T: serde::de::DeserializeOwned>(
                 &self,
                 path: &str,
                 what: &str,
@@ -7625,7 +7625,7 @@ mod shared {
             // Why: rrsets and the signing check share it.
             // From: Issue #1683 | PR #2020
             async fn zone_doc(&self, zone: &str) -> Result<Value, String> {
-                self.get_json(&zone_path(zone), &format!("zone {zone}"))
+                self.fetch_json(&zone_path(zone), &format!("zone {zone}"))
                     .await
             }
 
@@ -7812,7 +7812,7 @@ mod shared {
             // Why: sync state compares primary, secondary.
             // From: Issue #1683 | PR #1980
             pub async fn zones(&self) -> Result<Vec<Zone>, String> {
-                self.get_json("/zones", "zone list").await
+                self.fetch_json("/zones", "zone list").await
             }
 
             // What: send NOTIFY to all secondaries now.
@@ -7853,7 +7853,7 @@ mod shared {
             // Why: the dashboard shows query counts.
             // From: Issue #1683 | PR #1980
             pub async fn statistics(&self) -> Result<Vec<(String, String)>, String> {
-                let rows: Vec<Value> = self.get_json("/statistics", "statistics").await?;
+                let rows: Vec<Value> = self.fetch_json("/statistics", "statistics").await?;
                 Ok(rows
                     .iter()
                     .filter_map(|r| Some((r["name"].as_str()?.into(), r["value"].as_str()?.into())))
@@ -7888,7 +7888,7 @@ mod shared {
             // From: Issue #1683 | PR #2019
             pub async fn ds(&self, zone: &str) -> Result<Vec<String>, String> {
                 let path = zone_sub(zone, "cryptokeys");
-                let keys: Vec<Value> = self.get_json(&path, &format!("keys of {zone}")).await?;
+                let keys: Vec<Value> = self.fetch_json(&path, &format!("keys of {zone}")).await?;
                 Ok(keys
                     .iter()
                     .filter(|k| k["active"].as_bool() == Some(true))
