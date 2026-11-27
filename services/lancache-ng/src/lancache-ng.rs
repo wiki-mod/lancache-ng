@@ -3848,10 +3848,11 @@ mod dns {
     use crate::config::{self, Settings};
     use crate::shared::dns::Role;
     use crate::shared::peer::{self, PeerZone, ZoneState};
+    use crate::shared::task::or_stop;
     use crate::shared::tool;
     use crate::shared::{apply, fs, pdns, recursor_conf, render, secret};
     use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
-    use crate::ui::{or_stop, primary_https_ip, tr};
+    use crate::ui::{primary_https_ip, tr};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::net::{IpAddr, SocketAddr};
@@ -12938,6 +12939,20 @@ end
         }
     }
 
+    // What: helpers of background tasks that loop.
+    // Why: ui and dns tasks end alike on a missing value.
+    // From: Issue #1683 | PR #2020
+    pub mod task {
+        // What: a setting a background task cannot run without.
+        // Why: the task ends with a log line, no made-up value.
+        // From: Issue #1683 | PR #2017
+        pub fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
+            value
+                .inspect_err(|e| eprintln!("ui: {task} stop: {e}"))
+                .ok()
+        }
+    }
+
     // What: start of helper programs.
     // Why: every caller reads the exit status the same way.
     // From: Issue #1683 | PR #2017
@@ -14489,6 +14504,7 @@ mod ui {
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
+    use crate::shared::task::or_stop;
     use crate::shared::{access, apply, docker, fs, http, human, render, secret};
     use crate::stack::Stack;
     use crate::stack::{
@@ -16208,15 +16224,6 @@ mod ui {
             errs.extend(store_row(s, g, row).await.err());
         }
         errs
-    }
-
-    // What: a setting a background task cannot run without.
-    // Why: the task ends with a log line, no made-up value.
-    // From: Issue #1683 | PR #2017
-    pub(crate) fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
-        value
-            .inspect_err(|e| eprintln!("ui: {task} stop: {e}"))
-            .ok()
     }
 
     // What: one sample round: SNMP, containers, programs.
