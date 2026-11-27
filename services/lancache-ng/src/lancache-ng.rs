@@ -7373,6 +7373,71 @@ mod shared {
             }
         }
 
+        // What: record type number of A.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_A: u16 = 1;
+
+        // What: record type number of NS.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_NS: u16 = 2;
+
+        // What: record type number of CNAME.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_CNAME: u16 = 5;
+
+        // What: record type number of SOA.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_SOA: u16 = 6;
+
+        // What: record type number of PTR.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_PTR: u16 = 12;
+
+        // What: record type number of MX.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_MX: u16 = 15;
+
+        // What: record type number of TXT.
+        // Why: RFC 1035 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_TXT: u16 = 16;
+
+        // What: record type number of AAAA.
+        // Why: RFC 3596 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_AAAA: u16 = 28;
+
+        // What: record type number of SRV.
+        // Why: RFC 2782 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_SRV: u16 = 33;
+
+        // What: record type number of DS.
+        // Why: RFC 4034 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_DS: u16 = 43;
+
+        // What: record type number of DNSKEY.
+        // Why: RFC 4034 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_DNSKEY: u16 = 48;
+
+        // What: record type number of HTTPS.
+        // Why: RFC 9460 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_HTTPS: u16 = 65;
+
+        // What: record type number of CAA.
+        // Why: RFC 8659 code; parser and table share it.
+        // From: Issue #1683 | PR #2020
+        const TYPE_CAA: u16 = 257;
+
         // What: a DNS question, class IN, RD on or off.
         // Why: one wire builder for SOA probes and queries.
         // From: Issue #1683 | PR #2020
@@ -7396,7 +7461,7 @@ mod shared {
         // Why: without RD a recursor sends no aa answer.
         // From: Issue #1683
         pub fn soa_query(id: u16, zone: &str) -> Result<Vec<u8>, String> {
-            query(id, zone, 6, false)
+            query(id, zone, TYPE_SOA, false)
         }
 
         // What: type number of a record type name.
@@ -7404,19 +7469,19 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub fn qtype(word: &str) -> Result<u16, String> {
             const TYPES: [(&str, u16); 13] = [
-                ("A", 1),
-                ("NS", 2),
-                ("CNAME", 5),
-                ("SOA", 6),
-                ("PTR", 12),
-                ("MX", 15),
-                ("TXT", 16),
-                ("AAAA", 28),
-                ("SRV", 33),
-                ("DS", 43),
-                ("DNSKEY", 48),
-                ("HTTPS", 65),
-                ("CAA", 257),
+                ("A", TYPE_A),
+                ("NS", TYPE_NS),
+                ("CNAME", TYPE_CNAME),
+                ("SOA", TYPE_SOA),
+                ("PTR", TYPE_PTR),
+                ("MX", TYPE_MX),
+                ("TXT", TYPE_TXT),
+                ("AAAA", TYPE_AAAA),
+                ("SRV", TYPE_SRV),
+                ("DS", TYPE_DS),
+                ("DNSKEY", TYPE_DNSKEY),
+                ("HTTPS", TYPE_HTTPS),
+                ("CAA", TYPE_CAA),
             ];
             let up = word.to_ascii_uppercase();
             TYPES
@@ -7517,14 +7582,14 @@ mod shared {
                 let end = start + usize::from(word(at + 8)?);
                 let rd = msg.get(start..end).ok_or_else(cut)?;
                 let data = match (rtype, rd.len()) {
-                    (1, 4) => std::net::Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]).to_string(),
-                    (28, 16) => {
+                    (TYPE_A, 4) => std::net::Ipv4Addr::new(rd[0], rd[1], rd[2], rd[3]).to_string(),
+                    (TYPE_AAAA, 16) => {
                         let mut b = [0u8; 16];
                         b.copy_from_slice(rd);
                         std::net::Ipv6Addr::from(b).to_string()
                     }
-                    (2 | 5 | 12, _) => name_text(msg, start)?,
-                    (6, _) => {
+                    (TYPE_NS | TYPE_CNAME | TYPE_PTR, _) => name_text(msg, start)?,
+                    (TYPE_SOA, _) => {
                         let p = name_end(msg, name_end(msg, start)?)?;
                         let b = msg.get(p..p + 4).filter(|_| p + 4 <= end).ok_or_else(cut)?;
                         let serial = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
@@ -7556,7 +7621,7 @@ mod shared {
             let serial = r
                 .answers
                 .iter()
-                .find(|a| a.rtype == 6)
+                .find(|a| a.rtype == TYPE_SOA)
                 .and_then(|a| a.data.rsplit(' ').next()?.parse().ok());
             Ok(Soa {
                 authoritative: r.authoritative,
