@@ -7848,6 +7848,55 @@ mod shared {
         // From: Issue #1683 | PR #1980
         pub const SERVICE_LABEL: &str = "com.docker.compose.service";
 
+        // What: the Docker state word of a live container.
+        // Why: inspect, list rows and wishes share it.
+        // From: Issue #1683 | PR #2020
+        const RUNNING: &str = "running";
+
+        // What: what a user wants of a container.
+        // Why: the beambar, REST and CLI send it as a word.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum Wish {
+            Run,
+            Stop,
+        }
+
+        impl Wish {
+            // What: the wish of a boolean: true runs.
+            // Why: set_wanted and the CLI pass run or not.
+            // From: Issue #1683 | PR #2020
+            pub fn of(run: bool) -> Self {
+                if run { Self::Run } else { Self::Stop }
+            }
+
+            // What: true when the wish is to run.
+            // Why: callers hand a boolean to set_wanted.
+            // From: Issue #1683 | PR #2020
+            pub fn runs(self) -> bool {
+                self == Self::Run
+            }
+
+            // What: the wire word: running or stopped.
+            // Why: JSON bodies carry it, never a number.
+            // From: Issue #1683 | PR #2020
+            pub fn word(self) -> &'static str {
+                match self {
+                    Self::Run => RUNNING,
+                    Self::Stop => "stopped",
+                }
+            }
+
+            // What: the wish of a wire word, or none.
+            // Why: an unknown word is refused, not guessed.
+            // From: Issue #1683 | PR #2020
+            pub fn from_word(word: &str) -> Option<Self> {
+                [Self::Run, Self::Stop]
+                    .into_iter()
+                    .find(|w| w.word() == word)
+            }
+        }
+
         // What: Docker health of one container.
         // Why: degraded and starting are not failures.
         // From: Issue #1683 | PR #1980
@@ -7867,7 +7916,7 @@ mod shared {
             // From: Issue #1296
             pub fn from_inspect(inspect: &Value) -> Self {
                 let state = inspect.pointer("/State/Status").and_then(Value::as_str);
-                if state != Some("running") {
+                if state != Some(RUNNING) {
                     return Health::Stopped(state.unwrap_or("unknown").into());
                 }
                 let status = inspect
@@ -7960,7 +8009,7 @@ mod shared {
         // Why: list rows carry State; inspect has its own.
         // From: Issue #1683 | PR #2020
         pub fn is_running(row: &serde_json::Value) -> bool {
-            row["State"].as_str() == Some("running")
+            row["State"].as_str() == Some(RUNNING)
         }
 
         // What: one stack container with its full state.
@@ -8111,11 +8160,7 @@ mod shared {
                     };
                 }
                 ["container", svc, word @ ("start" | "stop")] => {
-                    let state = if *word == "start" {
-                        "running"
-                    } else {
-                        "stopped"
-                    };
+                    let state = Wish::of(*word == "start").word();
                     let r = s.text("UI_ROUTE_DESIRED_STATE")?.replace("{service}", svc);
                     (r, Body::Json(json!({"state": state})))
                 }
@@ -12249,7 +12294,7 @@ end
         }
 
         // What: what an apply would do with one file.
-        // Why: stack and ui compare it; REST shows the word.
+        // Why: stack and ui compare it; REST shows it.
         // From: Issue #1683 | PR #2020
         #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
         #[serde(rename_all = "lowercase")]
@@ -16878,12 +16923,10 @@ mod ui {
         axum::Json(want): axum::Json<Want>,
     ) -> Page {
         csrf.check_header(&headers)?;
-        let run = match want.state.as_str() {
-            "running" => true,
-            "stopped" => false,
-            _ => return Err(bad_request(tr("err_state_running_stopped"))),
+        let Some(wish) = docker::Wish::from_word(&want.state) else {
+            return Err(bad_request(tr("err_state_running_stopped")));
         };
-        set_wanted(&app, &service, run)
+        set_wanted(&app, &service, wish.runs())
             .await
             .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
         Ok(StatusCode::NO_CONTENT.into_response())
