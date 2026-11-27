@@ -14820,9 +14820,10 @@ end
             let beat = step.saturating_mul(s.uint("STATS_HEARTBEAT_STEPS")?);
             let mut cmd = Command::new("rrdtool");
             cmd.arg("create")
-                .arg(&path)
                 .arg("--step")
-                .arg(step.to_string());
+                .arg(step.to_string())
+                .arg("--")
+                .arg(&path);
             for src in &g.sources {
                 // What: a gauge may go below zero.
                 // Why: time offsets are negative half time.
@@ -14847,15 +14848,27 @@ end
             }
         }
 
+        // What: a free operand that is no option.
+        // Why: a leading '-' would be read as a switch.
+        // From: Issue #1683 | PR #2020
+        fn operand(v: &str) -> Result<&str, String> {
+            match v.starts_with('-') {
+                true => Err(format!("{v:?} may not start with '-'")),
+                false => Ok(v),
+            }
+        }
+
         // What: read all sources once, then store.
         // Why: snmpget -Oqv prints one value per line.
         // From: Issue #1683 | PR #1980
         pub fn sample(s: &Settings, g: &Graph) -> Result<(), String> {
             let mut get = Command::new("snmpget");
             get.args(["-v2c", "-Oqv", "-c"]);
-            get.arg(s.text("SNMP_COMMUNITY")?)
-                .arg(s.text("STATS_SNMP_TARGET")?);
-            get.args(g.sources.iter().map(|x| &x.oid));
+            get.arg(s.text("SNMP_COMMUNITY")?);
+            get.arg(operand(&s.text("STATS_SNMP_TARGET")?)?);
+            for x in &g.sources {
+                get.arg(operand(&x.oid)?);
+            }
             let text = String::from_utf8_lossy(&crate::shared::tool::run(&mut get)?).into_owned();
             let values: Vec<String> = text.lines().map(number_or_unknown).collect();
             save_row(s, g, &values)
@@ -14872,6 +14885,7 @@ end
             }
             let mut put = Command::new("rrdtool");
             put.arg("update")
+                .arg("--")
                 .arg(file(s, g)?)
                 .arg(format!("N:{}", values.join(":")));
             crate::shared::tool::run(&mut put)?;
