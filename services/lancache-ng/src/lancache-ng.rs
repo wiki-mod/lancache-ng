@@ -282,8 +282,8 @@ mod cachehamster {
     // What: remove a file; a missing file is fine.
     // Why: logout and login cleanup must not hide IO errors
     // From: Issue #871 | PR #1980
-    fn remove(path: &Path) -> Result<(), String> {
-        crate::shared::fs::remove_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
+    fn delete_file(path: &Path) -> Result<(), String> {
+        crate::shared::fs::delete_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     // What: the 32-byte key that seals the session token.
@@ -519,7 +519,7 @@ mod cachehamster {
                 access_token: field(&r, "access_token").unwrap_or_default(),
             };
             store_session(c, &session)?;
-            remove(&c.path(PENDING_FILE))?;
+            delete_file(&c.path(PENDING_FILE))?;
             return Ok(json!({"state": "done", "account": session.account}));
         }
         // What: Steam rotates the QR after a while.
@@ -731,7 +731,7 @@ mod cachehamster {
                 Err(e) => eprintln!("cachehamster: dropped bad order: {e}"),
             }
             if consume {
-                remove(&path)?;
+                delete_file(&path)?;
             }
         }
         Ok(())
@@ -1973,7 +1973,7 @@ mod cachehamster {
                 *sizes.entry(depot).or_default() += meta.len();
             }
         }
-        let (bytes, failed) = crate::shared::tidy::remove(&gone);
+        let (bytes, failed) = crate::shared::tidy::delete(&gone);
         freed.0 += bytes;
         freed.1 += (gone.len() - failed.len()) as u64;
         errs.extend(failed);
@@ -2005,7 +2005,7 @@ mod cachehamster {
     fn wipe(c: &Ctx) -> Result<Value, String> {
         use crate::shared::tidy;
         let (all, mut errors) = tidy::files(&tidy::cache_root(&c.s)?);
-        let (freed, failed) = tidy::remove(&all);
+        let (freed, failed) = tidy::delete(&all);
         let files = all.len() - failed.len();
         errors.extend(failed);
         Ok(json!({
@@ -2476,8 +2476,10 @@ mod cachehamster {
             },
             Op::LoginBegin => login_begin(&c, &client()?).await,
             Op::LoginPoll => login_poll(&c, &client()?).await,
-            Op::LoginCancel => remove(&c.path(PENDING_FILE)).map(|()| json!({"state": "idle"})),
-            Op::Logout => remove(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
+            Op::LoginCancel => {
+                delete_file(&c.path(PENDING_FILE)).map(|()| json!({"state": "idle"}))
+            }
+            Op::Logout => delete_file(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
             Op::Library => library(&c, &client()?).await,
             Op::Cached => cached(&c),
             Op::FetchCheck => fetch_check(&c, &args[1..]).await,
@@ -3235,7 +3237,7 @@ mod config {
             .and_then(|()| write_lines(&copy, updates))
             .and_then(|()| Settings::load(&process_env, Some(&copy)));
         for f in [copy.clone(), override_path(&copy), lock_path(&copy)] {
-            if let Err(e) = crate::shared::fs::remove_if_present(&f) {
+            if let Err(e) = crate::shared::fs::delete_if_present(&f) {
                 eprintln!("config: {} left behind: {e}", f.display());
             }
         }
@@ -4767,14 +4769,14 @@ mod dns {
         before: &[String],
     ) -> Result<(), String> {
         commit(app, form).await?;
-        drop_old_zones(&app.settings(), before).await;
+        delete_old_zones(&app.settings(), before).await;
         Ok(())
     }
 
     // What: remove zones a new LAN domain left behind.
     // Why: an old zone would keep answering its names.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn drop_old_zones(s: &Settings, before: &[String]) {
+    pub(crate) async fn delete_old_zones(s: &Settings, before: &[String]) {
         let read = (hosted_now(s), Role::from_settings(s), peer::own_api(s));
         let (now, role, api) = match read {
             (Ok(now), Ok(role), Ok(api)) => (now, role, api),
@@ -5976,7 +5978,7 @@ mod dns {
     }
 
     // What: the hosted zones with the tops read now.
-    // Why: drop_old_zones compares before and after.
+    // Why: delete_old_zones compares before and after.
     // From: Issue #1683 | PR #2019
     pub(crate) fn hosted_now(s: &Settings) -> Result<Vec<String>, String> {
         hosted_zones(s, &own_tops(s)?)
@@ -6195,7 +6197,7 @@ mod dns {
     // What: drop address and PTR records of a secondary.
     // Why: a removed or moved secondary leaves no record.
     // From: Issue #1683 | PR #2017
-    pub(crate) async fn drop_peer_records(
+    pub(crate) async fn delete_peer_records(
         s: &Settings,
         name: &str,
         address: &str,
@@ -6381,7 +6383,7 @@ mod dns {
     pub(crate) async fn rotate_tsig(app: &Stack) -> Result<(), String> {
         let s = app.settings();
         let file = secret::tsig_file(&s)?;
-        fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        fs::delete_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
         secret::load_or_create(&file, secret::new_tsig, fs::Owner::default())
             .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
         for line in apply_all(app, &s, &s, true).await? {
@@ -6725,7 +6727,7 @@ mod shared {
                     }),
                 });
             drop(file);
-            if let Err(e) = remove_if_present(&tmp) {
+            if let Err(e) = delete_if_present(&tmp) {
                 eprintln!("fs: {} left behind: {e}", tmp.display());
             }
             result
@@ -6759,7 +6761,7 @@ mod shared {
         // What: removes a file; a missing one is fine.
         // Why: absent is the state the caller wants.
         // From: Issue #1683 | PR #2017
-        pub fn remove_if_present(path: &Path) -> io::Result<()> {
+        pub fn delete_if_present(path: &Path) -> io::Result<()> {
             match fs::remove_file(path) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
                 _ => Ok(()),
@@ -9754,7 +9756,7 @@ mod shared {
                 gone.extend([key, crt]);
             }
             for f in gone {
-                if let Err(e) = crate::shared::fs::remove_if_present(f) {
+                if let Err(e) = crate::shared::fs::delete_if_present(f) {
                     eprintln!("cert: {} left behind: {e}", f.display());
                 }
             }
@@ -13268,7 +13270,7 @@ end
         // What: drop every leaf when the CA changed.
         // Why: leaves of an old CA fail on every client.
         // From: Issue #1683 | PR #1980
-        fn drop_stale_leaves(ca_crt: &Path, dir: &Path, stamp: &Path) -> Result<(), String> {
+        fn delete_stale_leaves(ca_crt: &Path, dir: &Path, stamp: &Path) -> Result<(), String> {
             let print = crate::shared::cert::fingerprint(ca_crt)?;
             let old = crate::shared::fs::read_if_present(stamp)
                 .map_err(|e| format!("{}: {e}", stamp.display()))?;
@@ -13354,7 +13356,7 @@ end
                 );
             }
             grant(&ca_key, None, s.mode("CA_KEY_MODE")?)?;
-            drop_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
+            delete_stale_leaves(&ca_crt, &dir, &dir.join(s.text("CA_STAMP_FILE")?))?;
             let (key_mode, crt_mode) = (s.mode("CERT_KEY_MODE")?, s.mode("CERT_FILE_MODE")?);
             let mut made = 0;
             for (name, sans) in wanted_leaves(s)? {
@@ -13435,14 +13437,14 @@ end
         // What: drop leaves that end within the warn time.
         // Why: issue_certs then makes them anew.
         // From: Issue #1683 | PR #2020
-        pub fn drop_expiring(s: &Settings) -> Result<Vec<String>, String> {
+        pub fn delete_expiring(s: &Settings) -> Result<Vec<String>, String> {
             let within = s.uint("WATCHDOG_CERT_WARN_SECS")?;
             let mut gone = Vec::new();
             for (name, _) in wanted_leaves(s)? {
                 let (key, crt) = leaf_files(s, &name)?;
                 if crt.is_file() && crate::shared::cert::state(&crt, within)["renew"] == true {
                     for f in [&key, &crt] {
-                        crate::shared::fs::remove_if_present(f)
+                        crate::shared::fs::delete_if_present(f)
                             .map_err(|e| format!("{}: {e}", f.display()))?;
                     }
                     gone.push(name);
@@ -15051,10 +15053,10 @@ end
         // What: remove the picked files.
         // Why: gives freed bytes; a gone file is no error.
         // From: Issue #1683 | PR #2020
-        pub fn remove(pick: &[Item]) -> (u64, Vec<String>) {
+        pub fn delete(pick: &[Item]) -> (u64, Vec<String>) {
             let (mut freed, mut errs) = (0u64, Vec::new());
             for f in pick {
-                match super::fs::remove_if_present(&f.path) {
+                match super::fs::delete_if_present(&f.path) {
                     Err(e) => errs.push(format!("{}: {e}", f.path.display())),
                     Ok(()) => freed = freed.saturating_add(f.size),
                 }
@@ -15427,7 +15429,7 @@ mod stack {
         let zones_before = crate::dns::snapshot_zones(&old)?;
         edit_and_adopt(app, old, edits).await?;
         let s = app.settings();
-        crate::dns::drop_old_zones(&s, &zones_before).await;
+        crate::dns::delete_old_zones(&s, &zones_before).await;
         let mut ok = true;
         // What: the parts after the settings each report.
         // Why: one failed part stops none; a rerun ends it.
@@ -16172,7 +16174,7 @@ mod ui {
     use crate::config::{self, Settings};
     use crate::dhcp::{kea_change, kea_snapshots, kea_state, kea_store, probe_cli, stays_off};
     use crate::dns::{
-        LanDomainEdit, answers_aa, commit_and_prune, drop_peer_records, ensure_zones,
+        LanDomainEdit, answers_aa, commit_and_prune, delete_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
         ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
         snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
@@ -17313,7 +17315,7 @@ mod ui {
     pub(crate) fn renew_token(s: &Settings) -> Result<String, String> {
         let dir = secret::dir(s)?;
         let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
-        fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        fs::delete_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
         registration_token(s)
     }
 
@@ -17344,7 +17346,7 @@ mod ui {
                 let rows = crate::shared::pdns_conf::secondary_rows(&list);
                 form.insert("DNS_SECONDARIES".into(), rows);
                 commit(&app, form).await?;
-                drop_peer_records(&app.settings(), &name, &address).await?;
+                delete_peer_records(&app.settings(), &name, &address).await?;
                 rotate_tsig(&app).await?;
                 Ok(Redirect::to(&s.text("UI_PAGE_DOMAINS")?).into_response())
             }
@@ -17379,7 +17381,7 @@ mod ui {
                 // Why: same address: no save/ensure runs.
                 // From: Issue #1683
                 if list[at].1 != a.address {
-                    drop_peer_records(&s, &name, &list[at].1)
+                    delete_peer_records(&s, &name, &list[at].1)
                         .await
                         .map_err(bad_request)?;
                 }
@@ -18327,7 +18329,7 @@ mod ui {
     ) -> Page {
         csrf.check_header(&headers)?;
         let s = app.settings();
-        let dropped = render::drop_expiring(&s).map_err(bad_request)?;
+        let dropped = render::delete_expiring(&s).map_err(bad_request)?;
         let report = say_all(&issue_and_reload(&app, &s).await?);
         let v = json!({"renewed": dropped, "report": report, "certs": render::cert_list(&s)?});
         Ok(axum::Json(v).into_response())
@@ -19421,7 +19423,7 @@ mod ui {
         // What: a socket file of an earlier run goes.
         // Why: bind fails on an existing path.
         // From: Issue #1683 | PR #2020
-        fs::remove_if_present(Path::new(&path)).map_err(|e| format!("{path}: {e}"))?;
+        fs::delete_if_present(Path::new(&path)).map_err(|e| format!("{path}: {e}"))?;
         let sock = tokio::net::UnixListener::bind(&path).map_err(|e| format!("{path}: {e}"))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
             .map_err(|e| format!("{path}: {e}"))?;
@@ -19875,7 +19877,7 @@ mod watchdog {
         t.errors = owner_errs;
         t.errors.extend(unread);
         if when != When::Dry {
-            let failed = tidy::remove(&pick).1;
+            let failed = tidy::delete(&pick).1;
             let removed = t.count - failed.len();
             eprintln!("watchdog: cache purge removed {removed} files");
             t.errors.extend(failed);
@@ -19913,7 +19915,7 @@ mod watchdog {
         let mut t = picked(s, PRUNE, when, &pick)?;
         t.errors = unread;
         if when != When::Dry {
-            let (freed, errs) = tidy::remove(&pick);
+            let (freed, errs) = tidy::delete(&pick);
             // What: bytes of failed removals stay counted.
             // Why: the budget check sees the real size.
             // From: Issue #1683 | PR #2020
