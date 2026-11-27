@@ -4779,13 +4779,17 @@ mod dns {
             return Ok(crate::shared::dns::lan_zone(s)?);
         }
         let zone = crate::shared::dns::canonical_zone(raw.trim());
-        if crate::shared::dns::lan_domains(s)?.contains(&zone) {
-            Ok(zone)
-        } else {
-            Err(Fault::key(
-                "err_not_lan_domain",
-                [("x", raw.trim().to_string())],
-            ))
+        in_lan_domains(&crate::shared::dns::lan_domains(s)?, &zone, raw.trim())?;
+        Ok(zone)
+    }
+
+    // What: a zone must be one of the LAN domains.
+    // Why: one check and one text for LAN domain input.
+    // From: Issue #1683
+    fn in_lan_domains(lans: &[String], zone: &str, shown: &str) -> Result<(), Fault> {
+        match lans.iter().any(|l| l == zone) {
+            true => Ok(()),
+            false => Err(Fault::key("err_not_lan_domain", [("x", shown.to_string())])),
         }
     }
 
@@ -5120,9 +5124,7 @@ mod dns {
                 if lans.first() == Some(&zone) {
                     return Err(Fault::key("err_main_domain_remove", [("x", name)]));
                 }
-                if !lans.contains(&zone) {
-                    return Err(Fault::key("err_not_lan_domain", [("x", name)]));
-                }
+                in_lan_domains(&lans, &zone, &name)?;
                 // What: a domain with own records stays.
                 // Why: removing it drops names from DNS.
                 // From: Issue #1683
@@ -5136,9 +5138,7 @@ mod dns {
                 list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, false)?
             }
             LanDomainEdit::Main => {
-                if !lans.contains(&zone) {
-                    return Err(Fault::key("err_not_lan_domain", [("x", name)]));
-                }
+                in_lan_domains(&lans, &zone, &name)?;
                 main_domain_fields(s, &name)?
             }
         };
