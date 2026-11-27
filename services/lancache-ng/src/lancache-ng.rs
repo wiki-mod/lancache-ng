@@ -7283,30 +7283,6 @@ mod shared {
             }
         }
 
-        // What: replication state of a secondary zone.
-        // Why: the dashboard shows lost NOTIFY or AXFR.
-        // From: Issue #1683 | PR #1980
-        #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-        #[allow(clippy::enum_variant_names)]
-        pub enum Sync {
-            InSync,
-            Behind,
-            Ahead,
-            Unknown,
-        }
-
-        // What: state from the two serials.
-        // Why: one rule for watchdog and ui.
-        // From: Issue #1683 | PR #1980
-        pub fn sync_state(primary: u32, secondary: u32) -> Sync {
-            match serial_cmp(secondary, primary) {
-                Some(Ordering::Equal) => Sync::InSync,
-                Some(Ordering::Less) => Sync::Behind,
-                Some(Ordering::Greater) => Sync::Ahead,
-                None => Sync::Unknown,
-            }
-        }
-
         // What: SOA answer of one DNS server.
         // Why: aa marks pdns data; serial shows the state.
         // From: Issue #1683
@@ -9567,7 +9543,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: the peer status is the worst zone state.
         // From: Issue #1683
         pub fn zone_state(z: &PeerZone) -> ZoneState {
-            use crate::shared::dns::Sync;
+            use std::cmp::Ordering;
             // What: let-else instead of None in a tuple.
             // Why: CodeQL read that None as unused.
             // From: Issue #1683
@@ -9577,11 +9553,11 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let Some(r) = z.secondary else {
                 return ZoneState::Missing;
             };
-            match crate::shared::dns::sync_state(p, r) {
-                Sync::InSync => ZoneState::InSync,
-                Sync::Ahead => ZoneState::Ahead,
-                Sync::Unknown => ZoneState::Unknown,
-                Sync::Behind => ZoneState::Behind,
+            match crate::shared::dns::serial_cmp(r, p) {
+                Some(Ordering::Equal) => ZoneState::InSync,
+                Some(Ordering::Less) => ZoneState::Behind,
+                Some(Ordering::Greater) => ZoneState::Ahead,
+                None => ZoneState::Unknown,
             }
         }
 

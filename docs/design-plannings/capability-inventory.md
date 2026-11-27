@@ -98,9 +98,9 @@ Provided by `pdns_conf`, `recursor_conf`, `pdns`, `dns` and `snapshot` in
   BIND text, sends NOTIFY, retrieves a secondary zone and drops cached answers.
   The Admin UI routes cover cache domains, LAN A records and PTR records
   (`/domains/*`).
-- **Replication state.** `dns::sync_state` compares serials (`dns::serial_cmp`,
-  RFC 1982); the watchdog (`dns_sync`) and the Admin UI (`secondary_health`)
-  report it.
+- **Replication state.** `peer::zone_state` compares serials with
+  `dns::serial_cmp` (RFC 1982); the watchdog (`dns_sync`) and the Admin UI
+  (`secondary_health`) report it.
 - **Snapshots.** `snapshot::Store` keeps numbered known-good copies per zone;
   `rollback`, route `/domains/zone-rollback` and the CLI `zone-snapshots` and
   `zone-rollback` restore one.
