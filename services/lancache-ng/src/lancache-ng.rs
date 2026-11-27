@@ -7118,8 +7118,8 @@ mod shared {
             if is_ipv6_text(address) { "AAAA" } else { "A" }
         }
 
-        // What: true if a host text is an IPv6 form (has ':').
-        // Why: one owner of the v6 test; names have no colon.
+        // What: true if a host text has an IPv6 form.
+        // Why: one owner of the v6 test; names lack colons.
         // From: Issue #1683 | PR #2020
         pub fn is_ipv6_text(host: &str) -> bool {
             host.contains(':')
@@ -7264,8 +7264,8 @@ mod shared {
             zone_of(up, zones)
         }
 
-        // What: zone of the pre-multi-domain layout.
-        // Why: local.<domain> held no records; it is merged
+        // What: the old extra zone local.<domain>.
+        // Why: an old install holds it; its records merge.
         // From: Issue #1683
         pub fn legacy_local_zone(lan: &str) -> String {
             canonical_zone(&format!("local.{}", lan.trim_end_matches('.')))
@@ -8257,7 +8257,7 @@ mod shared {
             }
 
             // What: GET a path; the answer as JSON.
-            // Why: inspect, version, stats and exec read alike.
+            // Why: inspect, version, stats, exec read so.
             // From: Issue #1683 | PR #2020
             async fn get(&self, path: &str, limit: Duration) -> Result<Value, Error> {
                 decode(&self.call(Method::GET, path, None, limit).await?)
