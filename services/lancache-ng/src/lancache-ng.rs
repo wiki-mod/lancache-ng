@@ -3800,13 +3800,13 @@ mod dhcp {
     }
 
     // What: the live Kea config; none if mode is not Kea.
-    // Why: one Kea read for every subnet reader.
+    // Why: one Kea read for subnets and the stack state.
     // From: Issue #1683 | PR #2020
-    async fn kea_config(s: &Settings) -> Result<Option<Value>, String> {
+    pub(crate) async fn kea_config(s: &Settings) -> Result<Option<Value>, String> {
         let Some(api) = kea_api_in_kea_mode(s)? else {
             return Ok(None);
         };
-        Ok(Some(api.config().await?))
+        Ok(Some(live_config(&api).await?))
     }
 
     // What: set a whole Kea config and keep it.
@@ -3816,16 +3816,6 @@ mod dhcp {
         let api = kea_api_in_kea_mode(s)?.ok_or("DHCP_MODE is not kea now")?;
         api.set_config(cfg.clone()).await?;
         save_kea(&kea_store(s)?, &cfg)
-    }
-
-    // What: running Kea config, none if mode is not Kea.
-    // Why: a whole-stack state holds Kea as it runs.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn kea_current(s: &Settings) -> Result<Option<Value>, String> {
-        match kea_api_in_kea_mode(s)? {
-            Some(api) => Ok(Some(live_config(&api).await?)),
-            None => Ok(None),
-        }
     }
 
     // What: the Kea API; none if the mode is not Kea.
@@ -3862,7 +3852,7 @@ mod dhcp {
         let Some(api) = kea_api_in_kea_mode(s)? else {
             return Ok(None);
         };
-        let (subnets, reservations) = kea_subnets(&api.config().await?);
+        let (subnets, reservations) = kea_subnets(&live_config(&api).await?);
         let mut leases = Vec::new();
         for l in api.leases().await? {
             let ends = l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
@@ -15317,7 +15307,7 @@ mod stack {
             "role": format!("{role:?}"),
             "dhcp_mode": s.text("DHCP_MODE")?,
             "settings": settings,
-            "kea": crate::dhcp::kea_current(s).await?,
+            "kea": crate::dhcp::kea_config(s).await?,
             "zones": zones,
             "left_out": STATE_LEAVES_OUT,
         }))
