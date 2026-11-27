@@ -3138,6 +3138,20 @@ mod config {
     // Why: one file; comments, order and other keys stay.
     // From: Issue #1683 | PR #2017
     pub fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), String> {
+        let edits = updates
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        edit_lines(path, &edits)
+    }
+
+    // What: set KEY=VALUE lines, or drop a key's line.
+    // Why: no line means the default; KEY= is empty.
+    // From: Issue #1683 | PR #2020
+    pub fn edit_lines(
+        path: &Path,
+        updates: &BTreeMap<String, Option<String>>,
+    ) -> Result<(), String> {
         let lock = lock_path(path);
         let held = std::fs::OpenOptions::new()
             .create(true)
@@ -3157,8 +3171,10 @@ mod config {
                     // What: a second line of it is dropped.
                     // Why: Compose, setup.sh read one value
                     // From: Issue #1683 | PR #2017
-                    if done.insert(key.to_string()) {
-                        body.push_str(&format!("{key}={}\n", updates[key]));
+                    if done.insert(key.to_string())
+                        && let Some(value) = &updates[key]
+                    {
+                        body.push_str(&format!("{key}={value}\n"));
                     }
                 }
                 None => {
@@ -3168,7 +3184,9 @@ mod config {
             }
         }
         for (key, raw) in updates.iter().filter(|(k, _)| !done.contains(*k)) {
-            body.push_str(&format!("{key}={raw}\n"));
+            if let Some(raw) = raw {
+                body.push_str(&format!("{key}={raw}\n"));
+            }
         }
         if body == old {
             return Ok(());
@@ -14881,11 +14899,11 @@ mod stack {
             // What: only changed keys get their old values.
             // Why: a whole-file write undoes setup.sh edits
             // From: Issue #1683 | PR #2017
-            let back: Fields = updates
+            let back = updates
                 .keys()
-                .map(|k| (k.clone(), before.get(k).cloned().unwrap_or_default()))
+                .map(|k| (k.clone(), before.get(k).cloned()))
                 .collect();
-            config::write_lines(&path, &back)
+            config::edit_lines(&path, &back)
                 .map_err(|w| format!("{e}; old values not restored: {w}"))?;
             return Err(e);
         }
