@@ -3401,7 +3401,7 @@ mod dhcp {
             .map(|x| x.trim().to_string())
             .collect();
         let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
-        let (start, end) = pool.split_once('-').unwrap_or(("", ""));
+        let (start, end) = crate::shared::kea_conf::pool_parts(pool);
         let custom: Vec<Value> = crate::shared::kea_conf::coded_options(sn)
             .into_iter()
             .filter(|o| o.get("code").is_some())
@@ -3414,8 +3414,8 @@ mod dhcp {
             "dns_secondary": dns.get(1).cloned().unwrap_or_default(),
             "ntp_servers": option_data(sn, NTP_SERVERS.name),
             "domain": option_data(sn, DOMAIN_NAME.name),
-            "pool_start": start.trim(),
-            "pool_end": end.trim(),
+            "pool_start": start,
+            "pool_end": end,
             "lease_time": sn["valid-lifetime"],
             "custom_options": custom,
         })
@@ -10596,6 +10596,14 @@ end
         // From: Issue #1683 | PR #2017
         pub fn pool_text(start: &str, end: &str) -> String {
             format!("{start} - {end}")
+        }
+
+        // What: start and end of a pool text, as pool_text wrote.
+        // Why: one place knows the pool form for both ways.
+        // From: Issue #1683 | PR #2020
+        pub fn pool_parts(pool: &str) -> (&str, &str) {
+            let (start, end) = pool.split_once('-').unwrap_or(("", ""));
+            (start.trim(), end.trim())
         }
 
         // What: true for an option given by code, not name.
