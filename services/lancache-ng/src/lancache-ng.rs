@@ -2724,24 +2724,67 @@ mod config {
         }
     }
 
-    // What: not empty; only ASCII letters, digits, extra.
-    // Why: such a value cannot leave its place in a config.
-    // From: Issue #1683 | PR #2017
-    pub fn is_plain(text: &str, extra: &str) -> bool {
-        !text.is_empty()
-            && text
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+    // What: the syntax a setting value is written into.
+    // Why: each syntax bars its own characters.
+    // From: Issue #1683 | PR #2019
+    #[derive(Clone, Copy)]
+    pub enum Syntax {
+        Line,
+        Quoted,
+        Template,
+        Env,
+        Nginx,
+        Path,
+        Semi,
+        Name(&'static str),
     }
 
-    // What: value with no quote, backslash or line break.
-    // Why: one check for a value put into a quoted config.
-    // From: Issue #1683 | PR #2019
-    pub fn plain(v: &str) -> Result<&str, String> {
-        if v.contains(['"', '\\', '\n', '\r']) {
-            return Err(format!("value {v:?} has quote or line break"));
+    impl Syntax {
+        // What: how a check failure names its syntax.
+        // Why: the error says what the value cannot carry.
+        // From: Issue #1683 | PR #2019
+        fn limit(self) -> &'static str {
+            match self {
+                Self::Line => "a line break",
+                Self::Quoted => "a quote, backslash or line break",
+                Self::Template => "a quote or line break",
+                Self::Env => "a character of the stack .env syntax",
+                Self::Nginx => "a line break, ';', '{' or '}'",
+                Self::Path => "a quote, '$' or line break, or is not absolute",
+                Self::Semi => "a line break or ';'",
+                Self::Name(_) => "a character outside letters, digits and its extras",
+            }
         }
-        Ok(v)
+    }
+
+    // What: true if a value can go into the syntax as is.
+    // Why: one owner of "no second statement".
+    // From: Issue #1683 | PR #2019
+    pub fn safe(syntax: Syntax, v: &str) -> bool {
+        match syntax {
+            Syntax::Line => !v.contains(['\n', '\r']),
+            Syntax::Quoted => !v.contains(['"', '\\', '\n', '\r']),
+            Syntax::Template => !v.contains(['"', '\n', '\r']),
+            Syntax::Env => !v.contains(['\n', '\r', '$', '`', '"', '\'', '\\', '#']),
+            Syntax::Nginx => !v.contains(['\n', '\r', ';', '{', '}']),
+            Syntax::Path => v.starts_with('/') && !v.contains(['"', '\n', '\r', '$']),
+            Syntax::Semi => !v.contains(['\n', '\r', ';']),
+            Syntax::Name(extra) => {
+                !v.is_empty()
+                    && v.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+            }
+        }
+    }
+
+    // What: the value, or an error naming its limit.
+    // Why: a renderer stops on a value that breaks a file.
+    // From: Issue #1683 | PR #2019
+    pub fn checked(syntax: Syntax, v: &str) -> Result<&str, String> {
+        match safe(syntax, v) {
+            true => Ok(v),
+            false => Err(format!("value {v:?} holds {}", syntax.limit())),
+        }
     }
 
     // What: a bool from its usual words.
@@ -3043,7 +3086,7 @@ mod config {
     fn env_safe(key: &str, raw: &str) -> Result<(), String> {
         match raw
             .chars()
-            .find(|c| matches!(c, '\n' | '\r' | '$' | '`' | '"' | '\'' | '\\' | '#'))
+            .find(|c| !safe(Syntax::Env, c.encode_utf8(&mut [0; 4])))
         {
             Some(c) => Err(format!("{key}: {c:?} is not allowed in the stack .env")),
             None => Ok(()),
@@ -8703,7 +8746,10 @@ mod shared {
                     .split_once(':')
                     .ok_or_else(|| at("expected CODE:VALUE".into()))?;
                 let data = data.trim();
-                if data.is_empty() || data.len() > max || data.contains(['\n', '\r', ';']) {
+                if data.is_empty()
+                    || data.len() > max
+                    || !crate::config::safe(crate::config::Syntax::Semi, data)
+                {
                     return Err(at(format!(
                         "value must be 1..={max} bytes, one line, no ';'"
                     )));
@@ -9693,7 +9739,12 @@ mod shared {
     // Why: every container logs here; one place to read.
     // From: Issue #1683 | PR #1980
     pub mod log {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
+
+        // What: names of groups and muted programs.
+        // Why: they go into syslog-ng text as bare words.
+        // From: Issue #1683 | PR #1980
+        const NAME: Syntax = Syntax::Name("_-");
 
         // What: one forward target host:port.
         // Why: a secondary also forwards to its primary.
@@ -9772,13 +9823,6 @@ mod shared {
         // From: Issue #1683 | PR #1980
         pub const STORE: &str = "d_store";
 
-        // What: plain name: letters, digits, _ and -.
-        // Why: values go into syslog-ng config text.
-        // From: Issue #1683 | PR #1980
-        fn is_plain(v: &str) -> bool {
-            crate::config::is_plain(v, "_-")
-        }
-
         // What: full syslog-ng.conf.
         // Why: the watchdog image runs syslog-ng.
         // From: Issue #1683 | PR #1980
@@ -9788,19 +9832,19 @@ mod shared {
             let template = s.text("SYSLOG_LINE_TEMPLATE")?;
             let group = s.text("LOG_READER_GROUP")?;
             let muted = s.list("SYSLOG_MUTED")?;
-            let safe_path = |p: &str| p.starts_with('/') && !p.contains(['"', '\n', '\r', '$']);
+            let safe_path = |p: &str| crate::config::safe(Syntax::Path, p);
             if !safe_path(&root) || !safe_path(&buffer) {
                 return Err(
                     "SYSLOG_LOG_ROOT and SYSLOG_BUFFER_DIR must be plain absolute paths".into(),
                 );
             }
-            if template.contains(['"', '\n', '\r']) {
+            if !crate::config::safe(Syntax::Template, &template) {
                 return Err("SYSLOG_LINE_TEMPLATE holds a quote or line break".into());
             }
-            if !is_plain(&group) {
+            if !crate::config::safe(NAME, &group) {
                 return Err(format!("LOG_READER_GROUP={group} is no group name"));
             }
-            if let Some(bad) = muted.iter().find(|m| !is_plain(m)) {
+            if let Some(bad) = muted.iter().find(|m| !crate::config::safe(NAME, m)) {
                 return Err(format!("SYSLOG_MUTED entry {bad:?} is no plain name"));
             }
             let skip = if muted.is_empty() {
@@ -10351,14 +10395,12 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     // Why: LAN clients get time from the appliance.
     // From: Issue #1683 | PR #1980
     pub mod chrony {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
 
         // What: host, IP, CIDR or path characters only.
         // Why: values go into a config file.
         // From: Issue #1683 | PR #1980
-        fn is_plain(v: &str) -> bool {
-            crate::config::is_plain(v, ".:/-_")
-        }
+        const HOSTISH: Syntax = Syntax::Name(".:/-_");
 
         // What: full chrony.conf.
         // Why: upstream needed; only SOT CIDRs may ask.
@@ -10371,13 +10413,17 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let allowed = s.list("NTP_ALLOWED_CLIENT_CIDRS")?;
             let drift = s.text("NTP_DRIFT_FILE")?;
             let makestep = s.text("NTP_MAKESTEP")?;
-            if let Some(bad) = upstream.iter().chain(&allowed).find(|v| !is_plain(v)) {
+            if let Some(bad) = upstream
+                .iter()
+                .chain(&allowed)
+                .find(|v| !crate::config::safe(HOSTISH, v))
+            {
                 return Err(format!("NTP value {bad:?} has unsafe characters"));
             }
-            if !drift.starts_with('/') || !is_plain(&drift) {
+            if !drift.starts_with('/') || !crate::config::safe(HOSTISH, &drift) {
                 return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
             }
-            if makestep.contains(['\n', '\r']) {
+            if !crate::config::safe(Syntax::Line, &makestep) {
                 return Err("NTP_MAKESTEP holds a line break".into());
             }
             let mut out = format!(
@@ -10403,7 +10449,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     // Why: primary notifies; secondary pulls with TSIG.
     // From: Issue #1683 | PR #1980
     pub mod pdns_conf {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
 
         // What: registered secondaries as (name, address).
         // Why: the SOT list holds one name@address per row.
@@ -10533,7 +10579,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             ];
             let mut out = String::new();
             for (key, value) in rows {
-                if value.contains(['\n', '\r']) {
+                if !crate::config::safe(Syntax::Line, &value) {
                     return Err(format!("{key} contains a line break"));
                 }
                 if !value.is_empty() {
@@ -11010,7 +11056,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             items
                 .iter()
                 .map(|i| {
-                    crate::config::plain(i)?;
+                    crate::config::checked(crate::config::Syntax::Quoted, i)?;
                     Ok([indent, "- \"", i.as_str(), "\"\n"].concat())
                 })
                 .collect()
@@ -11094,11 +11140,11 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // From: Issue #1683 | PR #1980
         pub fn lua(s: &Settings, rpz_file: &str, chain: &Chain) -> Result<String, String> {
             let policy = s.text("RPZ_POLICY_NAME")?;
-            crate::config::plain(rpz_file)?;
-            crate::config::plain(&policy)?;
+            crate::config::checked(crate::config::Syntax::Quoted, rpz_file)?;
+            crate::config::checked(crate::config::Syntax::Quoted, &policy)?;
             let mut lua = format!("rpzFile(\"{rpz_file}\", {{ policyName=\"{policy}\" }})\n");
             for z in nta_zones(s, chain)? {
-                crate::config::plain(&z)?;
+                crate::config::checked(crate::config::Syntax::Quoted, &z)?;
                 lua += &format!("addNTA(\"{z}\")\n");
             }
             // What: a top zone is anchored by its own DS.
@@ -11106,9 +11152,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // From: Issue #1683 | PR #2019
             for (zone, ds) in &chain.anchors {
                 let name = crate::shared::dns::bare_zone(zone);
-                crate::config::plain(name)?;
+                crate::config::checked(crate::config::Syntax::Quoted, name)?;
                 for row in ds {
-                    crate::config::plain(row)?;
+                    crate::config::checked(crate::config::Syntax::Quoted, row)?;
                     lua += &format!("addTA(\"{name}\", \"{row}\")\n");
                 }
             }
@@ -11126,7 +11172,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 return Ok(String::new());
             }
             let url = s.text("ROOT_ZONE_MIRROR_URL")?;
-            crate::config::plain(&url)?;
+            crate::config::checked(crate::config::Syntax::Quoted, &url)?;
             // What: the recursor checks ZONEMD and DNSSEC.
             // Why: both are defaults of zoneToCache.
             // From: Issue #1683 | PR #2019
@@ -11450,22 +11496,25 @@ end
             let first = listeners.first().ok_or("dnsdist needs a listener")?;
             let mut out = String::from("setACL({})\n");
             for net in acl {
-                out += &format!("addACL(\"{}\")\n", crate::config::plain(net)?);
+                out += &format!(
+                    "addACL(\"{}\")\n",
+                    crate::config::checked(crate::config::Syntax::Quoted, net)?
+                );
             }
             let mut call = "setLocal";
             for l in listeners {
                 for addr in listen {
-                    let addr = crate::config::plain(addr)?;
+                    let addr = crate::config::checked(crate::config::Syntax::Quoted, addr)?;
                     let local = crate::shared::dns::host_port(addr, l.port);
                     out += &format!("{call}(\"{local}\")\n");
                     call = "addLocal";
                 }
             }
-            let source = crate::config::plain(source)?;
+            let source = crate::config::checked(crate::config::Syntax::Quoted, source)?;
             let mut server = |pool: &str, address: &str| -> Result<(), String> {
                 out += &format!(
                     "newServer({{address=\"{}\", pool=\"{pool}\", name=\"{pool}\", source=\"{source}\", useProxyProtocol=true, healthCheckMode=\"up\"}})\n",
-                    crate::config::plain(address)?
+                    crate::config::checked(crate::config::Syntax::Quoted, address)?
                 );
                 Ok(())
             };
@@ -11926,7 +11975,7 @@ end
     // Why: one owner; a bad value stops the render.
     // From: Issue #1683 | PR #1980
     pub mod dnsmasq_conf {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
         use crate::shared::dhcp::Mode;
 
         // What: the text of one dnsmasq.conf in progress.
@@ -11939,7 +11988,7 @@ end
             // Why: a line break would start a new row.
             // From: Issue #1683 | PR #1980
             fn add(&mut self, row: &str) -> Result<(), String> {
-                if row.contains(['\n', '\r']) {
+                if !crate::config::safe(Syntax::Line, row) {
                     return Err(format!("dnsmasq row {row:?} has a line break"));
                 }
                 self.0.push_str(row);
@@ -12075,7 +12124,7 @@ end
     // Why: one owner of CDN host maps, ACL and dispatch.
     // From: Issue #1683 | PR #1980
     pub mod nginx_conf {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
         use sha2::{Digest, Sha256};
         use std::collections::BTreeSet;
 
@@ -12349,7 +12398,7 @@ end
                 let close = after.find('}').ok_or("unclosed ${ in nginx template")?;
                 let key = &after[..close];
                 let value = s.text(key).map_err(|e| format!("nginx template: {e}"))?;
-                if value.contains(['\n', '\r', ';', '{', '}']) {
+                if !crate::config::safe(Syntax::Nginx, &value) {
                     return Err(format!("{key} holds nginx syntax characters"));
                 }
                 out.push_str(&value);
@@ -14170,7 +14219,7 @@ end
     // Why: rrdtool keeps the graphs; no extra daemon.
     // From: Issue #1683 | PR #1980
     pub mod rrd {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
         use std::path::{Path, PathBuf};
         use std::process::Command;
 
@@ -14226,9 +14275,7 @@ end
         // What: plain characters or an underscore.
         // Why: the names become file names and arguments.
         // From: Issue #1683 | PR #1980
-        fn is_plain(word: &str) -> bool {
-            crate::config::is_plain(word, "_")
-        }
+        const WORD: Syntax = Syntax::Name("_");
 
         // What: parses ds=oid=kind[=scale] of a graph.
         // Why: a bad part is an error, never a default.
@@ -14241,7 +14288,7 @@ end
                 _ => ("", "", "", None),
             };
             let bad_scale = parts.len() == 4 && scale.is_none();
-            if !is_plain(ds) || !KINDS.contains(&kind) || bad_scale {
+            if !crate::config::safe(WORD, ds) || !KINDS.contains(&kind) || bad_scale {
                 return Err(format!(
                     "source {text:?} needs ds=oid=GAUGE|COUNTER|DERIVE[=factor]"
                 ));
@@ -14261,7 +14308,7 @@ end
             let (name, list) = row
                 .split_once(':')
                 .ok_or_else(|| format!("stats row {row:?} needs name:sources"))?;
-            if !is_plain(name) || !is_plain(tab) {
+            if !crate::config::safe(WORD, name) || !crate::config::safe(WORD, tab) {
                 return Err(format!("graph name {name:?} is not plain"));
             }
             let sources = list.split('+').map(source).collect::<Result<Vec<_>, _>>()?;
