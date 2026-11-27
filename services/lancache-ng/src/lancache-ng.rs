@@ -5887,11 +5887,18 @@ mod shared {
                 .map_or(0, |d| d.as_nanos())
         }
 
+        // What: seconds since 1970 of a time, if after.
+        // Why: now and file times become seconds one way.
+        // From: Issue #1683 | PR #2020
+        pub fn secs_of(t: SystemTime) -> Option<u64> {
+            t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+        }
+
         // What: whole seconds since 1970.
         // Why: retention and schedules count seconds.
         // From: Issue #1683 | PR #1980
         pub fn unix_secs() -> u64 {
-            u64::try_from(unix_nanos() / 1_000_000_000).unwrap_or(u64::MAX)
+            secs_of(SystemTime::now()).unwrap_or(0)
         }
     }
 
@@ -6096,8 +6103,8 @@ mod shared {
         pub fn modified_secs(meta: &fs::Metadata) -> u64 {
             meta.modified()
                 .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs())
+                .and_then(super::clock::secs_of)
+                .unwrap_or(0)
         }
 
         // What: every regular file below root.
