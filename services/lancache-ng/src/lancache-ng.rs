@@ -6728,6 +6728,15 @@ mod shared {
         Lead(String, Box<Fault>),
     }
 
+    // What: {name} places of a text filled with values.
+    // Why: one filler for errors and alarm texts.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn fill<K: AsRef<str>>(text: String, vals: &[(K, String)]) -> String {
+        vals.iter().fold(text, |text, (name, value)| {
+            text.replace(&format!("{{{}}}", name.as_ref()), value)
+        })
+    }
+
     // What: methods of the failure Fault.
     // Why: a key and values build one failure.
     // From: Issue #1683 | PR #2020
@@ -17008,9 +17017,7 @@ mod ui {
     pub(crate) fn say(fail: &Fault) -> String {
         match fail {
             Fault::Plain(text) => text.clone(),
-            Fault::Key(key, vals) => vals.iter().fold(tr(key), |text, (name, value)| {
-                text.replace(&format!("{{{name}}}"), value)
-            }),
+            Fault::Key(key, vals) => crate::shared::fill(tr(key), vals),
             Fault::Lead(lead, cause) => format!("{lead}{}", say(cause)),
         }
     }
@@ -17340,10 +17347,25 @@ mod ui {
         // What: a bad alarm file is logged, the page stays.
         // Why: the dashboard must render without the file.
         // From: Issue #1683 | PR #2020
-        let alarms = crate::watchdog::report(&s)
+        let mut alarms = crate::watchdog::report(&s)
             .inspect_err(|e| eprintln!("ui: alarms: {e}"))
             .ok()
             .flatten();
+        // What: alarm texts in the page language.
+        // Why: the file has key and values beside English.
+        // From: Issue #1683 | PR #2020
+        for a in alarms
+            .as_mut()
+            .and_then(|v| v["alarms"].as_array_mut())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(key) = a["key"].as_str() {
+                let vals: Vec<(String, String)> =
+                    serde_json::from_value(a["vals"].clone()).unwrap_or_default();
+                a["text"] = crate::shared::fill(tr(key), &vals).into();
+            }
+        }
         // What: age of the report in seconds.
         // Why: an old report means a stopped watchdog.
         // From: Issue #1683 | PR #2020
@@ -20329,7 +20351,7 @@ mod ui {
 mod watchdog {
     use crate::config::Settings;
     use crate::shared::docker::Health;
-    use crate::shared::{cert, clock, docker, fs, tidy};
+    use crate::shared::{Fault, cert, clock, docker, fs, tidy};
     use serde::Serialize;
     use serde_json::Value;
     use std::collections::{BTreeMap, VecDeque};
@@ -20353,6 +20375,13 @@ mod watchdog {
         level: Level,
         source: String,
         text: String,
+        // What: language key and values of the text.
+        // Why: the ui shows the alarm in the page language.
+        // From: Issue #1683 | PR #2020
+        #[serde(skip_serializing_if = "Option::is_none")]
+        key: Option<&'static str>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        vals: Vec<(&'static str, String)>,
     }
 
     // What: findings and facts of one round.
@@ -20370,24 +20399,31 @@ mod watchdog {
         // What: records one alarm with level and source.
         // Why: a check reports here and keeps running.
         // From: Issue #1683 | PR #1980
-        fn add(&mut self, level: Level, source: &str, text: impl Into<String>) {
-            let (source, text) = (source.to_string(), text.into());
+        fn add(&mut self, level: Level, source: &str, what: impl Into<Fault>) {
+            let what = what.into();
+            let text = crate::ui::say(&what);
+            let (key, vals) = match what {
+                Fault::Key(key, vals) => (Some(key), vals),
+                _ => (None, Vec::new()),
+            };
             self.alarms.push(Alarm {
                 level,
-                source,
+                source: source.to_string(),
                 text,
+                key,
+                vals,
             });
         }
         // What: records a warning.
         // Why: most callers need only source and text.
         // From: Issue #1683 | PR #1980
-        fn warn(&mut self, source: &str, text: impl Into<String>) {
+        fn warn(&mut self, source: &str, text: impl Into<Fault>) {
             self.add(Level::Warn, source, text);
         }
         // What: records a critical alarm.
         // Why: most callers need only source and text.
         // From: Issue #1683 | PR #1980
-        fn crit(&mut self, source: &str, text: impl Into<String>) {
+        fn crit(&mut self, source: &str, text: impl Into<Fault>) {
             self.add(Level::Crit, source, text);
         }
     }
@@ -20471,7 +20507,7 @@ mod watchdog {
                 "colour": colour, "stopped_by_user": by_user,
             }));
             if health == Health::Degraded {
-                f.warn(service, "running with reduced function");
+                f.warn(service, Fault::key("alarm_degraded", []));
             }
             if !wanted || !health.failing() {
                 m.streak.remove(name);
@@ -20487,17 +20523,39 @@ mod watchdog {
             let count = m.streak.entry(name.to_string()).or_default();
             *count += 1;
             if *count < after {
-                f.warn(service, format!("{word}, check {count} of {after}"));
+                f.warn(
+                    service,
+                    Fault::key(
+                        "alarm_check_streak",
+                        [
+                            ("state", word.to_string()),
+                            ("count", count.to_string()),
+                            ("after", after.to_string()),
+                        ],
+                    ),
+                );
                 continue;
             }
             *count = 0;
             if !m.restart_allowed(s, name)? {
-                f.crit(service, format!("{word}; restart limit reached"));
+                f.crit(
+                    service,
+                    Fault::key("alarm_restart_limit", [("state", word.to_string())]),
+                );
                 continue;
             }
             match api.act(name, docker::Action::Restart, grace, limit).await {
-                Ok(()) => f.warn(service, format!("{word}; restarted")),
-                Err(e) => f.crit(service, format!("{word}; restart failed: {e}")),
+                Ok(()) => f.warn(
+                    service,
+                    Fault::key("alarm_restarted", [("state", word.to_string())]),
+                ),
+                Err(e) => f.crit(
+                    service,
+                    Fault::key(
+                        "alarm_restart_failed",
+                        [("state", word.to_string()), ("error", e.to_string())],
+                    ),
+                ),
             }
         }
         heal_state(s, f, m)
@@ -20708,7 +20766,10 @@ mod watchdog {
         if let (Some(size), Some(budget)) = (t.size, t.budget)
             && size > budget
         {
-            f.warn("logs", format!("log size {size} bytes is over the budget"));
+            f.warn(
+                "logs",
+                Fault::key("alarm_log_budget", [("size", size.to_string())]),
+            );
         }
     }
 
@@ -20718,14 +20779,17 @@ mod watchdog {
     fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
         let (newest, unread) = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
         if !unread.is_empty() {
-            f.warn("logs", format!("log files not read: {}", unread.join("; ")));
+            f.warn(
+                "logs",
+                Fault::key("alarm_logs_unread", [("files", unread.join("; "))]),
+            );
         }
         let count = tidy::syslog_processed()?;
         if let Some((was_count, was_newest)) = m.log_counter
             && count > was_count
             && newest == was_newest
         {
-            f.crit("logs", "messages arrive but no log file is written");
+            f.crit("logs", Fault::key("alarm_logs_stuck", []));
         }
         m.log_counter = Some((count, newest));
         Ok(())
@@ -20740,10 +20804,16 @@ mod watchdog {
         let (used, pct) = (sp.used(), sp.pct());
         let (warn, alarm) = (s.uint("DISK_WARN_PCT")?, s.uint("DISK_ALARM_PCT")?);
         let colour = if pct >= alarm {
-            f.crit(&dir, format!("cache disk {pct}% full"));
+            f.crit(
+                &dir,
+                Fault::key("alarm_cache_full", [("pct", pct.to_string())]),
+            );
             "red"
         } else if pct >= warn {
-            f.warn(&dir, format!("cache disk {pct}% full"));
+            f.warn(
+                &dir,
+                Fault::key("alarm_cache_full", [("pct", pct.to_string())]),
+            );
             "yellow"
         } else {
             "green"
@@ -20760,11 +20830,17 @@ mod watchdog {
         for path in s.list("WATCHDOG_DISK_PATHS")? {
             match fs::space(Path::new(&path)) {
                 Err(e) => f.crit(&path, e.to_string()),
-                Ok(sp) if sp.total == 0 => f.warn(&path, "reports size 0"),
+                Ok(sp) if sp.total == 0 => f.warn(&path, Fault::key("alarm_size_zero", [])),
                 Ok(sp) => {
                     let free = sp.free_pct();
                     if free < min {
-                        f.crit(&path, format!("{free}% free, minimum {min}%"));
+                        f.crit(
+                            &path,
+                            Fault::key(
+                                "alarm_disk_free",
+                                [("free", free.to_string()), ("min", min.to_string())],
+                            ),
+                        );
                     }
                 }
             }
@@ -20800,7 +20876,17 @@ mod watchdog {
         let pct = crate::shared::human::pct(used, max);
         let warn = s.uint("WATCHDOG_CONNTRACK_WARN_PCT")?;
         if pct >= warn {
-            f.warn("conntrack", format!("{pct}% used ({used} of {max})"));
+            f.warn(
+                "conntrack",
+                Fault::key(
+                    "alarm_conntrack",
+                    [
+                        ("pct", pct.to_string()),
+                        ("used", used.to_string()),
+                        ("max", max.to_string()),
+                    ],
+                ),
+            );
         }
         Ok(())
     }
@@ -20816,10 +20902,12 @@ mod watchdog {
                 (Some(e), _) => f.crit(&path, e),
                 (None, true) => f.warn(
                     &path,
-                    format!(
-                        "expires in {} days ({})",
-                        v["days_left"],
-                        v["until"].as_str().unwrap_or_default()
+                    Fault::key(
+                        "alarm_cert_expires",
+                        [
+                            ("days", v["days_left"].to_string()),
+                            ("until", v["until"].as_str().unwrap_or_default().to_string()),
+                        ],
                     ),
                 ),
                 (None, false) => {}
@@ -20848,7 +20936,7 @@ mod watchdog {
             let theirs = match peer::zones_at(s, &address).await {
                 Ok(z) => z,
                 Err(e) => {
-                    f.crit(&name, format!("secondary unreachable: {e}"));
+                    f.crit(&name, Fault::key("alarm_secondary_down", [("error", e)]));
                     continue;
                 }
             };
@@ -20857,12 +20945,14 @@ mod watchdog {
                 if state != peer::ZoneState::InSync {
                     f.warn(
                         &name,
-                        format!(
-                            "zone {} {}: primary {:?} secondary {:?}",
-                            z.zone,
-                            state.word(),
-                            z.primary,
-                            z.secondary
+                        Fault::key(
+                            "alarm_zone_state",
+                            [
+                                ("zone", z.zone.clone()),
+                                ("state", state.word().to_string()),
+                                ("primary", format!("{:?}", z.primary)),
+                                ("secondary", format!("{:?}", z.secondary)),
+                            ],
                         ),
                     );
                 }
@@ -20872,7 +20962,10 @@ mod watchdog {
             // From: Issue #1683 | PR #2019
             for z in &theirs {
                 if z.kind == "Slave" && peer::serial_of(&ours, &z.name).is_none() {
-                    f.warn(&name, format!("extra zone {} not on the primary", z.name));
+                    f.warn(
+                        &name,
+                        Fault::key("alarm_extra_zone", [("zone", z.name.clone())]),
+                    );
                 }
             }
         }

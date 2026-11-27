@@ -487,5 +487,21 @@
   "alarms_none": "No alarms in the last check.",
   "alarms_missing": "The watchdog has not written a report yet.",
   "alarms_age": "last check {x} s ago",
-  "kea_unreachable": "Kea does not answer; the lists below are empty:"
+  "kea_unreachable": "Kea does not answer; the lists below are empty:",
+  "alarm_degraded": "running with reduced function",
+  "alarm_check_streak": "{state}, check {count} of {after}",
+  "alarm_restart_limit": "{state}; restart limit reached",
+  "alarm_restarted": "{state}; restarted",
+  "alarm_restart_failed": "{state}; restart failed: {error}",
+  "alarm_log_budget": "log size {size} bytes is over the budget",
+  "alarm_logs_unread": "log files not read: {files}",
+  "alarm_logs_stuck": "messages arrive but no log file is written",
+  "alarm_cache_full": "cache disk {pct}% full",
+  "alarm_size_zero": "reports size 0",
+  "alarm_disk_free": "{free}% free, minimum {min}%",
+  "alarm_conntrack": "{pct}% used ({used} of {max})",
+  "alarm_cert_expires": "expires in {days} days ({until})",
+  "alarm_secondary_down": "secondary unreachable: {error}",
+  "alarm_zone_state": "zone {zone} {state}: primary {primary} secondary {secondary}",
+  "alarm_extra_zone": "extra zone {zone} not on the primary"
 }
