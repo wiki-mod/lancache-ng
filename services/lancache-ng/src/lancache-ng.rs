@@ -5700,11 +5700,7 @@ mod dns {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn soa_probe(s: &Settings, zone: &str, target: &str) -> Result<Value, String> {
         let (addr, _, wait) = target_addr(s, target)?;
-        let z = zone.to_string();
-        let soa =
-            tokio::task::spawn_blocking(move || crate::shared::dns::soa_probe(addr, &z, wait))
-                .await
-                .map_err(|e| e.to_string())??;
+        let soa = crate::shared::dns::soa_at(addr, zone, wait).await?;
         Ok(json!({"server": addr.to_string(), "zone": zone, "soa": soa,
             "serves_zone": soa.serves_zone()}))
     }
@@ -8385,13 +8381,27 @@ mod shared {
         // What: one SOA query over UDP, no RD.
         // Why: no dig in the ui image; std and rand only.
         // From: Issue #1683 | PR #2017
-        pub fn soa_probe(
+        fn soa_blocking(
             addr: std::net::SocketAddr,
             zone: &str,
             wait: std::time::Duration,
         ) -> Result<Soa, String> {
             let (id, buf) = exchange(addr, &|id| soa_query(id, zone), wait)?;
             soa_reply(id, &buf)
+        }
+
+        // What: the SOA of a zone from one address, no RD.
+        // Why: callers pass the wait of their own SOT key.
+        // From: Issue #1683 | PR #2020
+        pub async fn soa_at(
+            addr: std::net::SocketAddr,
+            zone: &str,
+            wait: std::time::Duration,
+        ) -> Result<Soa, String> {
+            let zone = zone.to_string();
+            tokio::task::spawn_blocking(move || soa_blocking(addr, &zone, wait))
+                .await
+                .map_err(|e| e.to_string())?
         }
 
         // What: send one question over UDP, get reply.
@@ -10688,10 +10698,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let port = s.num::<u16>("DNS_PORT")?;
             let addr = std::net::SocketAddr::new(ip, port);
             let wait = std::time::Duration::from_secs(s.uint("SECONDARY_PROBE_TIMEOUT")?);
-            let zone = zone.to_string();
-            tokio::task::spawn_blocking(move || crate::shared::dns::soa_probe(addr, &zone, wait))
-                .await
-                .map_err(|e| e.to_string())?
+            crate::shared::dns::soa_at(addr, zone, wait).await
         }
 
         // What: the zone list of one secondary by address.
