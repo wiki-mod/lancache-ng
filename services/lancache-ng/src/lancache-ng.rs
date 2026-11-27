@@ -16291,12 +16291,8 @@ mod ui {
                     // What: the anchors once pdns answers.
                     // Why: the start render ran before dns.
                     // From: Issue #1683 | PR #2019
-                    match render_and_write(&s).await {
-                        Ok((_, written)) => {
-                            for line in reload_changed(&app, &s, &written).await {
-                                eprintln!("ui: start: {line}");
-                            }
-                        }
+                    match apply_all(&app, &s, &s, false).await {
+                        Ok(lines) => lines.iter().for_each(|l| eprintln!("ui: start: {l}")),
                         Err(e) => eprintln!("ui: start: anchors: {e}"),
                     }
                     return;
@@ -16311,32 +16307,6 @@ mod ui {
             }
             tokio::time::sleep(Duration::from_secs(wait)).await;
         }
-    }
-
-    // What: reload the dns recursors when a config changed.
-    // Why: a reload picks up a new zone without a restart.
-    // From: Issue #1683
-    pub(crate) async fn reload_changed(
-        app: &App,
-        s: &Settings,
-        changed: &[config::Change],
-    ) -> Vec<String> {
-        let mut report = Vec::new();
-        let mut plan = apply::plan(changed);
-        if plan.is_empty() {
-            return report;
-        }
-        let Ok((grace, limit)) = app.limits(s) else {
-            return vec!["limits unreadable".into()];
-        };
-        let (names, skipped) = plan_containers(app, s, &mut plan).await;
-        report.extend(skipped);
-        let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-        let rx = s.list("RELOAD_EXEC");
-        for (owner, r) in apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await {
-            report.push(format!("{owner}: {r:?}"));
-        }
-        report
     }
 
     // What: bytes of a whole GiB number.
