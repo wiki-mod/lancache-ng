@@ -6162,7 +6162,6 @@ mod shared {
             create: impl FnOnce() -> String,
             owner: Owner,
         ) -> io::Result<String> {
-            let read = || std::fs::read_to_string(path).map(|t| t.trim().to_string());
             let usable = |text: String| {
                 if is_placeholder(&text) {
                     let msg = format!("{} holds a placeholder", path.display());
@@ -6171,22 +6170,37 @@ mod shared {
                     Ok(text)
                 }
             };
-            match fs::read_if_present(path)? {
-                Some(raw) => {
-                    let text = String::from_utf8(raw)
-                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                    usable(text.trim().to_string())
-                }
-                None => {
+            match read_text(path) {
+                Ok(text) => usable(text),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     let text = create();
                     let mode = fs::PRIVATE_MODE;
                     match fs::write(path, text.as_bytes(), mode, Place::Exclusive, owner) {
                         Ok(()) => Ok(text),
-                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => usable(read()?),
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                            usable(read_text(path)?)
+                        }
                         Err(e) => Err(e),
                     }
                 }
+                Err(e) => Err(e),
             }
+        }
+
+        // What: a secret file's text without outer blanks.
+        // Why: every reader of a secret file trims alike.
+        // From: Issue #1683 | PR #2020
+        fn read_text(path: &Path) -> io::Result<String> {
+            std::fs::read_to_string(path).map(|t| t.trim().to_string())
+        }
+
+        // What: the files in the secret directory.
+        // Why: states and all_values walk the same list.
+        // From: Issue #1683 | PR #2020
+        fn files_in(dir: &Path) -> Result<Vec<PathBuf>, String> {
+            let paths =
+                fs::entries_if_present(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            Ok(paths.into_iter().filter(|p| p.is_file()).collect())
         }
 
         // What: env value, else the shared secret file.
@@ -6223,8 +6237,7 @@ mod shared {
             use std::os::unix::fs::PermissionsExt;
             let d = dir(s)?;
             let mut rows = Vec::new();
-            let paths = fs::entries_if_present(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-            for path in paths.into_iter().filter(|p| p.is_file()) {
+            for path in files_in(&d)? {
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -6232,9 +6245,8 @@ mod shared {
                 let key = name.to_ascii_uppercase().replace('-', "_");
                 let meta =
                     std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                let text = text.trim();
+                let text = read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let text = text.as_str();
                 let mode = meta.permissions().mode() & 0o777;
                 rows.push(serde_json::json!({
                     "key": key, "file": name, "mode": format!("{mode:o}"),
@@ -6252,11 +6264,8 @@ mod shared {
         pub fn all_values(s: &crate::config::Settings) -> Result<Vec<String>, String> {
             let d = dir(s)?;
             let mut out = s.secret_values();
-            let paths = fs::entries_if_present(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-            for path in paths.into_iter().filter(|p| p.is_file()) {
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                out.push(text.trim().to_string());
+            for path in files_in(&d)? {
+                out.push(read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?);
             }
             for key in [
                 "PDNS_API_KEY",
