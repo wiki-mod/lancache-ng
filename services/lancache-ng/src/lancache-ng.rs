@@ -6015,21 +6015,6 @@ mod dns {
         Ok(())
     }
 
-    // What: HTTPS IP when HTTPS runs on its own LAN IP.
-    // Why: one rule for the DNS page and the ns2 record.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn primary_https_ip(s: &Settings) -> Result<String, String> {
-        let https = s.text_or_empty("IP_HTTPS");
-        let own = !https.is_empty()
-            && https != s.text("IP_HTTP")?
-            && !crate::shared::dns::is_loopback(&https);
-        // What: no HTTPS part while HTTPS is off.
-        // Why: IP_HTTPS must not wake HTTPS that is off.
-        // From: Issue #1683 | PR #1980
-        let own = own && s.flag("HTTPS_ENABLED")?;
-        Ok(if own { https } else { String::new() })
-    }
-
     // What: NS and A record for the SOA's nameserver.
     // Why: the SOA nameserver needs a record of its name.
     // From: Issue #1683
@@ -6067,7 +6052,7 @@ mod dns {
         // What: ns2 for the HTTPS IP: A and PTR, never NS.
         // Why: HTTPS is optional; another resolver answers.
         // From: Issue #1683 | PR #2017
-        let https = primary_https_ip(s)?;
+        let https = crate::shared::dns::https_ip(s)?.unwrap_or_default();
         let ns2 = crate::shared::dns::canonical_zone(&s.text("DNS_NS_HTTPS_NAME")?);
         if !https.is_empty() && crate::shared::dns::is_below(&ns2, &lan) {
             ensure_rrset(api, &lan, &ns2, "A", ttl, std::slice::from_ref(&https)).await?;
@@ -7913,6 +7898,18 @@ mod shared {
         // From: Issue #1683 | PR #2017
         pub fn is_loopback(text: &str) -> bool {
             parse_ip(text).is_ok_and(|ip| ip.is_loopback())
+        }
+
+        // What: HTTPS IP when HTTPS has its own LAN IP.
+        // Why: dnsdist, ns2 and the DNS page share a rule.
+        // From: Issue #1683 | PR #1980
+        pub fn https_ip(s: &Settings) -> Result<Option<String>, String> {
+            let https = s.text_or_empty("IP_HTTPS");
+            let own = !https.is_empty() && https != s.text("IP_HTTP")? && !is_loopback(&https);
+            // What: no HTTPS part while HTTPS is off.
+            // Why: IP_HTTPS must not wake HTTPS when off.
+            // From: Issue #1683 | PR #1980
+            Ok((own && s.flag("HTTPS_ENABLED")?).then_some(https))
         }
 
         // What: true for a name below a zone, not the zone.
@@ -11477,10 +11474,10 @@ end
                 pool: "http",
                 backend: crate::shared::dns::host_port(&lo, s.uint("RECURSOR_HTTP_PORT")?),
             }];
-            // What: HTTPS port only when IP_HTTPS is set.
-            // Why: dns-https idles without IP_HTTPS.
+            // What: HTTPS port only when HTTPS has own IP.
+            // Why: IP_HTTPS must not wake HTTPS when off.
             // From: Issue #1683 | PR #2017
-            if s.text("IP_HTTPS").is_ok() {
+            if crate::shared::dns::https_ip(s)?.is_some() {
                 listeners.push(Listener {
                     port: s.uint("DNS_HTTPS_PORT")?,
                     pool: "https",
@@ -15904,8 +15901,8 @@ mod ui {
     use crate::dns::{
         LanDomainEdit, answers_aa, commit_and_prune, drop_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
-        primary_https_ip, ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch,
-        snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
+        ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
+        snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
@@ -16850,7 +16847,10 @@ mod ui {
         // What: HTTPS proxy IP when it is a second LAN IP.
         // Why: the copied command then sets HTTPS DNS bind.
         // From: Issue #1683 | PR #1980
-        ctx.insert("primary_ip_https", &primary_https_ip(&s)?);
+        ctx.insert(
+            "primary_ip_https",
+            &crate::shared::dns::https_ip(&s)?.unwrap_or_default(),
+        );
 
         // What: UI address on the LAN when none is set.
         // Why: the install command needs an address.
