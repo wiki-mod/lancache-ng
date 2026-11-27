@@ -13579,11 +13579,9 @@ end
         pub fn remove(pick: &[Item]) -> (u64, Vec<String>) {
             let (mut freed, mut errs) = (0u64, Vec::new());
             for f in pick {
-                match std::fs::remove_file(&f.path) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        errs.push(format!("{}: {e}", f.path.display()));
-                    }
-                    _ => freed = freed.saturating_add(f.size),
+                match super::fs::remove_if_present(&f.path) {
+                    Err(e) => errs.push(format!("{}: {e}", f.path.display())),
+                    Ok(()) => freed = freed.saturating_add(f.size),
                 }
             }
             (freed, errs)
