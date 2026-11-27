@@ -301,7 +301,7 @@ mod cachehamster {
 
     // What: one machine feature, trimmed; None if unusable.
     // Why: use what the machine offers, skip the rest.
-    // From: Issue #871
+    // From: Issue #871 | PR #1997
     fn feature(path: &str) -> Option<Vec<u8>> {
         let raw = crate::shared::fs::read_bytes(Path::new(path)).ok()?;
         let text = String::from_utf8_lossy(&raw).trim().to_string();
@@ -316,7 +316,7 @@ mod cachehamster {
         let path = dir.join(BIND_FILE);
         // What: a QR login freezes the features found now.
         // Why: a feature seen later must not change key.
-        // From: Issue #871
+        // From: Issue #871 | PR #1997
         let names: Vec<String> = if fresh {
             let names: Vec<String> = bind
                 .iter()
@@ -329,7 +329,7 @@ mod cachehamster {
         } else {
             // What: no bind file means a login from before.
             // Why: only new QR login may freeze features.
-            // From: Issue #871
+            // From: Issue #871 | PR #1997
             read_json(&path)?
                 .ok_or("Steam login predates the machine binding; log in again by QR")?
         };
@@ -352,7 +352,7 @@ mod cachehamster {
         };
         // What: an old or moved login opens no more.
         // Why: the operator must know to scan the QR again.
-        // From: Issue #871
+        // From: Issue #871 | PR #1997
         let plain = secret::open(&bound_key(dir, bind, false)?, &sealed).map_err(|_| {
             "Steam login belongs to other machine features; log in again by QR".to_string()
         })?;
@@ -670,7 +670,7 @@ mod cachehamster {
     fn status(c: &Ctx) -> Result<Value, String> {
         // What: an unusable login shows as logged out.
         // Why: the page then offers the QR login again.
-        // From: Issue #871
+        // From: Issue #871 | PR #1997
         let (session, login_error) = match load_session(&c.dir, &c.bind) {
             Ok(s) => (s, None),
             Err(e) => (None, Some(e)),
@@ -5054,7 +5054,7 @@ mod dns {
 
     // What: NS lists with a name in, out or in neither.
     // Why: Some(true) enters, Some(false) takes it out.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) fn ns_change(
         s: &Settings,
         name: &str,
@@ -5081,7 +5081,7 @@ mod dns {
 
     // What: failed checks of one secondary in a row.
     // Why: NS removal needs time and count both.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) struct Failing {
         since: Instant,
         count: u64,
@@ -5089,7 +5089,7 @@ mod dns {
 
     // What: check every secondary; again after a wait.
     // Why: the SOT sets a shorter wait while one fails.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn secondary_watch(app: &Stack) {
         let mut failing: BTreeMap<String, Failing> = BTreeMap::new();
         loop {
@@ -5114,7 +5114,7 @@ mod dns {
 
     // What: one round over all secondaries.
     // Why: resync a lag, enter or take out NS names.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn watch_round(
         app: &Stack,
         s: &Settings,
@@ -5131,7 +5131,7 @@ mod dns {
         for (name, address) in &peers {
             // What: no aa counts as failure only for an NS.
             // Why: an older secondary syncs but is never NS
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             let outcome = match check_peer(s, &ours, address).await {
                 Ok(Err(e)) if !ns.contains(name) => {
                     if enabled {
@@ -5225,7 +5225,7 @@ mod dns {
 
     // What: serials via pdns-API, lag pulled; aa result.
     // Why: an NS must answer aa; AXFR fixes a lost NOTIFY.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn check_peer(
         s: &Settings,
         ours: &[pdns::Zone],
@@ -5485,7 +5485,7 @@ mod dns {
 
     // What: Ok when the address answers zone with aa.
     // Why: only an authoritative secondary may be an NS.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn answers_aa(s: &Settings, address: &str, zone: &str) -> Result<(), String> {
         let soa = peer::soa_on_dns_port(s, address, zone).await?;
         if soa.serves_zone() {
@@ -5719,7 +5719,7 @@ mod dns {
         }
         // What: A or AAAA and PTR of each secondary.
         // Why: an NS name needs address; logs show names.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         for (name, address) in crate::shared::pdns_conf::secondaries(s)? {
             let host = peer_host(s, &name)?;
             let kind = crate::shared::dns::address_kind(&address);
@@ -5728,7 +5728,7 @@ mod dns {
         }
         // What: A and PTR only when ns1 is in the LAN zone.
         // Why: a foreign name has no home in managed zone.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         if crate::shared::dns::is_below(&mname, &lan) {
             let ip = s.text("IP_HTTP")?;
             ensure_rrset(api, &lan, &mname, "A", ttl, std::slice::from_ref(&ip)).await?;
@@ -5736,7 +5736,7 @@ mod dns {
         }
         // What: ns2 for the HTTPS IP: A and PTR, never NS.
         // Why: HTTPS is optional; another resolver answers.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         let https = primary_https_ip(s)?;
         let ns2 = crate::shared::dns::canonical_zone(&s.text("DNS_NS_HTTPS_NAME")?);
         if !https.is_empty() && crate::shared::dns::is_below(&ns2, &lan) {
@@ -5748,7 +5748,7 @@ mod dns {
 
     // What: NS names: ns1, then entered secondaries.
     // Why: a secondary is NS only with the switch on.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) fn ns_names(s: &Settings, mname: &str) -> Result<Vec<String>, String> {
         let mut ns = vec![mname.to_string()];
         if !s.flag("DNS_SECONDARY_NS_ENABLED")? {
@@ -5765,14 +5765,14 @@ mod dns {
 
     // What: LAN name of a secondary, with trailing dot.
     // Why: A, PTR and NS records use the same name.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) fn peer_host(s: &Settings, name: &str) -> Result<String, String> {
         Ok(format!("{name}.{}", crate::shared::dns::lan_zone(s)?))
     }
 
     // What: drop address and PTR records of a secondary.
     // Why: a removed or moved secondary leaves no record.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn drop_peer_records(
         s: &Settings,
         name: &str,
@@ -5800,7 +5800,7 @@ mod dns {
 
     // What: PTR of an address in its managed reverse zone.
     // Why: a reverse zone the stack does not serve is left.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn ensure_ptr(
         s: &Settings,
         api: &pdns::Api,
@@ -5933,7 +5933,7 @@ mod dns {
 
     // What: TSIG key, zones, then binding; one error line.
     // Why: the key is known, so no zone exists without it.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) async fn ensure_zones(s: &Settings) -> Result<(), String> {
         let key = peer::ensure_tsigkey(s)
             .await
@@ -6661,7 +6661,7 @@ mod shared {
             h.update(salt);
             // What: each part with its length in front.
             // Why: "ab"+"c" must differ from "a"+"bc".
-            // From: Issue #871
+            // From: Issue #871 | PR #1997
             for (name, value) in parts {
                 for chunk in [name.as_bytes(), value.as_slice()] {
                     h.update((chunk.len() as u64).to_be_bytes());
@@ -7091,7 +7091,7 @@ mod shared {
 
             // What: add a zone that pulls, with its key.
             // Why: no zone may exist without its TSIG key.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             pub async fn create_secondary(
                 &self,
                 zone: &str,
@@ -7126,7 +7126,7 @@ mod shared {
             ) -> Result<(), String> {
                 // What: TSIG-ALLOW-AXFR set on create.
                 // Why: no zone may exist without its key.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2017
                 let body = json!({
                     "name": zone_id(zone),
                     "kind": "Master",
@@ -7611,7 +7611,7 @@ mod shared {
 
         // What: SOA answer of one DNS server.
         // Why: aa marks pdns data; serial shows the state.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
         pub struct Soa {
             pub authoritative: bool,
@@ -7714,7 +7714,7 @@ mod shared {
 
         // What: SOA query for one zone, RD bit off.
         // Why: without RD a recursor sends no aa answer.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn soa_query(id: u16, zone: &str) -> Result<Vec<u8>, String> {
             query(id, zone, TYPE_SOA, false)
         }
@@ -7749,7 +7749,7 @@ mod shared {
 
         // What: end of a DNS name at offset at.
         // Why: answers use labels and compression pointers.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         fn name_end(msg: &[u8], mut at: usize) -> Result<usize, String> {
             loop {
                 let len = *msg.get(at).ok_or("DNS name is cut off")?;
@@ -7870,7 +7870,7 @@ mod shared {
 
         // What: aa bit, rcode and serial of a reply.
         // Why: the id must match the query sent.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn soa_reply(id: u16, msg: &[u8]) -> Result<Soa, String> {
             let r = reply(id, msg)?;
             let serial = r
@@ -7894,7 +7894,7 @@ mod shared {
 
         // What: one SOA query over UDP, no RD.
         // Why: no dig in the ui image; std and rand only.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn soa_probe(
             addr: std::net::SocketAddr,
             zone: &str,
@@ -7975,7 +7975,7 @@ mod shared {
         pub fn ntp_addrs(s: &Settings) -> Result<Vec<String>, String> {
             // What: IP_HTTP while own NTP is handed out.
             // Why: LanCache-NG-NTP answers on the HTTP IP.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             if own_ntp(s)? {
                 return Ok(vec![s.text("IP_HTTP")?]);
             }
@@ -8255,7 +8255,7 @@ mod shared {
         impl Health {
             // What: read docker inspect State.
             // Why: newest check output DEGRADED: refines ok
-            // From: Issue #1296
+            // From: Issue #1296 | PR #1983
             pub fn from_inspect(inspect: &Value) -> Self {
                 let state = inspect.pointer("/State/Status").and_then(Value::as_str);
                 if state != Some(RUNNING) {
@@ -8572,7 +8572,7 @@ mod shared {
 
         // What: compose label of a "compose run" container.
         // Why: fixed by Docker Compose; "True" on run only.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #1997
         pub const ONEOFF_LABEL: &str = "com.docker.compose.oneoff";
 
         // What: URL host used over the unix socket.
@@ -9929,7 +9929,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             }
             // What: NOTIFY only to also-notify, not to NS.
             // Why: port 53 of an NS host is a recursor.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             out += "only-notify=\n";
             Ok(out)
         }
@@ -10006,7 +10006,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: state of one zone from its two serials.
         // Why: the peer status is the worst zone state.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn zone_state(z: &PeerZone) -> ZoneState {
             use std::cmp::Ordering;
             // What: let-else instead of None in a tuple.
@@ -10039,7 +10039,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: TSIG key in PowerDNS; returns its name.
         // Why: zones are made with the key; it comes first.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub async fn ensure_tsigkey(s: &Settings) -> Result<String, String> {
             let name = s.text("DDNS_TSIG_NAME")?;
             let algorithm = s.text("DDNS_TSIG_ALGORITHM")?;
@@ -10128,7 +10128,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: port 53 if the primary answers aa there.
         // Why: up to v0.4.0 the recursor held port 53.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
             let fallback = s.uint("PDNS_AUTH_PORT")?;
             let Some(zone) = zone else {
@@ -10597,7 +10597,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: one upstream: IP, [IPv6]:port or IPv4:port.
         // Why: a half bracket form must not be saved.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #1985
         fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
             let bad = || format!("{key}: {raw} is no IP address");
             let (host, _) = crate::shared::dns::split_host_port(raw).map_err(|_| bad())?;
@@ -10701,7 +10701,7 @@ end
             y += &yaml_list(&s.list("DNS_QUERY_ALLOW_FROM")?, "    ")?;
             // What: dnsdist passes the client IP by header.
             // Why: allow_from and logs see the real client.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             let proxy = crate::shared::dnsdist_conf::source_of(s)?;
             y += &format!("  proxy_protocol_from:\n{}", yaml_list(&[proxy], "    ")?);
             // What: NOTIFY from the own pdns wipes a zone.
@@ -10775,7 +10775,7 @@ end
 
     // What: dnsdist.conf in front of pdns and recursors.
     // Why: queries, NOTIFY and AXFR share port 53.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub mod dnsdist_conf {
         use crate::config::Settings;
 
@@ -10791,7 +10791,7 @@ end
 
         // What: sender address of dnsdist to its backends.
         // Why: only this address sends proxy protocol.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn source(raw: &str, loopback: &str) -> Result<String, String> {
             let ip: std::net::Ipv4Addr = raw
                 .parse()
@@ -10803,7 +10803,7 @@ end
             }
             // What: must differ from LOOPBACK_BIND_IP.
             // Why: recursor to pdns runs from it, no header
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             if raw == loopback {
                 return Err(format!(
                     "DNSDIST_SOURCE_ADDRESS={raw} equals LOOPBACK_BIND_IP"
@@ -10814,7 +10814,7 @@ end
 
         // What: one dnsdist port and its recursor.
         // Why: HTTP and HTTPS mode keep their own caches.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub struct Listener {
             pub port: u64,
             pub pool: &'static str,
@@ -10823,7 +10823,7 @@ end
 
         // What: dnsdist Lua config from plain values.
         // Why: no Settings needed; the tests call it.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn body(
             listen: &[String],
             acl: &[String],
@@ -10859,7 +10859,7 @@ end
             }
             // What: NOTIFY, XFR and non-RD queries to pdns.
             // Why: a secondary asks SOA and AXFR without RD
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             out += &format!(
                 "addAction(AndRule({{DSTPortRule({}), OrRule({{OpcodeRule(DNSOpcode.Notify), QTypeRule(DNSQType.AXFR), QTypeRule(DNSQType.IXFR), NotRule(RDRule())}})}}), PoolAction(\"auth\"))\n",
                 first.port
@@ -10875,13 +10875,13 @@ end
 
         // What: full dnsdist.conf for this node.
         // Why: the ACL adds the replication peers.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub fn render(s: &Settings) -> Result<String, String> {
             let lo = s.text("LOOPBACK_BIND_IP")?;
             let source = source_of(s)?;
             // What: peers pass the ACL besides the clients.
             // Why: NOTIFY and AXFR reach port 53 too.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             let peers = match crate::shared::dns::Role::from_settings(s)? {
                 crate::shared::dns::Role::Primary => crate::shared::pdns_conf::secondary_ips(s)?,
                 crate::shared::dns::Role::Secondary => vec![s.text("DNS_XFR_PRIMARY")?],
@@ -10898,7 +10898,7 @@ end
             }];
             // What: HTTPS port only when IP_HTTPS is set.
             // Why: dns-https idles without IP_HTTPS.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2017
             if s.text("IP_HTTPS").is_ok() {
                 listeners.push(Listener {
                     port: s.uint("DNS_HTTPS_PORT")?,
@@ -10986,7 +10986,7 @@ end
 
         // What: ntp-servers of kept subnets follow own NTP.
         // Why: while on, toggle owns option 42 everywhere.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         pub(crate) fn follow_ntp(mut subnets: Value, auto: bool, own: &str, back: &str) -> Value {
             for sn in subnets.as_array_mut().into_iter().flatten() {
                 if auto && sn.get("option-data").is_none() {
@@ -11002,7 +11002,7 @@ end
                     None if auto => rows.push(json!({"name": ntp, "data": own})),
                     // What: off returns own IP to default.
                     // Why: no NTP answers there when off.
-                    // From: Issue #1683
+                    // From: Issue #1683 | PR #2017
                     Some(i) if rows[i]["data"] == own && back.is_empty() => {
                         rows.remove(i);
                     }
@@ -12098,7 +12098,7 @@ end
                     None => Outcome::Live,
                     // What: owner reload commands via exec.
                     // Why: a reload must not restart it.
-                    // From: Issue #1683
+                    // From: Issue #1683 | PR #1985
                     Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
                         let name = container_of(owner);
                         match reload_exec(api, &name, exec, owner, limit).await {
@@ -14234,7 +14234,7 @@ end
 
         // What: A for IPv4, AAAA for IPv6.
         // Why: a secondary may register either address.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         #[test]
         fn address_kind_follows_the_family() {
             assert_eq!(address_kind("192.0.2.20"), "A");
@@ -14243,7 +14243,7 @@ end
 
         // What: on sets own NTP; off gives only it back.
         // Why: a user value must survive the off state.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         #[test]
         fn kept_subnets_follow_own_ntp() {
             let own = "192.0.2.10";
@@ -14270,7 +14270,7 @@ end
 
         // What: an aa reply with one SOA, name compressed.
         // Why: pdns answers this way to a non-RD query.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         fn reply(id: u16, aa: bool, serial: u32) -> Vec<u8> {
             let mut m = soa_query(id, "lan").unwrap_or_default();
             m[2] = if aa { 0x84 } else { 0x80 };
@@ -14788,7 +14788,7 @@ mod stack {
         let (grace, limit) = app.limits(new)?;
         // What: a new file runs the commands of its daemon.
         // Why: the daemons do not watch their file.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2002
         for (file, exec, tag) in [
             ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
             ("PDNS_CONF_FILE", "PDNS_RESTART_EXEC", "pdns"),
@@ -14840,7 +14840,7 @@ mod stack {
         }
         // What: proxy and relay share one dnsmasq daemon.
         // Why: a mode change keeps the container running.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2002
         let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
         if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) {
             let ex = new.list("DNSMASQ_RESTART_EXEC")?;
@@ -15229,7 +15229,7 @@ mod ui {
             let login = !password_hash(&s).is_empty();
             // What: page and route paths by short name.
             // Why: templates name SOT key without prefix.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #1985
             let paths = |prefix: &str| -> BTreeMap<String, String> {
                 s.texts()
                     .filter_map(|(k, v)| {
@@ -15878,7 +15878,7 @@ mod ui {
         ctx.insert("txt_max_bytes", &s.uint("DNS_TXT_MAX_BYTES")?);
         // What: NS state of each secondary: in, off or new.
         // Why: the row shows it and offers matching button.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         let (ns, off) = (s.list("DNS_SECONDARY_NS")?, s.list("DNS_SECONDARY_NS_OFF")?);
         let peers: Vec<Value> = crate::shared::pdns_conf::secondaries(&s)?
             .into_iter()
@@ -15957,7 +15957,7 @@ mod ui {
 
     // What: one DNS page form, chosen by its SOT key.
     // Why: all DNS forms share one handler.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #1985
     pub(crate) async fn dns_action(
         State(app): Shared,
         Extension(csrf): Extension<Csrf>,
@@ -16116,7 +16116,7 @@ mod ui {
                 let (_, address) = list.remove(at);
                 // What: the name leaves both NS lists too.
                 // Why: new same-name secondary starts new.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2017
                 let mut form = ns_change(&s, &name, None)?;
                 let rows = crate::shared::pdns_conf::secondary_rows(&list);
                 form.insert("DNS_SECONDARIES".into(), rows);
@@ -16864,7 +16864,7 @@ mod ui {
         }
         // What: only a running program is touched.
         // Why: a restart must not start kea in dnsmasq mode
-        // From: Issue #1683
+        // From: Issue #1683 | PR #1985
         let control = s.text("SERVICE_CONTROL_PROGRAM")?;
         let status = [control.as_str(), program.as_str(), "status"];
         let (code, _) = exec_in(&app, &s, &container, &status)
@@ -16994,7 +16994,7 @@ mod ui {
         }
         // What: the cachehamster command of each action.
         // Why: daemon protocol names commands, not paths.
-        // From: Issue #871
+        // From: Issue #871 | PR #1985
         let args: Vec<&str> = match op {
             HamsterOp::Add => vec!["add", &name, &when, &what],
             HamsterOp::Start => vec!["start", &id],
@@ -17111,7 +17111,7 @@ mod ui {
 
     // What: seconds as "4 h", "90 min" or "45 s".
     // Why: the page shows the SOT check times readably.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2017
     pub(crate) fn duration_text(secs: u64) -> String {
         match secs {
             s if s >= 3600 && s % 3600 == 0 => format!("{} h", s / 3600),
@@ -17186,7 +17186,7 @@ mod ui {
 
     // What: refuse a bigger cache without room.
     // Why: growth must fit the free disk space.
-    // From: Issue #1069
+    // From: Issue #1069 | PR #1983
     pub(crate) fn cache_room(s: &Settings, form: &Fields, cached: u64) -> Result<(), Fail> {
         let Some(wanted) = form.get("CACHE_MAX_GB") else {
             return Ok(());
@@ -18266,7 +18266,7 @@ mod ui {
 
         // What: check times as h, min or s.
         // Why: the page shows the SOT seconds readably.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2017
         #[test]
         fn duration_text_picks_the_largest_whole_unit() {
             assert_eq!(duration_text(14400), "4 h");
