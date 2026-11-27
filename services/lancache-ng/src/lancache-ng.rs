@@ -13828,13 +13828,20 @@ mod stack {
         out
     }
 
+    // What: the settings file, or an error when unset.
+    // Why: commit and check_change fail the same way.
+    // From: Issue #1683 | PR #2020
+    fn saved_path(app: &Stack) -> Result<PathBuf, String> {
+        app.saved
+            .clone()
+            .ok_or_else(|| format!("{} is not set", config::SETTINGS_FILE_ENV))
+    }
+
     // What: save, reload, render, write, apply.
     // Why: one path for every setting change.
     // From: Issue #1683 | PR #1858
     pub(crate) async fn commit(app: &Stack, form: Fields) -> Result<(), String> {
-        let Some(path) = app.saved.clone() else {
-            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
-        };
+        let path = saved_path(app)?;
         let old = app.settings();
         let updates = changes(&old, form);
         if updates.is_empty() {
@@ -13908,9 +13915,7 @@ mod stack {
     // Why: config validate and ?dry_run=1 save nothing.
     // From: Issue #1683 | PR #2020
     pub(crate) fn check_change(app: &Stack, form: Fields) -> Result<Vec<String>, String> {
-        let Some(path) = app.saved.clone() else {
-            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
-        };
+        let path = saved_path(app)?;
         let old = app.settings();
         let updates = changes(&old, form);
         if !updates.is_empty() {
