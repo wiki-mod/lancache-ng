@@ -6668,14 +6668,25 @@ mod shared {
                 }
             }
 
+            // What: one request whose answer text is not needed.
+            // Why: writes only need the status checked.
+            // From: Issue #1683 | PR #2020
+            async fn send(
+                &self,
+                method: Method,
+                path: &str,
+                body: Option<Value>,
+            ) -> Result<(), String> {
+                self.call(method, path, body).await.map(drop)
+            }
+
             // What: PATCH a list of rrset changes.
             // Why: soa-edit-api raises the serial once.
             // From: Issue #1683 | PR #1980
             async fn patch(&self, zone: &str, rrsets: Vec<Value>) -> Result<(), String> {
                 let path = zone_path(zone);
-                self.call(Method::PATCH, &path, Some(json!({ "rrsets": rrsets })))
+                self.send(Method::PATCH, &path, Some(json!({ "rrsets": rrsets })))
                     .await
-                    .map(drop)
             }
 
             // What: replace one rrset; empty deletes it.
@@ -6747,9 +6758,7 @@ mod shared {
                     "masters": masters,
                     "slave_tsig_key_ids": [zone_id(key)],
                 });
-                self.call(Method::POST, "/zones", Some(body))
-                    .await
-                    .map(drop)
+                self.send(Method::POST, "/zones", Some(body)).await
             }
 
             // What: remove one zone.
@@ -6757,7 +6766,7 @@ mod shared {
             // From: Issue #1683 | PR #1980
             pub async fn delete_zone(&self, zone: &str) -> Result<(), String> {
                 let path = zone_path(zone);
-                self.call(Method::DELETE, &path, None).await.map(drop)
+                self.send(Method::DELETE, &path, None).await
             }
 
             // What: add primary zone; SOA from default-soa.
@@ -6779,9 +6788,7 @@ mod shared {
                     "soa_edit_api": soa_edit,
                     "master_tsig_key_ids": [zone_id(key)],
                 });
-                self.call(Method::POST, "/zones", Some(body))
-                    .await
-                    .map(drop)
+                self.send(Method::POST, "/zones", Some(body)).await
             }
 
             // What: one TSIG key; None if pdns has none.
@@ -6819,9 +6826,7 @@ mod shared {
                 {
                     return Ok(());
                 }
-                self.call(Method::POST, "/tsigkeys", Some(body))
-                    .await
-                    .map(drop)
+                self.send(Method::POST, "/tsigkeys", Some(body)).await
             }
 
             // What: set one metadata kind of a zone.
@@ -6835,7 +6840,7 @@ mod shared {
             ) -> Result<(), String> {
                 let path = format!("{}/metadata/{kind}", zone_path(zone));
                 let body = json!({"kind": kind, "metadata": values});
-                self.call(Method::PUT, &path, Some(body)).await.map(drop)
+                self.send(Method::PUT, &path, Some(body)).await
             }
 
             // What: primary address of one secondary zone.
@@ -6844,7 +6849,7 @@ mod shared {
             pub async fn set_masters(&self, zone: &str, masters: &[String]) -> Result<(), String> {
                 let path = zone_path(zone);
                 let body = json!({"masters": masters});
-                self.call(Method::PUT, &path, Some(body)).await.map(drop)
+                self.send(Method::PUT, &path, Some(body)).await
             }
 
             // What: TSIG key a secondary uses for AXFR.
@@ -6853,7 +6858,7 @@ mod shared {
             pub async fn set_secondary_tsig(&self, zone: &str, key: &str) -> Result<(), String> {
                 let path = zone_path(zone);
                 let body = json!({"slave_tsig_key_ids": [zone_id(key)]});
-                self.call(Method::PUT, &path, Some(body)).await.map(drop)
+                self.send(Method::PUT, &path, Some(body)).await
             }
 
             // What: all zones with serial and checks.
@@ -6868,9 +6873,8 @@ mod shared {
             // Why: a lagging secondary is pushed at once.
             // From: Issue #1683 | PR #1980
             pub async fn notify(&self, zone: &str) -> Result<(), String> {
-                self.call(Method::PUT, &format!("{}/notify", zone_path(zone)), None)
+                self.send(Method::PUT, &format!("{}/notify", zone_path(zone)), None)
                     .await
-                    .map(drop)
             }
 
             // What: pull a secondary zone now.
@@ -6878,7 +6882,7 @@ mod shared {
             // From: Issue #1683 | PR #1980
             pub async fn axfr_retrieve(&self, zone: &str) -> Result<(), String> {
                 let path = format!("{}/axfr-retrieve", zone_path(zone));
-                self.call(Method::PUT, &path, None).await.map(drop)
+                self.send(Method::PUT, &path, None).await
             }
 
             // What: numbers of a statistics list, summed.
@@ -6917,7 +6921,7 @@ mod shared {
             // From: Issue #1683 | PR #1980
             pub async fn flush(&self, name: &str, subtree: bool) -> Result<(), String> {
                 let path = format!("/cache/flush?domain={}&subtree={subtree}", zone_id(name));
-                self.call(Method::PUT, &path, None).await.map(drop)
+                self.send(Method::PUT, &path, None).await
             }
 
             // What: give a zone a signing key once.
@@ -6934,7 +6938,7 @@ mod shared {
                 let body = json!({"keytype": "csk", "active": true, "published": true});
                 self.call(Method::POST, &keys, Some(body)).await?;
                 let rectify = format!("{}/rectify", zone_path(zone));
-                self.call(Method::PUT, &rectify, None).await.map(drop)
+                self.send(Method::PUT, &rectify, None).await
             }
 
             // What: SHA-256 DS rows of the active keys.
