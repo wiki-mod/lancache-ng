@@ -11713,6 +11713,17 @@ end
                     (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => self.errs.push(e),
                 }
             }
+            // What: adds one file of a known owner and path.
+            // Why: nginx files have no SOT key per file.
+            // From: Issue #1683 | PR #2020
+            fn add_path(&mut self, owner: &str, path: PathBuf, body: String) {
+                self.files.push(File {
+                    owner: owner.to_string(),
+                    path,
+                    body,
+                });
+            }
+
             // What: adds a JSON value as a pretty file.
             // Why: a JSON error is recorded like any other.
             // From: Issue #1683 | PR #1980
@@ -11928,27 +11939,16 @@ end
                     continue;
                 }
                 let body = nginx_conf::template(&read(&src.join(&name))?, s)?;
-                o.files.push(File {
-                    owner: proxy.clone(),
-                    path: dst.join(&name),
-                    body,
-                });
+                o.add_path(&proxy, dst.join(&name), body);
             }
             for (rel, body) in nginx_conf::files(s, &hosts, https)? {
-                o.files.push(File {
-                    owner: proxy.clone(),
-                    path: dst.join(rel),
-                    body,
-                });
+                o.add_path(&proxy, dst.join(rel), body);
             }
             // What: the static health body nginx serves.
             // Why: proxy-params.conf aliases; ui owns files
             // From: Issue #1683 | PR #1980
-            o.files.push(File {
-                owner: proxy,
-                path: dst.join(s.text("NGINX_HEALTHZ_FILE")?),
-                body: format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?),
-            });
+            let health = format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?);
+            o.add_path(&proxy, dst.join(s.text("NGINX_HEALTHZ_FILE")?), health);
             Ok(())
         }
 
