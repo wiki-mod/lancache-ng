@@ -2261,68 +2261,236 @@ mod cachehamster {
         }
     }
 
-    // What: every command cachehamster takes.
-    // Why: the help names the same set as the match.
+    // What: what one cachehamster command does.
+    // Why: command() matches these, the table names them.
     // From: Issue #871 | PR #2020
-    const COMMANDS: [&str; 18] = [
-        "daemon",
-        "status",
-        "healthcheck",
-        "login-begin",
-        "login-poll",
-        "login-cancel",
-        "logout",
-        "library",
-        "cached",
-        "wipe",
-        "fetch-check",
-        "steam-check",
-        "lookup",
-        "evict",
-        "add",
-        "start",
-        "cancel",
-        "remove",
+    #[derive(Clone, Copy, PartialEq)]
+    enum Op {
+        Daemon,
+        Status,
+        Healthcheck,
+        LoginBegin,
+        LoginPoll,
+        LoginCancel,
+        Logout,
+        Library,
+        Cached,
+        Wipe,
+        FetchCheck,
+        SteamCheck,
+        Lookup,
+        Evict,
+        Add,
+        Start,
+        Cancel,
+        Remove,
+    }
+
+    // What: how REST may call a command.
+    // Why: the ui reads it here, not from a second list.
+    // From: Issue #871 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Rest {
+        No,
+        Plain,
+        AppId,
+        Url,
+    }
+
+    // What: a command row: the action and its REST use.
+    // Why: one place says what a word does and allows.
+    // From: Issue #871 | PR #2020
+    #[derive(Clone, Copy)]
+    struct Cmd {
+        op: Op,
+        rest: Rest,
+    }
+
+    // What: every command cachehamster takes.
+    // Why: help, errors, choice and REST read this table.
+    // From: Issue #871 | PR #2020
+    const COMMANDS: [(&str, Cmd); 18] = [
+        (
+            "daemon",
+            Cmd {
+                op: Op::Daemon,
+                rest: Rest::No,
+            },
+        ),
+        (
+            "status",
+            Cmd {
+                op: Op::Status,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "healthcheck",
+            Cmd {
+                op: Op::Healthcheck,
+                rest: Rest::No,
+            },
+        ),
+        (
+            "login-begin",
+            Cmd {
+                op: Op::LoginBegin,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "login-poll",
+            Cmd {
+                op: Op::LoginPoll,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "login-cancel",
+            Cmd {
+                op: Op::LoginCancel,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "logout",
+            Cmd {
+                op: Op::Logout,
+                rest: Rest::No,
+            },
+        ),
+        (
+            "library",
+            Cmd {
+                op: Op::Library,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "cached",
+            Cmd {
+                op: Op::Cached,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "wipe",
+            Cmd {
+                op: Op::Wipe,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "fetch-check",
+            Cmd {
+                op: Op::FetchCheck,
+                rest: Rest::Url,
+            },
+        ),
+        (
+            "steam-check",
+            Cmd {
+                op: Op::SteamCheck,
+                rest: Rest::Plain,
+            },
+        ),
+        (
+            "lookup",
+            Cmd {
+                op: Op::Lookup,
+                rest: Rest::AppId,
+            },
+        ),
+        (
+            "evict",
+            Cmd {
+                op: Op::Evict,
+                rest: Rest::AppId,
+            },
+        ),
+        (
+            "add",
+            Cmd {
+                op: Op::Add,
+                rest: Rest::No,
+            },
+        ),
+        (
+            "start",
+            Cmd {
+                op: Op::Start,
+                rest: Rest::No,
+            },
+        ),
+        (
+            "cancel",
+            Cmd {
+                op: Op::Cancel,
+                rest: Rest::No,
+            },
+        ),
+        (
+            "remove",
+            Cmd {
+                op: Op::Remove,
+                rest: Rest::No,
+            },
+        ),
     ];
+
+    // What: how REST may call a command word.
+    // Why: the ui builds the arguments from the kind.
+    // From: Issue #871 | PR #2020
+    pub(crate) fn rest_of(word: &str) -> Rest {
+        crate::shared::cli::pick(&COMMANDS, word).map_or(Rest::No, |c| c.rest)
+    }
 
     // What: run one command and answer as JSON.
     // Why: the UI calls these through docker exec.
     // From: Issue #871 | PR #1980
     async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
-        let client = http::client(&c.s)?;
-        match args.first().map(String::as_str) {
-            Some("status") => status(&c),
+        use crate::shared::cli;
+        let op = match args.first().map(String::as_str) {
+            None => Op::Daemon,
+            Some(word) => cli::pick(&COMMANDS, word)
+                .map(|cmd| cmd.op)
+                .ok_or_else(|| cli::commands(&COMMANDS))?,
+        };
+        // What: the HTTP client, built when one is needed.
+        // Why: the daemon and local commands need none.
+        // From: Issue #871 | PR #2020
+        let client = || http::client(&c.s);
+        match op {
+            Op::Daemon => daemon(c).await.map(|()| Value::Null),
+            Op::Status => status(&c),
             // What: probe: the daemon wrote jobs lately.
             // Why: the same rule as daemon_running.
             // From: Issue #871 | PR #2020
-            Some("healthcheck") => match daemon_alive(&c)? {
+            Op::Healthcheck => match daemon_alive(&c)? {
                 true => Ok(json!({"daemon_running": true})),
                 false => Err("cachehamster daemon is not running".into()),
             },
-            Some("login-begin") => login_begin(&c, &client).await,
-            Some("login-poll") => login_poll(&c, &client).await,
-            Some("login-cancel") => {
-                remove(&c.path(PENDING_FILE)).map(|()| json!({"state": "idle"}))
-            }
-            Some("logout") => remove(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
-            Some("library") => library(&c, &client).await,
-            Some("cached") => cached(&c),
-            Some("fetch-check") => fetch_check(&c, &args[1..]).await,
-            Some("steam-check") => steam_check(&c).await,
-            Some("wipe") => wipe(&c),
-            Some("lookup") => app_cache(&c, &args[1..], false).await,
-            Some("evict") => app_cache(&c, &args[1..], true).await,
-            Some("add") => submit(&c, &parse_add(&args[1..])?),
-            Some(op @ ("start" | "cancel" | "remove")) => {
+            Op::LoginBegin => login_begin(&c, &client()?).await,
+            Op::LoginPoll => login_poll(&c, &client()?).await,
+            Op::LoginCancel => remove(&c.path(PENDING_FILE)).map(|()| json!({"state": "idle"})),
+            Op::Logout => remove(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
+            Op::Library => library(&c, &client()?).await,
+            Op::Cached => cached(&c),
+            Op::FetchCheck => fetch_check(&c, &args[1..]).await,
+            Op::SteamCheck => steam_check(&c).await,
+            Op::Wipe => wipe(&c),
+            Op::Lookup => app_cache(&c, &args[1..], false).await,
+            Op::Evict => app_cache(&c, &args[1..], true).await,
+            Op::Add => submit(&c, &parse_add(&args[1..])?),
+            Op::Start | Op::Cancel | Op::Remove => {
                 let id = args.get(1).ok_or("job id missing")?.clone();
                 let order = match op {
-                    "start" => Order::Start { id },
-                    "cancel" => Order::Cancel { id },
+                    Op::Start => Order::Start { id },
+                    Op::Cancel => Order::Cancel { id },
                     _ => Order::Remove { id },
                 };
                 submit(&c, &order)
             }
-            _ => Err(format!("commands: {}", COMMANDS.join(" "))),
         }
     }
 
@@ -2335,14 +2503,11 @@ mod cachehamster {
         // Why: no settings are needed to name them.
         // From: Issue #1683 | PR #2020
         if args.first().is_some_and(|a| a == "help") {
-            println!("commands: {}", COMMANDS.join(" "));
+            println!("{}", crate::shared::cli::commands(&COMMANDS));
             return std::process::ExitCode::SUCCESS;
         }
         let result = match Ctx::load() {
             Err(e) => Err(e),
-            Ok(c) if args.first().is_none_or(|a| a == "daemon") => {
-                daemon(c).await.map(|()| Value::Null)
-            }
             Ok(c) => command(c, &args).await,
         };
         match result {
@@ -3705,19 +3870,49 @@ mod dhcp {
     // From: Issue #1683 | PR #2020
     pub(crate) const NOT_KEA: &str = "DHCP mode is not kea";
 
+    // What: what one dhcp command does.
+    // Why: run() matches these, the table names them.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    enum Op {
+        State,
+        KeaSnapshots,
+        Stats,
+        KeaRollback,
+        Probe,
+        Do,
+    }
+
+    // What: every command of the dhcp group.
+    // Why: help, errors and the choice read this table.
+    // From: Issue #1683 | PR #2020
+    const COMMANDS: [(&str, Op); 6] = [
+        ("state", Op::State),
+        ("kea-snapshots", Op::KeaSnapshots),
+        ("stats", Op::Stats),
+        ("kea-rollback", Op::KeaRollback),
+        ("probe", Op::Probe),
+        ("do", Op::Do),
+    ];
+
     // What: lancache-ng dhcp <command>: JSON on stdout.
     // Why: DHCP reads have their CLI with their owner.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn run(args: &[String]) -> Result<(), String> {
+        use crate::shared::cli;
         let s = Settings::from_process()?;
-        let v = match args.first().map(String::as_str) {
-            Some("state") => kea_state(&s).await?.ok_or(NOT_KEA)?,
-            Some("kea-snapshots") => kea_snapshots(&s)?,
-            Some("stats") => json!(kea_stats(&s).await?.ok_or(NOT_KEA)?),
+        let op = match args.first().map(String::as_str) {
+            Some(word) => cli::pick(&COMMANDS, word),
+            None => None,
+        };
+        let v = match op.ok_or_else(|| cli::commands(&COMMANDS))? {
+            Op::State => kea_state(&s).await?.ok_or(NOT_KEA)?,
+            Op::KeaSnapshots => kea_snapshots(&s)?,
+            Op::Stats => json!(kea_stats(&s).await?.ok_or(NOT_KEA)?),
             // What: rollback calls Kea itself, not the ui.
             // Why: a repair must work while the ui is down.
             // From: Issue #1683 | PR #2020
-            Some("kea-rollback") => match &args[1..] {
+            Op::KeaRollback => match &args[1..] {
                 [id] => {
                     kea_rollback(&s, id).await?;
                     json!({"restored": "kea", "snapshot": id})
@@ -3727,7 +3922,7 @@ mod dhcp {
             // What: the LAN DHCP probe via the ui socket.
             // Why: the ui starts it on the host network.
             // From: Issue #1683 | PR #2020
-            Some("probe") => {
+            Op::Probe => {
                 let route = s.text("UI_ROUTE_DHCP_CHECK")?;
                 let body = http::Body::Form(vec![]);
                 http::ui_socket(&s, &route, body).await?
@@ -3735,7 +3930,7 @@ mod dhcp {
             // What: a DHCP page action via the ui socket.
             // Why: the ui checks, saves and applies it.
             // From: Issue #1683 | PR #2020
-            Some("do") => {
+            Op::Do => {
                 use crate::ui::DhcpOp;
                 // What: rollback has its own word.
                 // Why: one CLI way per job.
@@ -3747,7 +3942,6 @@ mod dhcp {
                     .collect();
                 http::page_do(&s, &keys, &args[1..]).await?
             }
-            _ => return Err("commands: state kea-snapshots stats kea-rollback probe do".into()),
         };
         println!("{v}");
         Ok(())
@@ -4082,12 +4276,17 @@ mod dns {
     // Why: image rows call it bare; the CLI checks a round.
     // From: Issue #1683 | PR #2020
     pub async fn run(args: &[String]) -> Result<(), String> {
-        match args.first().map(String::as_str) {
-            None | Some("daemon") => follow().await,
+        use crate::shared::cli;
+        let op = match args.first().map(String::as_str) {
+            None => Op::Daemon,
+            Some(word) => cli::pick(&COMMANDS, word).ok_or_else(|| cli::commands(&COMMANDS))?,
+        };
+        match op {
+            Op::Daemon => follow().await,
             // What: one follow round, then exit with it.
             // Why: the CLI check runs the daemon loop code.
             // From: Issue #1683 | PR #2020
-            Some("follow-once") => {
+            Op::FollowOnce => {
                 let s = Settings::from_process()?;
                 if Role::from_settings(&s)? != Role::Secondary {
                     return Err("follow-once: this host is no secondary".into());
@@ -4099,7 +4298,7 @@ mod dns {
             // What: zone serials and states as JSON.
             // Why: same reader as the DNS page and REST.
             // From: Issue #1683 | PR #2020
-            Some("sync-check") => {
+            Op::SyncCheck => {
                 let v = zone_overview(&Settings::from_process()?).await?;
                 println!("{v}");
                 match out_of_sync(&v) {
@@ -4110,7 +4309,7 @@ mod dns {
             // What: a DNS page action via the ui socket.
             // Why: the ui checks, saves and applies it.
             // From: Issue #1683 | PR #2020
-            Some("do") => {
+            Op::Do => {
                 use crate::ui::DnsOp;
                 // What: rollback and CDN rows: own words.
                 // Why: one CLI way per job.
@@ -4133,11 +4332,11 @@ mod dns {
                 println!("{v}");
                 Ok(())
             }
-            Some("secondary") => secondary_do(&args[1..]).await,
+            Op::Secondary => secondary_do(&args[1..]).await,
             // What: zones: overview; zones ensure: via ui.
             // Why: ensure renders and reloads in the ui.
             // From: Issue #1683 | PR #2020
-            Some("zones") => {
+            Op::Zones => {
                 let s = Settings::from_process()?;
                 match args.get(1).map(String::as_str) {
                     None => println!("{}", zone_overview(&s).await?),
@@ -4154,7 +4353,7 @@ mod dns {
             // What: LAN domains, records, PTRs as JSON.
             // Why: a read; it needs no running ui.
             // From: Issue #1683 | PR #2020
-            Some("records") => {
+            Op::Records => {
                 let v = lan_view(&Settings::from_process()?).await?;
                 println!("{v}");
                 match v["error"].as_str() {
@@ -4165,7 +4364,7 @@ mod dns {
             // What: TSIG key state without its value.
             // Why: a read; rc 1 if file and pdns differ.
             // From: Issue #1683 | PR #2020
-            Some("tsig") => {
+            Op::Tsig => {
                 let v = tsig_state(&Settings::from_process()?).await?;
                 println!("{v}");
                 match v["ok"].as_bool() {
@@ -4176,11 +4375,11 @@ mod dns {
             // What: container probe: any reply counts.
             // Why: a dead upstream must not restart dns.
             // From: Issue #1683 | PR #2020
-            Some("healthcheck") => healthcheck(&Settings::from_process()?).await,
+            Op::Healthcheck => healthcheck(&Settings::from_process()?).await,
             // What: soa-probe ZONE [http/https/auth/ip#n]
             // Why: the serial one server holds; no ui.
             // From: Issue #1683 | PR #2020
-            Some("soa-probe") => match &args[1..] {
+            Op::SoaProbe => match &args[1..] {
                 [zone] | [zone, _] => {
                     let target = args.get(2).map_or("auth", String::as_str);
                     let v = soa_probe(&Settings::from_process()?, zone, target).await?;
@@ -4195,7 +4394,7 @@ mod dns {
             // What: query NAME TYPE [http/https/auth/ip#n]
             // Why: a real DNS answer; needs no running ui.
             // From: Issue #1683 | PR #2020
-            Some("query") => match &args[1..] {
+            Op::Query => match &args[1..] {
                 [n, ty] | [n, ty, _] => {
                     let target = args.get(3).map_or("http", String::as_str);
                     let s = Settings::from_process()?;
@@ -4207,15 +4406,16 @@ mod dns {
             // What: DNSSEC anchors, proven zones, NTAs.
             // Why: a read; it needs no running ui.
             // From: Issue #1683 | PR #2020
-            Some("dnssec") => {
+            Op::Dnssec => {
                 println!("{}", dnssec_status(&Settings::from_process()?).await?);
                 Ok(())
             }
             // What: PowerDNS APIs reachable; stats counts.
             // Why: reads; they need no running ui.
             // From: Issue #1683 | PR #2020
-            Some(cmd @ ("api-check" | "stats")) => {
-                let v = peer::api_report(&Settings::from_process()?, cmd == "stats").await?;
+            Op::ApiCheck | Op::Stats => {
+                let cmd = cli::word(&COMMANDS, op);
+                let v = peer::api_report(&Settings::from_process()?, op == Op::Stats).await?;
                 println!("{v}");
                 match v["ok"].as_bool() {
                     Some(true) => Ok(()),
@@ -4225,7 +4425,7 @@ mod dns {
             // What: empty recursor caches; no zone = all.
             // Why: a repair must work while the ui is down.
             // From: Issue #1683 | PR #2020
-            Some("flush") => {
+            Op::Flush => {
                 let zone = match &args[1..] {
                     [] => ".".to_string(),
                     [z] => z.clone(),
@@ -4235,7 +4435,6 @@ mod dns {
                 println!("{}", json!({"flushed": zone}));
                 Ok(())
             }
-            _ => Err(format!("commands: {}", COMMANDS.join(" "))),
         }
     }
 
@@ -4274,25 +4473,47 @@ mod dns {
         Ok(())
     }
 
-    // What: every command of the dns role.
-    // Why: the help names the same set as the match.
+    // What: what one dns command does.
+    // Why: run() matches these, the table names them.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 15] = [
-        "daemon",
-        "soa-probe",
-        "follow-once",
-        "healthcheck",
-        "records",
-        "tsig",
-        "sync-check",
-        "do",
-        "secondary",
-        "flush",
-        "dnssec",
-        "api-check",
-        "stats",
-        "query",
-        "zones",
+    #[derive(Clone, Copy, PartialEq)]
+    enum Op {
+        Daemon,
+        SoaProbe,
+        FollowOnce,
+        Healthcheck,
+        Records,
+        Tsig,
+        SyncCheck,
+        Do,
+        Secondary,
+        Flush,
+        Dnssec,
+        ApiCheck,
+        Stats,
+        Query,
+        Zones,
+    }
+
+    // What: every command of the dns role.
+    // Why: help, errors and the choice read this table.
+    // From: Issue #1683 | PR #2020
+    const COMMANDS: [(&str, Op); 15] = [
+        ("daemon", Op::Daemon),
+        ("soa-probe", Op::SoaProbe),
+        ("follow-once", Op::FollowOnce),
+        ("healthcheck", Op::Healthcheck),
+        ("records", Op::Records),
+        ("tsig", Op::Tsig),
+        ("sync-check", Op::SyncCheck),
+        ("do", Op::Do),
+        ("secondary", Op::Secondary),
+        ("flush", Op::Flush),
+        ("dnssec", Op::Dnssec),
+        ("api-check", Op::ApiCheck),
+        ("stats", Op::Stats),
+        ("query", Op::Query),
+        ("zones", Op::Zones),
     ];
 
     // What: serials of managed zones on all servers.
@@ -6055,6 +6276,50 @@ mod shared {
                     vals.iter().try_for_each(|(k, v)| write!(f, " {k}={v}"))
                 }
             }
+        }
+    }
+
+    // What: command tables: one row per command word.
+    // Why: help, errors and the choice read one table.
+    // From: Issue #1683 | PR #2020
+    pub mod cli {
+        // What: the words of a table with a separator.
+        // Why: the help names what the table can run.
+        // From: Issue #1683 | PR #2020
+        pub fn joined<T>(table: &[(&'static str, T)], sep: &str) -> String {
+            let words: Vec<&str> = table.iter().map(|(word, _)| *word).collect();
+            words.join(sep)
+        }
+
+        // What: the words of a table, blank separated.
+        // Why: the help and the errors name one set.
+        // From: Issue #1683 | PR #2020
+        pub fn names<T>(table: &[(&'static str, T)]) -> String {
+            joined(table, " ")
+        }
+
+        // What: the row of a word.
+        // Why: the match runs the row, not a second word.
+        // From: Issue #1683 | PR #2020
+        pub fn pick<T: Copy>(table: &[(&'static str, T)], word: &str) -> Option<T> {
+            table.iter().find(|(w, _)| *w == word).map(|(_, row)| *row)
+        }
+
+        // What: the word of a row.
+        // Why: a message names the command the table ran.
+        // From: Issue #1683 | PR #2020
+        pub fn word<T: PartialEq>(table: &[(&'static str, T)], row: T) -> &'static str {
+            table
+                .iter()
+                .find(|(_, r)| *r == row)
+                .map_or("", |(w, _)| *w)
+        }
+
+        // What: the error and help line of an unknown word.
+        // Why: every owner says it the same way.
+        // From: Issue #1683 | PR #2020
+        pub fn commands<T>(table: &[(&'static str, T)]) -> String {
+            format!("commands: {}", names(table))
         }
     }
 
@@ -15137,6 +15402,7 @@ mod stack {
 // Why: owns settings; renders and applies configs.
 // From: Issue #1683 | PR #1858
 mod ui {
+    use crate::cachehamster::{Rest, rest_of};
     use crate::config::{self, Settings};
     use crate::dhcp::{
         dhcp_probe_cli, dhcp_stays_off, kea_change, kea_snapshots, kea_state, kea_store,
@@ -17186,26 +17452,18 @@ mod ui {
     ) -> Page {
         csrf.check_header(&headers)?;
         let url = field(&query, "url");
-        let allowed = [
-            "login-begin",
-            "login-poll",
-            "login-cancel",
-            "library",
-            "status",
-            "cached",
-            "wipe",
-            "steam-check",
-        ];
         // What: lookup-ID and evict-ID carry one app id.
         // Why: the library row checks or frees one game.
         // From: Issue #871 | PR #1991
         let args: Vec<&str> = match op.split_once('-') {
-            Some((cmd @ ("lookup" | "evict"), id)) if id.parse::<u32>().is_ok() => vec![cmd, id],
+            Some((cmd, id)) if rest_of(cmd) == Rest::AppId && id.parse::<u32>().is_ok() => {
+                vec![cmd, id]
+            }
             // What: fetch-check?url= probes one address.
             // Why: REST runs the CLI check of the owner.
             // From: Issue #871 | PR #2020
-            _ if op == "fetch-check" && !url.is_empty() => vec!["fetch-check", &url],
-            _ if allowed.contains(&op.as_str()) => vec![op.as_str()],
+            _ if rest_of(&op) == Rest::Url && !url.is_empty() => vec![op.as_str(), &url],
+            _ if rest_of(&op) == Rest::Plain => vec![op.as_str()],
             _ => return Err(Fail(StatusCode::NOT_FOUND, "no such call".into())),
         };
         let v = hamster(&app, &args)
@@ -17918,17 +18176,21 @@ mod ui {
     // What: command line uses besides the server.
     // Why: setup.sh and the healthcheck need them.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn command(s: &Settings, args: &[String]) -> Option<Result<(), String>> {
-        match args.first().map(String::as_str) {
-            Some("zone-snapshots") => Some(zone_snapshots(s).map(|v| println!("{v}"))),
+    pub(crate) async fn command(
+        s: &Settings,
+        set: Option<Set>,
+        args: &[String],
+    ) -> Option<Result<(), String>> {
+        match set {
+            Some(Set::ZoneSnapshots) => Some(zone_snapshots(s).map(|v| println!("{v}"))),
             // What: registration token as ui resolves it.
             // Why: CI reads token the register API checks.
             // From: Issue #1683 | PR #2020
-            Some("registration-token") => Some(registration_token(s).map(|t| println!("{t}"))),
+            Some(Set::RegistrationToken) => Some(registration_token(s).map(|t| println!("{t}"))),
             // What: language files on disk, key check.
             // Why: a missing key would show raw on a page.
             // From: Issue #1683 | PR #2020
-            Some("lang") => Some(lang_check(s).and_then(|v| {
+            Some(Set::Lang) => Some(lang_check(s).and_then(|v| {
                 println!("{v}");
                 match v["equal"].as_bool() {
                     Some(true) => Ok(()),
@@ -17938,53 +18200,74 @@ mod ui {
             // What: route list and template check.
             // Why: the router's table, the start's loader.
             // From: Issue #1683 | PR #2020
-            Some("routes") => Some(route_list(s).map(|v| println!("{v}"))),
+            Some(Set::Routes) => Some(route_list(s).map(|v| println!("{v}"))),
             // What: change the password through the ui.
             // Why: stdin keeps it out of the process list.
             // From: Issue #1683 | PR #2020
-            Some("password") => Some(password_cli(s, args.get(1)).await),
-            Some("templates") => Some(template_report(s).and_then(|v| {
+            Some(Set::Password) => Some(password_cli(s, args.get(1)).await),
+            Some(Set::Templates) => Some(template_report(s).and_then(|v| {
                 println!("{v}");
                 match v["ok"].as_bool() {
                     Some(true) => Ok(()),
                     _ => Err("templates: errors or unknown names".into()),
                 }
             })),
-            Some("zone-rollback") => Some(match &args[1..] {
+            Some(Set::ZoneRollback) => Some(match &args[1..] {
                 [zone, id] => rollback(s, zone, id).await.map_err(|e| say(&e)).map(|()| {
                     println!("{}", json!({"restored": zone, "snapshot": id}));
                 }),
                 _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
             }),
-            Some("healthcheck") => Some(healthcheck(s).await),
+            Some(Set::Healthcheck) => Some(healthcheck(s).await),
             // What: one DHCP probe as JSON on stdout.
             // Why: setup.sh and the DHCP page run it.
             // From: Issue #1683 | PR #1985
-            Some(DHCP_PROBE_CMD) => Some(dhcp_probe_cli(s)),
+            Some(Set::DhcpProbe) => Some(dhcp_probe_cli(s)),
             None => None,
-            // What: an unknown word fails with the list.
-            // Why: it must not start a second web server.
-            // From: Issue #1683 | PR #2020
-            Some(_) => Some(Err(format!("commands: {}", COMMANDS.join(" ")))),
         }
     }
 
-    // What: every command of ui role; none = the server.
-    // Why: the help names the same set as the match.
+    // What: what a command without settings does.
+    // Why: they run before any settings are read.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [&str; 12] = [
-        "hash-password",
-        "encode-password-hash",
-        "zone-snapshots",
-        "registration-token",
-        "lang",
-        "routes",
-        "templates",
-        "password",
-        "zone-rollback",
-        "healthcheck",
-        DHCP_PROBE_CMD,
-        "(none: web server)",
+    #[derive(Clone, Copy, PartialEq)]
+    enum Cmd {
+        HashPassword,
+        EncodePasswordHash,
+        Set(Set),
+    }
+
+    // What: what a command with settings does.
+    // Why: command() matches these, the table names them.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum Set {
+        ZoneSnapshots,
+        RegistrationToken,
+        Lang,
+        Routes,
+        Templates,
+        Password,
+        ZoneRollback,
+        Healthcheck,
+        DhcpProbe,
+    }
+
+    // What: every command of ui role; none = the server.
+    // Why: help, errors and the choice read this table.
+    // From: Issue #1683 | PR #2020
+    const COMMANDS: [(&str, Cmd); 11] = [
+        ("hash-password", Cmd::HashPassword),
+        ("encode-password-hash", Cmd::EncodePasswordHash),
+        ("zone-snapshots", Cmd::Set(Set::ZoneSnapshots)),
+        ("registration-token", Cmd::Set(Set::RegistrationToken)),
+        ("lang", Cmd::Set(Set::Lang)),
+        ("routes", Cmd::Set(Set::Routes)),
+        ("templates", Cmd::Set(Set::Templates)),
+        ("password", Cmd::Set(Set::Password)),
+        ("zone-rollback", Cmd::Set(Set::ZoneRollback)),
+        ("healthcheck", Cmd::Set(Set::Healthcheck)),
+        (DHCP_PROBE_CMD, Cmd::Set(Set::DhcpProbe)),
     ];
 
     // What: asks the own health route on loopback.
@@ -18355,15 +18638,27 @@ mod ui {
     // Why: one binary for ui, setup.sh, healthcheck.
     // From: Issue #1683 | PR #1980
     pub async fn run(args: &[String]) -> Result<(), String> {
+        use crate::shared::cli;
         let args: Vec<String> = args.to_vec();
-        match args.first().map(String::as_str) {
-            Some("hash-password") => return hash_password(),
-            Some("encode-password-hash") => return encode_password_hash(),
-            _ => {}
-        }
+        // What: an unknown word fails with the list.
+        // Why: it must not start a second web server.
+        // From: Issue #1683 | PR #2020
+        let cmd = match args.first().map(String::as_str) {
+            None => None,
+            Some(word) => Some(
+                cli::pick(&COMMANDS, word)
+                    .ok_or_else(|| format!("{} (none: web server)", cli::commands(&COMMANDS)))?,
+            ),
+        };
+        let set = match cmd {
+            Some(Cmd::HashPassword) => return hash_password(),
+            Some(Cmd::EncodePasswordHash) => return encode_password_hash(),
+            Some(Cmd::Set(set)) => Some(set),
+            None => None,
+        };
         let saved = config::saved_file();
         let s = Settings::from_process()?;
-        if let Some(done) = command(&s, &args).await {
+        if let Some(done) = command(&s, set, &args).await {
             return done;
         }
         // What: no login and no opt-out stops the ui.
@@ -19222,49 +19517,89 @@ async fn main() -> std::process::ExitCode {
         // Why: the first step to every command list.
         // From: Issue #1683 | PR #2020
         "help" => {
-            println!("roles: {}", ROLES.join(" "));
-            println!("groups: {}", GROUPS.join(" "));
+            println!("roles: {}", shared::cli::names(&ROLES));
+            println!("groups: {}", shared::cli::names(&GROUPS));
             println!("lancache-ng <role|group> help lists its commands");
             std::process::ExitCode::SUCCESS
         }
-        "ui" => code(ui::run(&argv).await),
-        "watchdog" => code(watchdog::run(&argv).await),
-        "dns" => code(dns::run(&argv).await),
-        "cachehamster" => cachehamster::run(&argv).await,
-        // What: command groups; each runs at its owner.
-        // Why: a CLI command lives with its capability.
-        // From: Issue #1683 | PR #2020
-        "dhcp" => code(dhcp::run(&argv).await),
-        "config" => code(config::run(&argv).await),
-        "system" => code(shared::docker::system_run(&argv).await),
-        "proxy" => code(shared::nginx_conf::proxy_run(&argv).await),
-        "ntp" => code(shared::ntp::ntp_run(&argv).await),
-        "secret" => code(shared::secret::secret_run(&argv)),
-        "cache" => code(shared::tidy::cache_run(&argv).await),
-        "cdn" => code(shared::cdn::cdn_run(&argv).await),
-        "stats" => code(shared::rrd::stats_run(&argv).await),
-        "logs" => code(shared::access::logs_run(&argv)),
         other => {
-            eprintln!(
-                "lancache-ng: unknown role {other:?}; use {} or {}",
-                ROLES.join("|"),
-                GROUPS.join("|")
-            );
-            std::process::ExitCode::from(2)
+            let pick = |table: &[(&'static str, Target)]| shared::cli::pick(table, other);
+            match pick(&ROLES).or_else(|| pick(&GROUPS)) {
+                // What: command groups; each at its owner.
+                // Why: a CLI command lives with its owner.
+                // From: Issue #1683 | PR #2020
+                Some(Target::Ui) => code(ui::run(&argv).await),
+                Some(Target::Watchdog) => code(watchdog::run(&argv).await),
+                Some(Target::Dns) => code(dns::run(&argv).await),
+                Some(Target::Cachehamster) => cachehamster::run(&argv).await,
+                Some(Target::Dhcp) => code(dhcp::run(&argv).await),
+                Some(Target::Config) => code(config::run(&argv).await),
+                Some(Target::System) => code(shared::docker::system_run(&argv).await),
+                Some(Target::Proxy) => code(shared::nginx_conf::proxy_run(&argv).await),
+                Some(Target::Ntp) => code(shared::ntp::ntp_run(&argv).await),
+                Some(Target::Secret) => code(shared::secret::secret_run(&argv)),
+                Some(Target::Cache) => code(shared::tidy::cache_run(&argv).await),
+                Some(Target::Cdn) => code(shared::cdn::cdn_run(&argv).await),
+                Some(Target::Stats) => code(shared::rrd::stats_run(&argv).await),
+                Some(Target::Logs) => code(shared::access::logs_run(&argv)),
+                None => {
+                    eprintln!(
+                        "lancache-ng: unknown role {other:?}; use {} or {}",
+                        shared::cli::joined(&ROLES, "|"),
+                        shared::cli::joined(&GROUPS, "|")
+                    );
+                    std::process::ExitCode::from(2)
+                }
+            }
         }
     }
 }
 
-// What: the roles; argv0 lancache-<role> picks one too.
-// Why: the help names the same set as the match.
+// What: what a role or group starts.
+// Why: main matches these, the tables name them.
 // From: Issue #1683 | PR #2020
-const ROLES: [&str; 4] = ["ui", "watchdog", "dns", "cachehamster"];
+#[derive(Clone, Copy)]
+enum Target {
+    Ui,
+    Watchdog,
+    Dns,
+    Cachehamster,
+    Dhcp,
+    Config,
+    System,
+    Proxy,
+    Ntp,
+    Secret,
+    Cache,
+    Cdn,
+    Stats,
+    Logs,
+}
+
+// What: the roles; argv0 lancache-<role> picks one too.
+// Why: help, errors and the choice read this table.
+// From: Issue #1683 | PR #2020
+const ROLES: [(&str, Target); 4] = [
+    ("ui", Target::Ui),
+    ("watchdog", Target::Watchdog),
+    ("dns", Target::Dns),
+    ("cachehamster", Target::Cachehamster),
+];
 
 // What: the command groups that are no daemon role.
-// Why: the help names the same set as the match.
+// Why: help, errors and the choice read this table.
 // From: Issue #1683 | PR #2020
-const GROUPS: [&str; 10] = [
-    "dhcp", "config", "system", "proxy", "ntp", "secret", "cache", "cdn", "stats", "logs",
+const GROUPS: [(&str, Target); 10] = [
+    ("dhcp", Target::Dhcp),
+    ("config", Target::Config),
+    ("system", Target::System),
+    ("proxy", Target::Proxy),
+    ("ntp", Target::Ntp),
+    ("secret", Target::Secret),
+    ("cache", Target::Cache),
+    ("cdn", Target::Cdn),
+    ("stats", Target::Stats),
+    ("logs", Target::Logs),
 ];
 
 // What: turn a role Result into a process exit code.
