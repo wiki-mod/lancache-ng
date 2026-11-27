@@ -2213,7 +2213,7 @@ runtime:
     - SYSLOG_FILE_PERM=text;;;fixed;services
     - SYSLOG_IN_TRANSPORT=choice;udp,tcp;;restart;services
     - SYSLOG_FWD_TRANSPORT=choice;udp,tcp;;restart;services
-    - UI_CONTROLLABLE_SERVICES=list;;;live;ui
+    - UI_CONTROLLABLE_SERVICES=list;;;fixed;ui
     - DHCP_MODES=list;;;live;ui
     - UI_LANG_DEFAULT=text;;;live;ui
     - UI_LISTEN=ip;;;restart;ui
@@ -2227,7 +2227,7 @@ runtime:
     - UI_PUBLIC_URL=text?;;;fixed;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui
     - UI_REQUEST_BODY_MAX_BYTES=uint;1024;104857600;restart;ui
-    - UI_SERVICES=list;;;live;ui
+    - UI_SERVICES=list;;;fixed;ui
     - UI_STATUS_REFRESH=uint;1;3600;live;ui
     - UI_AUTH_USER=text;;;live;ui
     - UPSTREAM_DHCP_IP=ip?;;;reload;dhcp
