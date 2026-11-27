@@ -16091,6 +16091,24 @@ mod stack {
             .map_err(|e| e.to_string())?)
     }
 
+    // What: run the first service:command row of a key.
+    // Why: chrony and the clock run their SOT row so.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn exec_row(
+        app: &Stack,
+        s: &Settings,
+        key: &str,
+    ) -> Result<(Vec<String>, i64, String), String> {
+        let rows = s.list(key)?;
+        let (svc, cmd) = apply::exec_rows(&rows)
+            .next()
+            .ok_or_else(|| format!("{key} has no service:command row"))?;
+        let (code, text) = exec_in(app, s, svc, &cmd)
+            .await
+            .map_err(|e| crate::ui::say(&e))?;
+        Ok((cmd.iter().map(|c| c.to_string()).collect(), code, text))
+    }
+
     // What: run a command; read its last JSON line.
     // Why: cachehamster and watchdog answer in JSON.
     // From: Issue #1683 | PR #2020
@@ -16101,13 +16119,20 @@ mod stack {
         cmd: &[&str],
     ) -> Result<(i64, Value), Fault> {
         let (code, out) = exec_in(app, s, service, cmd).await?;
+        let v = last_json(&out).map_err(|e| format!("{}: {e}", cmd.join(" ")))?;
+        Ok((code, v))
+    }
+
+    // What: the last JSON line of a command output.
+    // Why: one reader for exec_json and exec_row users.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn last_json(out: &str) -> Result<Value, String> {
         let line = out
             .lines()
             .rev()
             .find(|l| l.starts_with('{'))
             .unwrap_or_default();
-        let v = serde_json::from_str(line).map_err(|e| format!("{}: {e}: {out}", cmd.join(" ")))?;
-        Ok((code, v))
+        serde_json::from_str(line).map_err(|e| format!("{e}: {out}"))
     }
 
     // What: drop proxy render files no longer written.
@@ -16514,7 +16539,7 @@ mod ui {
     use crate::shared::peer;
     use crate::shared::task::or_stop;
     use crate::shared::{FALLBACK_LANG, Fault};
-    use crate::shared::{access, apply, docker, fs, http, human, render, secret};
+    use crate::shared::{access, docker, fs, http, human, render, secret};
     use crate::stack::Stack;
     use crate::stack::{
         Fields, apply_all, apply_now, check_change, commit, commit_with, container_of, exec_in,
@@ -18221,11 +18246,7 @@ mod ui {
     // Why: sampler and REST run one command, one parser.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn chrony_tracking(app: &Stack, s: &Settings) -> Result<Value, String> {
-        let rows = s.list("CHRONY_TRACKING_EXEC")?;
-        let (svc, cmd) = apply::exec_rows(&rows)
-            .next()
-            .ok_or("CHRONY_TRACKING_EXEC has no service:command row")?;
-        let (code, text) = exec_in(app, s, svc, &cmd).await.map_err(|e| say(&e))?;
+        let (cmd, code, text) = crate::stack::exec_row(app, s, "CHRONY_TRACKING_EXEC").await?;
         if code != 0 {
             return Err(format!("{} exit {code}: {}", cmd.join(" "), text.trim()));
         }
@@ -18275,13 +18296,12 @@ mod ui {
     pub(crate) async fn system_time_api(State(app): Shared) -> Response {
         let s = app.settings();
         let r = async {
-            let rows = s.list("SYSTEM_TIME_EXEC")?;
-            let (svc, cmd) = apply::exec_rows(&rows)
-                .next()
-                .ok_or("SYSTEM_TIME_EXEC has no service:command row")?;
-            match exec_json(&app, &s, svc, &cmd).await.map_err(|e| say(&e))? {
-                (0, v) => Ok(v),
-                (code, v) => Err(format!("{} exit {code}: {v}", cmd.join(" "))),
+            let (cmd, code, text) = crate::stack::exec_row(&app, &s, "SYSTEM_TIME_EXEC").await?;
+            let v =
+                crate::stack::last_json(&text).map_err(|e| format!("{}: {e}", cmd.join(" ")))?;
+            match code {
+                0 => Ok(v),
+                code => Err(format!("{} exit {code}: {v}", cmd.join(" "))),
             }
         };
         json_reply(r.await.map(Some), "")
