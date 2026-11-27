@@ -17336,6 +17336,7 @@ mod ui {
             };
             let (pages, routes) = (paths("UI_PAGE_"), paths("UI_ROUTE_"));
             ctx.insert(CSRF_FIELD, &csrf.0);
+            ctx.insert("csrf_name", CSRF_FIELD);
             ctx.insert("page", page);
             ctx.insert("active_page", page);
             ctx.insert("v", &values);
@@ -19597,9 +19598,9 @@ mod ui {
     pub(crate) async fn restart_ui(
         State(app): Shared,
         Extension(csrf): Extension<Csrf>,
-        Form(form): Form<Fields>,
+        headers: HeaderMap,
     ) -> Page {
-        csrf.check(&form)?;
+        csrf.check_header(&headers)?;
         let s = app.settings();
         let (grace, limit) = app.limits(&s)?;
         let name = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
