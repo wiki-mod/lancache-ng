@@ -225,6 +225,13 @@ mod cachehamster {
         }
     }
 
+    // What: a value as JSON bytes; the error as text.
+    // Why: every state file and order is JSON.
+    // From: Issue #871 | PR #2020
+    fn json_bytes<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(v).map_err(|e| e.to_string())
+    }
+
     // What: replace a file by a private copy of body.
     // Why: all state files share one mode and one write.
     // From: Issue #871 | PR #2020
@@ -276,7 +283,7 @@ mod cachehamster {
                 .filter(|p| feature(p).is_some())
                 .cloned()
                 .collect();
-            let body = serde_json::to_vec(&names).map_err(|e| e.to_string())?;
+            let body = json_bytes(&names)?;
             replace_private(&path, &body).map_err(|e| format!("{BIND_FILE}: {e}"))?;
             names
         } else {
@@ -318,7 +325,7 @@ mod cachehamster {
     // Why: single writer of the token file.
     // From: Issue #871 | PR #1980
     fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
-        let plain = serde_json::to_vec(session).map_err(|e| e.to_string())?;
+        let plain = json_bytes(session)?;
         c.save(
             TOKEN_FILE,
             &secret::seal(&bound_key(&c.dir, &c.bind, true)?, &plain)?,
@@ -444,10 +451,7 @@ mod cachehamster {
                 .ok_or("no interval")?,
         };
         let url = field(&r, "challenge_url").ok_or("no challenge_url")?;
-        c.save(
-            PENDING_FILE,
-            &serde_json::to_vec(&pending).map_err(|e| e.to_string())?,
-        )?;
+        c.save(PENDING_FILE, &json_bytes(&pending)?)?;
         Ok(
             json!({"state": "waiting", "svg": qr_svg(&url, qr_size(c)?)?, "interval": pending.interval}),
         )
@@ -483,10 +487,7 @@ mod cachehamster {
         // From: Issue #871 | PR #1980
         if let Some(new_id) = field(&r, "new_client_id") {
             p.client_id = new_id;
-            c.save(
-                PENDING_FILE,
-                &serde_json::to_vec(&p).map_err(|e| e.to_string())?,
-            )?;
+            c.save(PENDING_FILE, &json_bytes(&p)?)?;
             if let Some(url) = field(&r, "new_challenge_url") {
                 return Ok(
                     json!({"state": "waiting", "svg": qr_svg(&url, qr_size(c)?)?, "interval": p.interval}),
@@ -568,7 +569,7 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     fn submit(c: &Ctx, order: &Order) -> Result<Value, String> {
         let name = format!("{}-{}.json", clock::unix_nanos(), secret::random_hex(4));
-        let body = serde_json::to_vec(order).map_err(|e| e.to_string())?;
+        let body = json_bytes(order)?;
         c.save(&format!("{INBOX_DIR}/{name}"), &body)?;
         Ok(json!({"queued": name}))
     }
@@ -1861,7 +1862,7 @@ mod cachehamster {
     // Why: the library shows cache use without a login.
     // From: Issue #871 | PR #1991
     fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
-        let body = serde_json::to_vec(ids).map_err(|e| e.to_string())?;
+        let body = json_bytes(ids)?;
         let path = dir.join(DEPOTS_DIR).join(format!("{app}.json"));
         replace_private(&path, &body).map_err(|e| format!("{}: {e}", path.display()))
     }
