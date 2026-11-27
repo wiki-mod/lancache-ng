@@ -8438,23 +8438,17 @@ mod shared {
             Ok((host, port.transpose()?))
         }
 
-        // What: a host name, read by its labels.
-        // Why: one reader; no space, quote or ';' passes.
+        // What: a host name; all-digit text is no name.
+        // Why: is_dns_name is the one label reader.
         // From: Issue #1683 | PR #2020
         pub fn parse_name(text: &str) -> Result<String, String> {
-            let bad = || format!("{text:?} is no host name");
-            let body = text.strip_suffix('.').unwrap_or(text);
-            let label = |l: &str| {
-                (1..=63).contains(&l.len())
-                    && !l.starts_with('-')
-                    && !l.ends_with('-')
-                    && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            };
-            let numeric = body.chars().all(|c| c.is_ascii_digit() || c == '.');
-            if body.len() > 253 || numeric || !body.split('.').all(label) {
-                return Err(bad());
+            let numeric = bare_zone(text)
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.');
+            match is_dns_name(text, false, false) && !numeric {
+                true => Ok(text.to_string()),
+                false => Err(format!("{text:?} is no host name")),
             }
-            Ok(text.to_string())
         }
 
         // What: host and port of "host[:port]", read.
