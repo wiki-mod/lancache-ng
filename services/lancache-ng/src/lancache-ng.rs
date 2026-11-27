@@ -7868,6 +7868,20 @@ mod shared {
             }
         }
 
+        // What: the Docker call limit from DOCKER_TIMEOUT.
+        // Why: every Docker call waits the same SOT time.
+        // From: Issue #1683 | PR #2020
+        pub fn timeout(s: &crate::config::Settings) -> Result<Duration, String> {
+            Ok(Duration::from_secs(s.uint("DOCKER_TIMEOUT")?))
+        }
+
+        // What: the Docker client at DOCKER_ENDPOINT.
+        // Why: ui, CLI and watchdog reach one engine.
+        // From: Issue #1683 | PR #2020
+        pub fn client(s: &crate::config::Settings) -> Result<Api, String> {
+            Api::new(&s.text("DOCKER_ENDPOINT")?)
+        }
+
         // What: every service container with its inspect.
         // Why: one stack reader; callers decide on errors.
         // From: Issue #1683 | PR #2020
@@ -7875,7 +7889,7 @@ mod shared {
             api: &Api,
             s: &crate::config::Settings,
         ) -> Result<Vec<Member>, String> {
-            let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+            let limit = timeout(s)?;
             let stopped = s.list("SERVICES_STOPPED");
             let off = crate::shared::dhcp::off_service(s)?;
             let mut out = Vec::new();
@@ -7934,7 +7948,7 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub async fn engine_check(api: &Api, s: &crate::config::Settings) -> Result<Value, String> {
             let endpoint = s.text("DOCKER_ENDPOINT")?;
-            let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+            let limit = timeout(s)?;
             let project = s.text("COMPOSE_PROJECT")?;
             let mut v = json!({"endpoint": endpoint, "project": project});
             match api.version(limit).await {
@@ -7973,7 +7987,7 @@ mod shared {
             // From: Issue #1683 | PR #2020
             let (route, body) = match words.as_slice() {
                 ["status"] => {
-                    let v = status_json(&Api::new(&s.text("DOCKER_ENDPOINT")?)?, &s).await;
+                    let v = status_json(&client(&s)?, &s).await;
                     println!("{v}");
                     return match v["state"].as_str() {
                         Some("ok") => Ok(()),
@@ -8006,7 +8020,7 @@ mod shared {
                 // Why: a read; it needs no running ui.
                 // From: Issue #1683 | PR #2020
                 ["docker"] => {
-                    let v = engine_check(&Api::new(&s.text("DOCKER_ENDPOINT")?)?, &s).await?;
+                    let v = engine_check(&client(&s)?, &s).await?;
                     println!("{v}");
                     return match v["ok"].as_bool() {
                         Some(true) => Ok(()),
@@ -8228,7 +8242,7 @@ mod shared {
             // Why: a "compose run" one is no service.
             // From: Issue #1683
             pub async fn stack(&self, s: &crate::config::Settings) -> Result<Vec<Value>, String> {
-                let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+                let limit = timeout(s)?;
                 let project = s.text("COMPOSE_PROJECT")?;
                 let mut rows = self
                     .project(&project, limit)
@@ -13806,7 +13820,7 @@ mod stack {
         // From: Issue #1683 | PR #1858
         pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
             let grace = s.num::<u32>("UI_STOP_GRACE")?;
-            Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
+            Ok((grace, crate::shared::docker::timeout(s)?))
         }
     }
 
@@ -17582,7 +17596,7 @@ mod ui {
             .map_err(|_| "lang: files read twice".to_string())?;
         let app = Arc::new(App {
             stack: Stack {
-                docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
+                docker: docker::client(&s)?,
                 settings: RwLock::new(s.clone()),
                 saved,
                 rendered: AtomicBool::new(false),
@@ -17770,8 +17784,8 @@ mod watchdog {
         m: &mut Memory,
         heal: bool,
     ) -> Result<(), String> {
-        let api = docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?;
-        let limit = Duration::from_secs(s.uint("DOCKER_TIMEOUT")?);
+        let api = docker::client(s)?;
+        let limit = docker::timeout(s)?;
         let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
         let after = s.uint("RESTART_AFTER")?;
         for member in docker::members(&api, s).await? {
