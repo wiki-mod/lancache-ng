@@ -4228,10 +4228,7 @@ mod dhcp {
     // What: in mode off a running dhcp is stopped again.
     // Why: compose up may start it after the ui.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn dhcp_stays_off(
-        app: &Stack,
-        s: &Settings,
-    ) -> Result<Option<String>, String> {
+    pub(crate) async fn stays_off(app: &Stack, s: &Settings) -> Result<Option<String>, String> {
         let Some(service) = off_service(s)? else {
             return Ok(None);
         };
@@ -4251,7 +4248,7 @@ mod dhcp {
     // What: one DHCP probe; the report as JSON.
     // Why: runs on the host network, apart from the ui.
     // From: Issue #1683 | PR #1985
-    pub(crate) fn dhcp_probe_cli(s: &Settings) -> Result<(), String> {
+    pub(crate) fn probe_cli(s: &Settings) -> Result<(), String> {
         let report = crate::shared::dhcp_probe::run(s);
         println!(
             "{}",
@@ -7089,7 +7086,7 @@ mod shared {
         }
 
         // What: what the secret command does.
-        // Why: secret_run() matches it, the table names it.
+        // Why: run() matches it, the table names it.
         // From: Issue #1683 | PR #2020
         #[derive(Clone, Copy, PartialEq)]
         enum Op {
@@ -7105,7 +7102,7 @@ mod shared {
         // What: lancache-ng secret list: states as JSON.
         // Why: the CLI of secret reads sits with them.
         // From: Issue #1683 | PR #2020
-        pub fn secret_run(args: &[String]) -> Result<(), String> {
+        pub fn run(args: &[String]) -> Result<(), String> {
             use crate::shared::cli;
             if cli::op_of(&COMMANDS, args.first()) != Some(Op::List) {
                 return Err(format!("commands: {}", cli::forms(&COMMANDS, " | ")));
@@ -9137,7 +9134,7 @@ mod shared {
         // What: lancache-ng system status: stack as JSON.
         // Why: stack reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
-        pub async fn system_run(args: &[String]) -> Result<(), String> {
+        pub async fn run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
             use crate::shared::cli;
             use crate::shared::http::Body;
@@ -12230,7 +12227,7 @@ end
         // What: lancache-ng proxy status|log as JSON.
         // Why: proxy reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
-        pub async fn proxy_run(args: &[String]) -> Result<(), String> {
+        pub async fn run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
             use crate::shared::cli;
             let v = match cli::op_of(&COMMANDS, args.first()) {
@@ -13612,7 +13609,7 @@ end
         // What: lancache-ng ntp check | tracking.
         // Why: NTP reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
-        pub async fn ntp_run(args: &[String]) -> Result<(), String> {
+        pub async fn run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
             use crate::shared::cli;
             match cli::op_of(&COMMANDS, args.first()) {
@@ -13795,7 +13792,7 @@ end
         // What: lancache-ng logs [program] [n] as JSON.
         // Why: a read; it needs no running ui.
         // From: Issue #1683 | PR #2020
-        pub fn logs_run(args: &[String]) -> Result<(), String> {
+        pub fn run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
             let usage = "usage: logs [program] [n]";
             let (program, n) = match args {
@@ -14083,7 +14080,7 @@ end
         // What: lancache-ng cdn list|add|remove|on|off.
         // Why: list reads here; changes go to the ui.
         // From: Issue #1683 | PR #2020
-        pub async fn cdn_run(args: &[String]) -> Result<(), String> {
+        pub async fn run(args: &[String]) -> Result<(), String> {
             use crate::shared::http::{Body, ui_socket};
             let s = Settings::from_process()?;
             use crate::shared::cli;
@@ -14458,7 +14455,7 @@ end
         // What: lancache-ng stats list|graph|sample.
         // Why: reads here; a sample round runs in the ui.
         // From: Issue #1683 | PR #2020
-        pub async fn stats_run(args: &[String]) -> Result<(), String> {
+        pub async fn run(args: &[String]) -> Result<(), String> {
             let s = Settings::from_process()?;
             use crate::shared::cli;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -14872,7 +14869,7 @@ end
         // What: lancache-ng cache usage: counts, then JSON.
         // Why: cache reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
-        pub async fn cache_run(args: &[String]) -> Result<(), String> {
+        pub async fn run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
             use crate::shared::cli;
             match cli::op_of(&COMMANDS, args.first()) {
@@ -15220,7 +15217,7 @@ end
 // From: Issue #1683 | PR #2020
 mod stack {
     use crate::config::{self, Settings, process_env};
-    use crate::dhcp::dhcp_stays_off;
+    use crate::dhcp::stays_off;
     use crate::dns::{dnssec_chain, ensure_zones};
     use crate::shared::Fault;
     use crate::shared::dhcp::Mode as DhcpMode;
@@ -15886,7 +15883,7 @@ mod stack {
         let dhcp = new.text("DHCP_SERVICE")?;
         if crate::shared::dhcp::off_service(new)?.is_some() {
             plan.remove(&dhcp);
-            match dhcp_stays_off(app, new).await {
+            match stays_off(app, new).await {
                 Ok(Some(done)) => report.push(format!("{dhcp}: {done}").into()),
                 Ok(None) => {}
                 Err(e) => report.push(format!("{dhcp}: mode off, {e}").into()),
@@ -16073,9 +16070,7 @@ mod stack {
 mod ui {
     use crate::cachehamster::{Rest, rest_of};
     use crate::config::{self, Settings};
-    use crate::dhcp::{
-        dhcp_probe_cli, dhcp_stays_off, kea_change, kea_snapshots, kea_state, kea_store,
-    };
+    use crate::dhcp::{kea_change, kea_snapshots, kea_state, kea_store, probe_cli, stays_off};
     use crate::dns::{
         LanDomainEdit, answers_aa, commit_and_prune, drop_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
@@ -17942,7 +17937,7 @@ mod ui {
             for e in sample_round(&app, &s).await {
                 eprintln!("ui: stats: {e}");
             }
-            match dhcp_stays_off(&app, &s).await {
+            match stays_off(&app, &s).await {
                 Ok(Some(done)) => eprintln!("ui: dhcp: {done}"),
                 Ok(None) => {}
                 Err(e) => eprintln!("ui: dhcp: {e}"),
@@ -18970,7 +18965,7 @@ mod ui {
             // What: one DHCP probe as JSON on stdout.
             // Why: setup.sh and the DHCP page run it.
             // From: Issue #1683 | PR #1985
-            Some(Set::DhcpProbe) => Some(dhcp_probe_cli(s)),
+            Some(Set::DhcpProbe) => Some(probe_cli(s)),
             None => None,
         }
     }
@@ -20328,14 +20323,14 @@ async fn main() -> std::process::ExitCode {
                 Some(Target::Cachehamster) => cachehamster::run(&argv).await,
                 Some(Target::Dhcp) => code(dhcp::run(&argv).await),
                 Some(Target::Config) => code(config::run(&argv).await),
-                Some(Target::System) => code(shared::docker::system_run(&argv).await),
-                Some(Target::Proxy) => code(shared::nginx_conf::proxy_run(&argv).await),
-                Some(Target::Ntp) => code(shared::ntp::ntp_run(&argv).await),
-                Some(Target::Secret) => code(shared::secret::secret_run(&argv)),
-                Some(Target::Cache) => code(shared::tidy::cache_run(&argv).await),
-                Some(Target::Cdn) => code(shared::cdn::cdn_run(&argv).await),
-                Some(Target::Stats) => code(shared::rrd::stats_run(&argv).await),
-                Some(Target::Logs) => code(shared::access::logs_run(&argv)),
+                Some(Target::System) => code(shared::docker::run(&argv).await),
+                Some(Target::Proxy) => code(shared::nginx_conf::run(&argv).await),
+                Some(Target::Ntp) => code(shared::ntp::run(&argv).await),
+                Some(Target::Secret) => code(shared::secret::run(&argv)),
+                Some(Target::Cache) => code(shared::tidy::run(&argv).await),
+                Some(Target::Cdn) => code(shared::cdn::run(&argv).await),
+                Some(Target::Stats) => code(shared::rrd::run(&argv).await),
+                Some(Target::Logs) => code(shared::access::run(&argv)),
                 None => {
                     eprintln!(
                         "lancache-ng: unknown role {other:?}; use {} or {}",
