@@ -828,6 +828,7 @@ runtime:
     - UI_ROUTE_STACK_SNAPSHOT_SAVE=/api/stack/snapshots/save
     - UI_ROUTE_STACK_SNAPSHOT_RESTORE=/api/stack/snapshots/restore
     - UI_ROUTE_WATCHDOG_CHECK=/api/watchdog/check
+    - UI_ROUTE_WATCHDOG_PROCESSED=/api/watchdog/processed
     - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema

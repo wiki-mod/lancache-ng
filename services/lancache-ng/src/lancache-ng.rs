@@ -19086,6 +19086,23 @@ mod ui {
         Ok(axum::Json(v).into_response())
     }
 
+    // What: GET UI_ROUTE_WATCHDOG_PROCESSED: syslog count.
+    // Why: REST asks services what the CLI asks there.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn watchdog_processed(State(app): Shared) -> Page {
+        let s = app.settings();
+        let program = s.text("SERVICES_PROGRAM")?;
+        let cmd = [program.as_str(), "watchdog", "processed"];
+        let (code, v) = exec_json(&app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
+        if code != 0 {
+            let why = v["error"].as_str().unwrap_or("syslog-ng did not answer");
+            return Err(Fail(StatusCode::BAD_GATEWAY, why.to_string()));
+        }
+        Ok(axum::Json(v).into_response())
+    }
+
     // What: POST UI_ROUTE_WATCHDOG_TIDY, ?dry_run=1.
     // Why: REST runs the watchdog step in services.
     // From: Issue #1683 | PR #2020
@@ -20223,6 +20240,7 @@ mod ui {
             route("UI_ROUTE_UI_TEMPLATES", Get, Api, templates_api),
             route("UI_ROUTE_WATCHDOG_TIDY", Post, Api, watchdog_tidy),
             route("UI_ROUTE_WATCHDOG_CHECK", Get, Api, watchdog_check),
+            route("UI_ROUTE_WATCHDOG_PROCESSED", Get, Api, watchdog_processed),
             route("UI_ROUTE_ZONE_OVERVIEW", Get, Api, zone_overview),
             route("UI_ROUTE_DESIRED_STATE", Post, Api, container_state),
             route("UI_ROUTE_RESTART_UI", Post, Api, restart_ui),
@@ -21249,18 +21267,23 @@ mod watchdog {
         Healthcheck,
         Alarms,
         Check,
+        Processed,
     }
 
     // What: every watchdog command but the tidy steps.
     // Why: help, errors and the choice read this table.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 3] = [
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
         (
             "healthcheck",
             crate::shared::cli::row(Op::Healthcheck, "healthcheck"),
         ),
         ("alarms", crate::shared::cli::row(Op::Alarms, "alarms")),
         ("check", crate::shared::cli::row(Op::Check, "check")),
+        (
+            "processed",
+            crate::shared::cli::row(Op::Processed, "processed"),
+        ),
     ];
 
     // What: healthcheck command, else the check loop.
@@ -21298,6 +21321,20 @@ mod watchdog {
                 println!("{body}");
                 if f.alarms.iter().any(|a| a.level == Level::Crit) {
                     std::process::exit(1);
+                }
+                return Ok(());
+            }
+            // What: lines syslog-ng wrote to the log store.
+            // Why: its input; the socket is in services.
+            // From: Issue #1683 | PR #2020
+            (_, Some(Op::Processed)) => {
+                let s = Settings::from_process()?;
+                match tidy::syslog_processed(&s) {
+                    Ok(n) => println!("{}", serde_json::json!({"processed": n})),
+                    Err(e) => {
+                        println!("{}", serde_json::json!({"error": e}));
+                        std::process::exit(1);
+                    }
                 }
                 return Ok(());
             }
