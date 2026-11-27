@@ -3719,6 +3719,16 @@ mod dhcp {
         Ok(Some(api.config().await?))
     }
 
+    // What: running Kea config, none if mode is not Kea.
+    // Why: a whole-stack state holds Kea as it runs.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn kea_current(s: &Settings) -> Result<Option<Value>, String> {
+        match kea_api_in_kea_mode(s)? {
+            Some(api) => Ok(Some(live_config(&api).await?)),
+            None => Ok(None),
+        }
+    }
+
     // What: the Kea API; none if the mode is not Kea.
     // Why: each Kea read stops alike in other modes.
     // From: Issue #1683 | PR #2020
@@ -14790,6 +14800,78 @@ mod stack {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    // What: parts a stack state leaves out, and why.
+    // Why: nothing is missing without a word.
+    // From: Issue #1683 | PR #2020
+    const STATE_LEAVES_OUT: [&str; 7] = [
+        "cache volume: the cached files, not settings",
+        "Kea leases: runtime data of the clients",
+        "secrets: an old key would cut secondaries, Kea, pdns",
+        "container settings: setup.sh owns them",
+        "settings of <file>.local: they win over the file",
+        "cachehamster jobs and statistics: runtime data",
+        "sessions: logins of the moment",
+    ];
+
+    // What: store of whole-stack states.
+    // Why: one file per state; count from the SOT.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn state_store(s: &Settings) -> Result<crate::shared::snapshot::Store, String> {
+        Ok(crate::shared::snapshot::Store {
+            dir: PathBuf::from(s.text("STACK_SNAPSHOT_DIR")?),
+            keep: s.num::<usize>("STACK_SNAPSHOT_KEEP")?,
+            owner: crate::shared::fs::Owner::default(),
+            file: Some(s.text("STACK_SNAPSHOT_FILE")?),
+        })
+    }
+
+    // What: the state of the stack now as one value.
+    // Why: settings, Kea and zones of one moment.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn state_capture(app: &Stack) -> Result<Value, String> {
+        let s = app.settings();
+        let keep = |key: &str| {
+            s.spec(key)
+                .is_some_and(|sp| !sp.is_secret() && sp.effect != config::Effect::Container)
+        };
+        let settings: BTreeMap<String, String> = config::read_raw(&saved_path(app)?)?
+            .into_iter()
+            .filter(|(k, _)| keep(k))
+            .collect();
+        let role = crate::shared::dns::Role::from_settings(&s)?;
+        let mut zones = BTreeMap::new();
+        if role == crate::shared::dns::Role::Primary {
+            let api = crate::shared::peer::own_api(&s)?;
+            let have = crate::dns::zone_names(&api).await?;
+            for zone in crate::dns::snapshot_zones(&s)? {
+                let id = crate::shared::pdns::zone_id(&zone);
+                if have.contains(&id) {
+                    let rows = api.rrsets(&zone).await?;
+                    zones.insert(zone, rows);
+                }
+            }
+        }
+        Ok(json!({
+            "version": 1,
+            "created_unix": crate::shared::clock::unix_secs(),
+            "role": format!("{role:?}"),
+            "dhcp_mode": s.text("DHCP_MODE")?,
+            "settings": settings,
+            "kea": crate::dhcp::kea_current(&s).await?,
+            "zones": zones,
+            "left_out": STATE_LEAVES_OUT,
+        }))
+    }
+
+    // What: keep the state of now as a snapshot.
+    // Why: REST, CLI and changes save it one way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn state_save(app: &Stack) -> Result<String, String> {
+        let state = state_capture(app).await?;
+        let body = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+        state_store(&app.settings())?.save(&body)
+    }
+
     // What: SOT keys and values of one change.
     // Why: forms, REST and CLI change settings so.
     // From: Issue #1683 | PR #1980
@@ -17598,6 +17680,27 @@ mod ui {
         Ok(axum::Json(v).into_response())
     }
 
+    // What: GET UI_ROUTE_STACK_SNAPSHOTS: saved states.
+    // Why: a restore picks one of them by id.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stack_snapshots_api(State(app): Shared) -> Response {
+        let rows = crate::stack::state_store(&app.settings()).and_then(|st| st.rows());
+        json_reply(rows.map(|r| Some(json!({"snapshots": r}))), "")
+    }
+
+    // What: POST UI_ROUTE_STACK_SNAPSHOT_SAVE.
+    // Why: keep the state of now before a big change.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stack_snapshot_save_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        headers: HeaderMap,
+    ) -> Page {
+        csrf.check_header(&headers)?;
+        let id = crate::stack::state_save(&app).await?;
+        Ok(axum::Json(json!({"id": id})).into_response())
+    }
+
     // What: seconds as "4 h", "90 min" or "45 s".
     // Why: the page shows the SOT check times readably.
     // From: Issue #1683 | PR #2017
@@ -18494,6 +18597,13 @@ mod ui {
             route("UI_ROUTE_APPLY_PREVIEW", Get, Api, apply_preview_api),
             route("UI_ROUTE_PROXY_PSL", Get, Api, proxy_psl_api),
             route("UI_ROUTE_PROXY_CERTS", Get, Api, certs_api),
+            route("UI_ROUTE_STACK_SNAPSHOTS", Get, Api, stack_snapshots_api),
+            route(
+                "UI_ROUTE_STACK_SNAPSHOT_SAVE",
+                Post,
+                Api,
+                stack_snapshot_save_api,
+            ),
             route("UI_ROUTE_PROXY_CERTS_RENEW", Post, Api, certs_renew_api),
             route("UI_ROUTE_DOCKER", Get, Api, docker_api),
             route("UI_ROUTE_STATS_GRAPH", Get, Api, graph),
