@@ -76,7 +76,7 @@ Healthchecks:
    (`shared::render::all` in `services/lancache-ng/src/lancache-ng.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.
 3. The ui wakes only the owners with changes, with the strongest needed
-   action (reload or restart, `apply::plan`).
+   action (reload or restart, `apply::owner_effects`).
 4. The owner containers mount `lancache-config` read-only and start their
    programs with the SOT config paths.
 

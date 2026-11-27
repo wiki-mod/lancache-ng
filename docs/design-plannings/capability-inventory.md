@@ -56,8 +56,8 @@ Provided by `services/ui/nginx/*` templates and the generator `nginx_conf` in
 - **Request policy.** `PROXY_SECURITY_MODE` selects `lazy` or `strict`
   (`$cdn_host_allowed`); `PROXY_ALLOWED_CLIENT_CIDRS` limits clients
   (`$lancache_client_allowed`, and `allow` / `deny all` in the stream block).
-- **Certificates.** `cert::make_ca` creates the CA (`CA_KEY_TYPE`, `CA_DAYS`,
-  `CA_KEY_MODE`); `cert::make_leaf` signs one leaf per host;
+- **Certificates.** `cert::create_ca` creates the CA (`CA_KEY_TYPE`, `CA_DAYS`,
+  `CA_KEY_MODE`); `cert::create_leaf` signs one leaf per host;
   `render::issue_certs` issues the planned set; `cert::valid_for` and
   `cert::expiry` report remaining validity.
 - **Endpoints.** `PROXY_HEALTH_PATH` serves the health file and
@@ -169,7 +169,7 @@ Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/
   that file, the container environment, the SOT default
   (`config::Settings::load`).
 - **Config rendering.** `render::all` renders every config from the SOT and the
-  settings into the `lancache-config` volume; `apply::plan` and `apply::run` reload
+  settings into the `lancache-config` volume; `apply::owner_effects` and `apply::run` reload
   or restart only the owners with changes, through `docker::Api`. A reload runs
   the commands of `RELOAD_EXEC` in the owner container (`reload_exec`); an owner
   without a command, or a failed reload, is restarted.

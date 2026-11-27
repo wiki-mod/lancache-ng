@@ -40,7 +40,7 @@ The table names the source of each component.
 | Component | Primary source of truth | Threats |
 |---|---|---|
 | DNS spoofing (PowerDNS RPZ) | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`recursor_conf::rpz`, `recursor_conf::yaml`, `pdns_conf::auth`), `services/dns/cdn-domains.txt` | T1, T4, T11 |
-| TLS interception + local CA | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`cert::make_ca`, `cert::make_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | T7, T8, T10 |
+| TLS interception + local CA | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`cert::create_ca`, `cert::create_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | T7, T8, T10 |
 | Proxy request policy (client CIDR + host allowlists) | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | T2, T9 |
 | Admin UI authentication | `services/lancache-ng/src/lancache-ng.rs` (`ui::login_ok`, `ui::auth`, `ui::Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | T3 |
 | Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`docker::Api`) | T6 |
@@ -132,7 +132,7 @@ sources in the inventory table.
   (`.github/yaml/build-manifest.yml`) and the saved settings (`shared::render::all` in
   `services/lancache-ng/src/lancache-ng.rs`), writes the changed files into the
   `lancache-config` volume and wakes only the affected owner containers (reload
-  or restart through the Docker API, `apply::plan`). The owner containers mount
+  or restart through the Docker API, `apply::owner_effects`). The owner containers mount
   that volume read-only. The watchdog never writes configs.
 - **DNS spoofing** — PowerDNS (authoritative + recursor) in the `dns`
   container. The `ui` builds an **RPZ zone** from `cdn-domains.txt`
@@ -159,7 +159,7 @@ sources in the inventory table.
   to the real CDN (no CA needed); **HTTPS mode** terminates TLS using a per-domain
   wildcard cert signed by the local CA, caches, then re-fetches from the origin
   over verified TLS.
-- **Local CA (HTTPS mode)** — created by the `ui` (`cert::make_ca`;
+- **Local CA (HTTPS mode)** — created by the `ui` (`cert::create_ca`;
   `CA_KEY_TYPE=rsa:4096`, `CA_DAYS=3650`, key file mode `0600`) in the CA state
   directory (`CA_DIR`). `ca.key` is the crown jewel and stays outside the
   checkout; `ca.crt` is a public certificate distributed to clients.
