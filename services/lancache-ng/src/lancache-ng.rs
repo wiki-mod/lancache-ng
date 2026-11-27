@@ -10564,10 +10564,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                         // Why: AXFR ends old cached answers
                         // From: Issue #1683 | PR #2017
                         let mut to = Vec::new();
-                        for which in [
-                            crate::shared::recursor_conf::Which::Http,
-                            crate::shared::recursor_conf::Which::Https,
-                        ] {
+                        for (which, _) in crate::shared::recursor_conf::running(s) {
                             let port = s.uint(&which.key("PORT"))?;
                             to.extend(
                                 s.list(&which.key("LISTEN"))?
@@ -11083,6 +11080,16 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 }
                 .to_string()
             }
+        }
+
+        // What: the recursors that run, with their IP.
+        // Why: dns-https idles without IP_HTTPS.
+        // From: Issue #1683 | PR #1980
+        pub fn running(s: &Settings) -> Vec<(Which, String)> {
+            [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")]
+                .into_iter()
+                .filter_map(|(which, key)| Some((which, s.text(key).ok()?)))
+                .collect()
         }
 
         // What: YAML list rows of quoted items.
@@ -12868,7 +12875,7 @@ end
     // From: Issue #1683 | PR #1980
     pub mod render {
         use crate::config::Settings;
-        use crate::shared::recursor_conf::{self, Chain, Which};
+        use crate::shared::recursor_conf::{self, Chain};
         use crate::shared::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
         use std::path::{Path, PathBuf};
 
@@ -13018,8 +13025,7 @@ end
             // What: files for each recursor with an IP.
             // Why: dns-https waits for it (IP_HTTPS set).
             // From: Issue #1683 | PR #1980
-            for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
-                let Ok(answer) = s.text(ip_key) else { continue };
+            for (which, answer) in recursor_conf::running(s) {
                 let rpz_key = which.key("RPZ_FILE");
                 let lua_key = which.key("LUA_FILE");
                 // What: serial from the zone body itself.
