@@ -3396,10 +3396,8 @@ mod dhcp {
     // From: Issue #1683 | PR #1980
     pub(crate) fn subnet_row(sn: &Value) -> Value {
         use crate::shared::dhcp::{DNS_SERVERS, DOMAIN_NAME, NTP_SERVERS, ROUTERS};
-        let dns: Vec<String> = option_data(sn, DNS_SERVERS.name)
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .collect();
+        let dns_text = option_data(sn, DNS_SERVERS.name);
+        let dns: Vec<String> = config::list_items(&dns_text).map(str::to_string).collect();
         let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
         let (start, end) = crate::shared::kea_conf::pool_parts(pool);
         let custom: Vec<Value> = crate::shared::kea_conf::coded_options(sn)
