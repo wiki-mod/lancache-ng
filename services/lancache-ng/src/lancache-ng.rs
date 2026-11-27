@@ -14101,11 +14101,8 @@ mod stack {
                 continue;
             }
             let ex = new.list(exec);
-            let owners: std::collections::BTreeSet<&str> = ex
-                .iter()
-                .filter_map(|e| e.split_once(':'))
-                .map(|p| p.0)
-                .collect();
+            let owners: std::collections::BTreeSet<&str> =
+                apply::exec_rows(&ex).map(|(owner, _)| owner).collect();
             for owner in owners {
                 match container_of(app, new, owner).await {
                     Ok(name) => {
