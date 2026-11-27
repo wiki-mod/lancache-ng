@@ -6256,6 +6256,7 @@ mod shared {
     pub(crate) enum Fault {
         Plain(String),
         Key(&'static str, Vec<(&'static str, String)>),
+        Lead(String, Box<Fault>),
     }
 
     impl Fault {
@@ -6267,6 +6268,13 @@ mod shared {
             vals: impl IntoIterator<Item = (&'static str, String)>,
         ) -> Self {
             Self::Key(key, vals.into_iter().collect())
+        }
+
+        // What: a failure behind a line start.
+        // Why: report lines name the owner, then the cause.
+        // From: Issue #1683 | PR #2020
+        pub(crate) fn lead(lead: String, cause: Fault) -> Self {
+            Self::Lead(lead, Box::new(cause))
         }
     }
 
@@ -6293,6 +6301,7 @@ mod shared {
                     f.write_str(key)?;
                     vals.iter().try_for_each(|(k, v)| write!(f, " {k}={v}"))
                 }
+                Self::Lead(lead, cause) => write!(f, "{lead}{cause}"),
             }
         }
     }
@@ -14958,7 +14967,7 @@ mod stack {
         app: &Stack,
         old: &Settings,
         new: Settings,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<Fault>, String> {
         let lines = apply_all(app, old, &new, true).await?;
         match app.settings.write() {
             Ok(mut s) => *s = new,
@@ -14970,7 +14979,7 @@ mod stack {
     // What: read the settings file again and apply it.
     // Why: a hand edit or a lost file takes effect.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn apply_now(app: &Stack) -> Result<Vec<String>, String> {
+    pub(crate) async fn apply_now(app: &Stack) -> Result<Vec<Fault>, String> {
         let _held = app.change.lock().await;
         let old = app.settings();
         let new = match app.saved.clone() {
@@ -15160,14 +15169,14 @@ mod stack {
         app: &Stack,
         s: &Settings,
         plan: &mut BTreeMap<String, V>,
-    ) -> (BTreeMap<String, String>, Vec<String>) {
+    ) -> (BTreeMap<String, String>, Vec<Fault>) {
         let (mut names, mut skipped) = (BTreeMap::new(), Vec::new());
         for owner in plan.keys() {
             match container_of(app, s, owner).await {
                 Ok(name) => {
                     names.insert(owner.clone(), name);
                 }
-                Err(e) => skipped.push(format!("{owner}: skipped, {e}")),
+                Err(e) => skipped.push(Fault::lead(format!("{owner}: skipped, "), e)),
             }
         }
         plan.retain(|owner, _| names.contains_key(owner));
@@ -15193,7 +15202,7 @@ mod stack {
         old: &Settings,
         new: &Settings,
         zones: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<Fault>, String> {
         let (files, written) = render_and_write(new).await?;
         let mut changes = old.diff(new);
         app.rendered.store(true, Ordering::Relaxed);
@@ -15229,9 +15238,9 @@ mod stack {
                 match container_of(app, new, owner).await {
                     Ok(name) => {
                         let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
-                        report.push(format!("{owner} {tag}: {r:?}"));
+                        report.push(format!("{owner} {tag}: {r:?}").into());
                     }
-                    Err(e) => report.push(format!("{owner} {tag}: skipped, {e}")),
+                    Err(e) => report.push(Fault::lead(format!("{owner} {tag}: skipped, "), e)),
                 }
             }
         }
@@ -15239,7 +15248,7 @@ mod stack {
         // Why: dns may not be up yet at that moment.
         // From: Issue #1683 | PR #1980
         if zones && let Err(e) = ensure_zones(new).await {
-            report.push(e);
+            report.push(e.into());
         }
         // What: render again once the zones stand.
         // Why: a new zone has its DS only after ensure.
@@ -15247,7 +15256,7 @@ mod stack {
         if zones {
             match render_and_write(new).await {
                 Ok((_, again)) => changes.extend(again),
-                Err(e) => report.push(e),
+                Err(e) => report.push(e.into()),
             }
         }
         let mut plan = apply::plan(&changes);
@@ -15258,9 +15267,9 @@ mod stack {
         if crate::shared::dhcp::off_service(new)?.is_some() {
             plan.remove(&dhcp);
             match dhcp_stays_off(app, new).await {
-                Ok(Some(done)) => report.push(format!("{dhcp}: {done}")),
+                Ok(Some(done)) => report.push(format!("{dhcp}: {done}").into()),
                 Ok(None) => {}
-                Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
+                Err(e) => report.push(format!("{dhcp}: mode off, {e}").into()),
             }
         }
         // What: proxy and relay share one dnsmasq daemon.
@@ -15275,10 +15284,10 @@ mod stack {
                     if !matches!(r, apply::Outcome::Failed(_)) {
                         plan.remove(&dhcp);
                     }
-                    report.push(format!("{dhcp} dnsmasq: {r:?}"));
+                    report.push(format!("{dhcp} dnsmasq: {r:?}").into());
                 }
                 Ok(_) => {}
-                Err(e) => report.push(format!("{dhcp} dnsmasq: skipped, {e}")),
+                Err(e) => report.push(Fault::lead(format!("{dhcp} dnsmasq: skipped, "), e)),
             }
         }
         // What: skip an owner that has no container yet.
@@ -15313,12 +15322,12 @@ mod stack {
             if matches!(result, apply::Outcome::Done(docker::Action::Restart)) {
                 restarted.push(lookup(&owner));
             }
-            report.push(format!("{owner}: {result:?}"));
+            report.push(format!("{owner}: {result:?}").into());
         }
         for (name, cause) in wait_healthy(app, new, &restarted, limit).await? {
             match cause {
-                Some(e) => report.push(format!("{name}: not healthy in time, inspect: {e}")),
-                None => report.push(format!("{name}: not healthy in time")),
+                Some(e) => report.push(format!("{name}: not healthy in time, inspect: {e}").into()),
+                None => report.push(format!("{name}: not healthy in time").into()),
             }
         }
 
@@ -15333,7 +15342,7 @@ mod stack {
             let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
             while let Err(e) = ensure_zones(new).await {
                 if Instant::now() >= until {
-                    report.push(format!("dns api: {e}"));
+                    report.push(format!("dns api: {e}").into());
                     break;
                 }
                 tokio::time::sleep(poll).await;
@@ -15352,7 +15361,7 @@ mod stack {
     pub(crate) async fn issue_and_reload(
         app: &Stack,
         new: &Settings,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<Fault>, String> {
         let mut report = Vec::new();
         let s = new.clone();
         let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
@@ -15361,7 +15370,7 @@ mod stack {
         match issued {
             Ok(0) => {}
             Ok(n) => {
-                report.push(format!("certs: {n} issued"));
+                report.push(format!("certs: {n} issued").into());
                 let (grace, limit) = app.limits(new)?;
                 let rx = new.list("RELOAD_EXEC")?;
                 let mut plan = apply::plan(&[proxy_reload(new, "certs")?]);
@@ -15370,10 +15379,10 @@ mod stack {
                 for (owner, result) in
                     apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
                 {
-                    report.push(format!("{owner}: {result:?}"));
+                    report.push(format!("{owner}: {result:?}").into());
                 }
             }
-            Err(e) => report.push(format!("certs: {e}")),
+            Err(e) => report.push(format!("certs: {e}").into()),
         }
         Ok(report)
     }
@@ -15574,7 +15583,15 @@ mod ui {
             Fault::Key(key, vals) => vals.iter().fold(tr(key), |text, (name, value)| {
                 text.replace(&format!("{{{name}}}"), value)
             }),
+            Fault::Lead(lead, cause) => format!("{lead}{}", say(cause)),
         }
+    }
+
+    // What: report lines as texts in the request language.
+    // Why: REST answers a list of texts.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn say_all(lines: &[Fault]) -> Vec<String> {
+        lines.iter().map(say).collect()
     }
 
     tokio::task_local! {
@@ -16161,7 +16178,7 @@ mod ui {
     ) -> Page {
         csrf.check_header(&headers)?;
         let lines = apply_now(&app).await.map_err(bad_request)?;
-        Ok(axum::Json(json!({"report": lines})).into_response())
+        Ok(axum::Json(json!({"report": say_all(&lines)})).into_response())
     }
 
     // What: end a form: redirect back or show error.
@@ -17576,7 +17593,7 @@ mod ui {
         csrf.check_header(&headers)?;
         let s = app.settings();
         let dropped = render::drop_expiring(&s).map_err(bad_request)?;
-        let report = issue_and_reload(&app, &s).await?;
+        let report = say_all(&issue_and_reload(&app, &s).await?);
         let v = json!({"renewed": dropped, "report": report, "certs": render::cert_list(&s)?});
         Ok(axum::Json(v).into_response())
     }
@@ -17605,7 +17622,7 @@ mod ui {
         let lines = apply_all(&app, &s, &s, true)
             .await
             .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
-        Ok(axum::Json(json!({"report": lines})).into_response())
+        Ok(axum::Json(json!({"report": say_all(&lines)})).into_response())
     }
 
     // What: retry zones and TSIG until pdns answers.
@@ -17628,7 +17645,9 @@ mod ui {
                     // Why: the start render ran before dns.
                     // From: Issue #1683 | PR #2019
                     match apply_all(&app, &s, &s, false).await {
-                        Ok(lines) => lines.iter().for_each(|l| eprintln!("ui: start: {l}")),
+                        Ok(lines) => say_all(&lines)
+                            .iter()
+                            .for_each(|l| eprintln!("ui: start: {l}")),
                         Err(e) => eprintln!("ui: start: anchors: {e}"),
                     }
                     return;
@@ -18736,7 +18755,9 @@ mod ui {
         // Why: owners read config volume; it starts empty.
         // From: Issue #1683 | PR #1980
         match apply_all(&app, &s, &s, false).await {
-            Ok(lines) => lines.iter().for_each(|l| eprintln!("ui: start: {l}")),
+            Ok(lines) => say_all(&lines)
+                .iter()
+                .for_each(|l| eprintln!("ui: start: {l}")),
             Err(e) => eprintln!("ui: start render: {e}"),
         }
         tokio::spawn(sampler(app.clone()));
