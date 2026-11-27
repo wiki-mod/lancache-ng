@@ -3449,10 +3449,10 @@ mod config {
 mod dhcp {
     use crate::config::{self, Settings};
     use crate::dns::{chosen_lan_zone, main_domain_fields};
+    use crate::shared::Fault;
     use crate::shared::dhcp::{Mode as DhcpMode, ipv4_of, off_service, option_data};
     use crate::shared::{docker, fs, http, kea, kea_conf, secret, snapshot};
     use crate::stack::{Fields, Stack, commit};
-    use crate::ui::tr;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -3640,19 +3640,15 @@ mod dhcp {
     // What: a Kea change; the main subnet keeps settings.
     // Why: it cannot go; its edit sets DHCP_SUBNET...
     // From: Issue #1683
-    pub(crate) async fn kea_change(
-        app: &Stack,
-        s: &Settings,
-        edit: &KeaEdit,
-    ) -> Result<(), String> {
+    pub(crate) async fn kea_change(app: &Stack, s: &Settings, edit: &KeaEdit) -> Result<(), Fault> {
         let main = s.uint("DHCP_SUBNET_ID")?;
         if matches!(edit, KeaEdit::SubnetRemove(id) if *id == main) {
-            return Err(tr("err_main_subnet_remove"));
+            return Err(Fault::key("err_main_subnet_remove", []));
         }
         kea_action(s, edit).await?;
         match edit {
             KeaEdit::SubnetUpdate(id, input) if *id == main => {
-                commit(app, main_subnet_settings(s, input)?).await
+                Ok(commit(app, main_subnet_settings(s, input)?).await?)
             }
             _ => Ok(()),
         }
@@ -3807,15 +3803,15 @@ mod dhcp {
     // From: Issue #1683 | PR #1980
     pub(crate) async fn kea_edit(
         s: &Settings,
-        edit: impl FnOnce(&mut Vec<Value>) -> Result<(), String>,
-    ) -> Result<(), String> {
+        edit: impl FnOnce(&mut Vec<Value>) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
         let api = kea_api(s)?;
         let mut cfg = live_config(&api).await?;
         let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
         kea_conf::set_subnets(&mut cfg, subnets);
         api.set_config(cfg.clone()).await?;
-        save_kea(&kea_store(s)?, &cfg)
+        Ok(save_kea(&kea_store(s)?, &cfg)?)
     }
 
     // What: Kea subnet from typed subnet input.
@@ -3845,15 +3841,15 @@ mod dhcp {
     // What: Kea subnet with the given id.
     // Why: edits target a subnet by id, not position.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, String> {
+    pub(crate) fn subnet_mut(list: &mut [Value], id: u64) -> Result<&mut Value, Fault> {
         let found = list.iter_mut().find(|x| x["id"].as_u64() == Some(id));
-        found.ok_or_else(|| tr("err_no_subnet").replace("{id}", &id.to_string()))
+        found.ok_or_else(|| Fault::key("err_no_subnet", [("id", id.to_string())]))
     }
 
     // What: Kea subnet, option and host edits.
     // Why: all go through kea_edit.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn kea_action(s: &Settings, edit: &KeaEdit) -> Result<(), String> {
+    pub(crate) async fn kea_action(s: &Settings, edit: &KeaEdit) -> Result<(), Fault> {
         // What: a subnet domain must be a LAN domain.
         // Why: DDNS and DNS answer only for those zones.
         // From: Issue #1683
@@ -3877,7 +3873,7 @@ mod dhcp {
                 kea_edit(s, |l| {
                     let sn = subnet_mut(l, *id)?;
                     *sn = subnet_from(input, *id, Some(&sn.clone()));
-                    kea_conf::subnet_ddns_suffix(s, sn)
+                    Ok(kea_conf::subnet_ddns_suffix(s, sn)?)
                 })
                 .await
             }
@@ -3921,8 +3917,8 @@ mod dhcp {
                 })
                 .await
             }
-            KeaEdit::LeaseRelease(ip) => kea_api(s)?.release(ip).await,
-            KeaEdit::Rollback(id) => kea_rollback(s, id).await,
+            KeaEdit::LeaseRelease(ip) => Ok(kea_api(s)?.release(ip).await?),
+            KeaEdit::Rollback(id) => Ok(kea_rollback(s, id).await?),
         }
     }
 
@@ -3967,13 +3963,13 @@ mod dhcp {
 // From: Issue #1683 | PR #2020
 mod dns {
     use crate::config::{self, Settings};
+    use crate::shared::Fault;
     use crate::shared::dns::Role;
     use crate::shared::peer::{self, PeerZone, ZoneState};
     use crate::shared::task::or_stop;
     use crate::shared::tool;
     use crate::shared::{apply, fs, pdns, recursor_conf, render, secret};
     use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
-    use crate::ui::tr;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::net::{IpAddr, SocketAddr};
@@ -4417,9 +4413,9 @@ mod dns {
                 Err(_) => continue,
             };
             let done = if own {
-                Err(tr("err_zone_has_records"))
+                Err(Fault::key("err_zone_has_records", []))
             } else {
-                api.delete_zone(zone).await
+                api.delete_zone(zone).await.map_err(Fault::from)
             };
             match done {
                 Ok(()) => eprintln!("ui: zone {zone} removed"),
@@ -4487,15 +4483,18 @@ mod dns {
     // What: the LAN zone a form names; empty = main.
     // Why: records go only into a configured LAN domain.
     // From: Issue #1683
-    pub(crate) fn chosen_lan_zone(s: &Settings, raw: &str) -> Result<String, String> {
+    pub(crate) fn chosen_lan_zone(s: &Settings, raw: &str) -> Result<String, Fault> {
         if raw.trim().is_empty() {
-            return crate::shared::dns::lan_zone(s);
+            return Ok(crate::shared::dns::lan_zone(s)?);
         }
         let zone = crate::shared::dns::canonical_zone(raw.trim());
         if crate::shared::dns::lan_domains(s)?.contains(&zone) {
             Ok(zone)
         } else {
-            Err(tr("err_not_lan_domain").replace("{x}", raw.trim()))
+            Err(Fault::key(
+                "err_not_lan_domain",
+                [("x", raw.trim().to_string())],
+            ))
         }
     }
 
@@ -4606,15 +4605,18 @@ mod dns {
     // What: put one zone back to a snapshot.
     // Why: PATCH restores; a new snapshot records it.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), String> {
+    pub(crate) async fn rollback(s: &Settings, zone: &str, id: &str) -> Result<(), Fault> {
         if !snapshot_zones(s)?.iter().any(|z| z == zone) {
-            return Err(tr("err_zone_no_snapshots").replace("{zone}", zone));
+            return Err(Fault::key(
+                "err_zone_no_snapshots",
+                [("zone", zone.to_string())],
+            ));
         }
         let rows: Vec<Value> = zone_store(s, zone)?.read(id)?;
         let api = peer::own_api(s)?;
         api.restore(zone, &rows).await?;
         snapshot(s, &api, zone).await?;
-        peer::flush_zone(s, zone).await
+        Ok(peer::flush_zone(s, zone).await?)
     }
 
     // What: TSIG key state; the value never leaves.
@@ -4799,7 +4801,7 @@ mod dns {
         s: &Settings,
         edit: LanDomainEdit,
         raw: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), Fault> {
         let zone = crate::shared::dns::canonical_zone(raw.trim());
         let name = crate::shared::dns::bare_zone(&zone).to_string();
         let lans = crate::shared::dns::lan_domains(s)?;
@@ -4814,30 +4816,31 @@ mod dns {
             }
             LanDomainEdit::Remove => {
                 if lans.first() == Some(&zone) {
-                    return Err(tr("err_main_domain_remove").replace("{x}", &name));
+                    return Err(Fault::key("err_main_domain_remove", [("x", name)]));
                 }
                 if !lans.contains(&zone) {
-                    return Err(tr("err_not_lan_domain").replace("{x}", &name));
+                    return Err(Fault::key("err_not_lan_domain", [("x", name)]));
                 }
                 // What: a domain with own records stays.
                 // Why: removing it drops names from DNS.
                 // From: Issue #1683
                 let own = own_rrsets(&peer::own_api(s)?.rrsets(&zone).await?).len();
                 if own > 0 {
-                    return Err(tr("err_domain_has_records")
-                        .replace("{x}", &name)
-                        .replace("{n}", &own.to_string()));
+                    return Err(Fault::key(
+                        "err_domain_has_records",
+                        [("x", name), ("n", own.to_string())],
+                    ));
                 }
                 list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, false)?
             }
             LanDomainEdit::Main => {
                 if !lans.contains(&zone) {
-                    return Err(tr("err_not_lan_domain").replace("{x}", &name));
+                    return Err(Fault::key("err_not_lan_domain", [("x", name)]));
                 }
                 main_domain_fields(s, &name)?
             }
         };
-        commit_and_prune(app, change, &before).await
+        Ok(commit_and_prune(app, change, &before).await?)
     }
 
     // What: full name inside the LAN zone.
@@ -4879,11 +4882,11 @@ mod dns {
     // What: add or remove one LAN record set.
     // Why: PATCH sets or deletes; NOTIFY follows.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn record(s: &Settings, add: bool, input: &RecordInput) -> Result<(), String> {
+    pub(crate) async fn record(s: &Settings, add: bool, input: &RecordInput) -> Result<(), Fault> {
         let zone = chosen_lan_zone(s, &input.zone)?;
         let kind = input.kind.clone();
         if !s.list("DNS_LAN_RECORD_TYPES")?.contains(&kind) {
-            return Err(tr("err_record_type").replace("{kind}", &kind));
+            return Err(Fault::key("err_record_type", [("kind", kind)]));
         }
         let name = in_zone(&input.name, &zone);
         let mut contents = Vec::new();
@@ -4907,13 +4910,17 @@ mod dns {
         if add && kind == "A" && input.ptr {
             for ip in &contents {
                 let Some((rev, rz)) = served_reverse_place(s, ip)? else {
-                    return Err(tr("err_ptr_no_zone").replace("{ip}", ip));
+                    return Err(Fault::key("err_ptr_no_zone", [("ip", ip.to_string())]));
                 };
                 let have = rrset_contents(&api, &rz, &rev, "PTR").await?;
                 if let Some(other) = have.iter().find(|h| **h != host) {
-                    return Err(tr("err_ptr_taken")
-                        .replace("{ip}", ip)
-                        .replace("{name}", crate::shared::dns::bare_zone(other)));
+                    return Err(Fault::key(
+                        "err_ptr_taken",
+                        [
+                            ("ip", ip.to_string()),
+                            ("name", crate::shared::dns::bare_zone(other).to_string()),
+                        ],
+                    ));
                 }
                 places.push((rev, rz));
             }
@@ -4977,10 +4984,10 @@ mod dns {
     // What: a record TTL within DNS_RECORD_TTL_MAX.
     // Why: LAN and PTR records share the rule.
     // From: Issue #1683 | PR #2019
-    pub(crate) fn check_ttl(s: &Settings, ttl: u32) -> Result<u32, String> {
+    pub(crate) fn check_ttl(s: &Settings, ttl: u32) -> Result<u32, Fault> {
         let max = s.uint("DNS_RECORD_TTL_MAX")?;
         if ttl == 0 || u64::from(ttl) > max {
-            return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
+            return Err(Fault::key("err_ttl_range", [("max", max.to_string())]));
         }
         Ok(ttl)
     }
@@ -4988,7 +4995,7 @@ mod dns {
     // What: add or remove one PTR record.
     // Why: name from the IP; zone from the list.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn ptr(s: &Settings, add: bool, input: &PtrInput) -> Result<(), String> {
+    pub(crate) async fn ptr(s: &Settings, add: bool, input: &PtrInput) -> Result<(), Fault> {
         let ip = input.ip.clone();
         let name = if crate::shared::dns::is_reverse_name(&ip) {
             ip
@@ -4996,7 +5003,7 @@ mod dns {
             reverse_name(&ip)?
         };
         let Some(zone) = reverse_zone(s, &name)? else {
-            return Err(tr("err_ptr_no_reverse_zone").replace("{name}", &name));
+            return Err(Fault::key("err_ptr_no_reverse_zone", [("name", name)]));
         };
         let mut ttl = 0;
         let mut contents = Vec::new();
@@ -5005,7 +5012,7 @@ mod dns {
             contents.push(pdns::zone_id(&input.hostname));
         }
         let api = peer::own_api(s)?;
-        write_rrset(s, &api, &zone, (&name, "PTR"), ttl, &contents).await
+        Ok(write_rrset(s, &api, &zone, (&name, "PTR"), ttl, &contents).await?)
     }
 
     // What: saves secondaries as name@address rows.
@@ -5973,6 +5980,54 @@ mod dns {
 // Why: one owner per behaviour for every role.
 // From: Issue #1683 | PR #2020
 mod shared {
+    // What: an error as a text key and values, no language.
+    // Why: the ui picks the language at its border.
+    // From: Issue #1683 | PR #2020
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum Fault {
+        Plain(String),
+        Key(&'static str, Vec<(&'static str, String)>),
+    }
+
+    impl Fault {
+        // What: a failure with a language text and values.
+        // Why: the text has {name} places the values fill.
+        // From: Issue #1683 | PR #2020
+        pub(crate) fn key(
+            key: &'static str,
+            vals: impl IntoIterator<Item = (&'static str, String)>,
+        ) -> Self {
+            Self::Key(key, vals.into_iter().collect())
+        }
+    }
+
+    impl From<String> for Fault {
+        fn from(text: String) -> Self {
+            Self::Plain(text)
+        }
+    }
+
+    impl From<&str> for Fault {
+        fn from(text: &str) -> Self {
+            Self::Plain(text.to_string())
+        }
+    }
+
+    // What: logs and tests show the key and the values.
+    // Why: only the ui knows the language texts.
+    // From: Issue #1683 | PR #2020
+    impl std::fmt::Display for Fault {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Plain(text) => f.write_str(text),
+                Self::Key(key, vals) => {
+                    f.write_str(key)?;
+                    vals.iter().try_for_each(|(k, v)| write!(f, " {k}={v}"))
+                }
+            }
+        }
+    }
+
     // What: wall-clock time since the Unix epoch.
     // Why: file names, ids and logs need a plain number.
     // From: Issue #1683 | PR #1980
@@ -14370,9 +14425,9 @@ mod stack {
     use crate::config::{self, Settings, process_env};
     use crate::dhcp::dhcp_stays_off;
     use crate::dns::{dnssec_chain, ensure_zones};
+    use crate::shared::Fault;
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::{apply, docker, render};
-    use crate::ui::tr;
     use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
@@ -14577,12 +14632,12 @@ mod stack {
         app: &Stack,
         s: &Settings,
         service: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, Fault> {
         let list = app.docker.stack(s).await?;
         let hit = docker::rows_of(&list, service).next();
         hit.and_then(docker::name_of)
             .map(str::to_string)
-            .ok_or_else(|| tr("err_no_container").replace("{service}", service))
+            .ok_or_else(|| Fault::key("err_no_container", [("service", service.to_string())]))
     }
 
     // What: run a command in a service container.
@@ -14593,13 +14648,14 @@ mod stack {
         s: &Settings,
         service: &str,
         cmd: &[&str],
-    ) -> Result<(i64, String), String> {
+    ) -> Result<(i64, String), Fault> {
         let name = container_of(app, s, service).await?;
         let (_, limit) = app.limits(s)?;
-        app.docker
+        Ok(app
+            .docker
             .exec(&name, cmd, limit)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?)
     }
 
     // What: run a command; read its last JSON line.
@@ -14610,7 +14666,7 @@ mod stack {
         s: &Settings,
         service: &str,
         cmd: &[&str],
-    ) -> Result<(i64, Value), String> {
+    ) -> Result<(i64, Value), Fault> {
         let (code, out) = exec_in(app, s, service, cmd).await?;
         let line = out
             .lines()
@@ -14991,14 +15047,17 @@ mod stack {
     // What: start or stop a container for the user.
     // Why: SERVICES_STOPPED is the wish the watchdog obeys.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn set_wanted(app: &Stack, service: &str, run: bool) -> Result<(), String> {
+    pub(crate) async fn set_wanted(app: &Stack, service: &str, run: bool) -> Result<(), Fault> {
         let s = app.settings();
         if !s
             .list("UI_CONTROLLABLE_SERVICES")?
             .iter()
             .any(|x| x == service)
         {
-            return Err(tr("err_service_not_switchable").replace("{service}", service));
+            return Err(Fault::key(
+                "err_service_not_switchable",
+                [("service", service.to_string())],
+            ));
         }
         commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)?).await?;
         let (grace, limit) = app.limits(&s)?;
@@ -15008,10 +15067,11 @@ mod stack {
         } else {
             docker::Action::Stop
         };
-        app.docker
+        Ok(app
+            .docker
             .act(&name, action, grace, limit)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?)
     }
 }
 
@@ -15029,6 +15089,7 @@ mod ui {
         primary_https_ip, ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch,
         snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
     };
+    use crate::shared::Fault;
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
     use crate::shared::task::or_stop;
@@ -15111,17 +15172,38 @@ mod ui {
         TEXTS.get().unwrap_or(&EMPTY)
     }
 
+    // What: the built-in English texts, parsed once.
+    // Why: the CLI never reads the language files.
+    // From: Issue #1683 | PR #2020
+    fn built_in() -> &'static BTreeMap<String, String> {
+        static EN: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+        EN.get_or_init(|| serde_json::from_str(BUILT_IN_EN).unwrap_or_default())
+    }
+
     // What: one text in the request language.
     // Why: form errors speak the language of the page.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn tr(key: &str) -> String {
+    fn tr(key: &str) -> String {
         let code = LANG.try_with(Clone::clone).unwrap_or_default();
         let all = all_texts();
         all.get(&code)
             .or_else(|| all.get(FALLBACK_LANG))
-            .and_then(|m| m.get(key))
+            .unwrap_or_else(|| built_in())
+            .get(key)
             .cloned()
             .unwrap_or_else(|| key.to_string())
+    }
+
+    // What: the words of a failure in the request language.
+    // Why: ui, REST and CLI translate at their border.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn say(fail: &Fault) -> String {
+        match fail {
+            Fault::Plain(text) => text.clone(),
+            Fault::Key(key, vals) => vals.iter().fold(tr(key), |text, (name, value)| {
+                text.replace(&format!("{{{name}}}"), value)
+            }),
+        }
     }
 
     tokio::task_local! {
@@ -15166,6 +15248,15 @@ mod ui {
         // From: Issue #1683 | PR #1980
         fn into_response(self) -> Response {
             (self.0, self.1).into_response()
+        }
+    }
+
+    impl From<Fault> for Fail {
+        // What: a failure becomes status 500 with text.
+        // Why: handlers pass domain errors on with ?.
+        // From: Issue #1683 | PR #2020
+        fn from(e: Fault) -> Self {
+            Fail(StatusCode::INTERNAL_SERVER_ERROR, say(&e))
         }
     }
 
@@ -15988,22 +16079,32 @@ mod ui {
             DnsOp::NsSwitch => commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await,
             DnsOp::NsAuto => commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await,
             DnsOp::LanAdd | DnsOp::LanRemove => {
-                record(&s, matches!(op, DnsOp::LanAdd), &record_input(&get)).await
+                record(&s, matches!(op, DnsOp::LanAdd), &record_input(&get))
+                    .await
+                    .map_err(|e| say(&e))
             }
-            DnsOp::LanDomainAdd => lan_domain_action(&app, &s, LanDomainEdit::Add, &domain).await,
-            DnsOp::LanDomainRemove => {
-                lan_domain_action(&app, &s, LanDomainEdit::Remove, &domain).await
-            }
-            DnsOp::LanDomainMain => lan_domain_action(&app, &s, LanDomainEdit::Main, &domain).await,
+            DnsOp::LanDomainAdd => lan_domain_action(&app, &s, LanDomainEdit::Add, &domain)
+                .await
+                .map_err(|e| say(&e)),
+            DnsOp::LanDomainRemove => lan_domain_action(&app, &s, LanDomainEdit::Remove, &domain)
+                .await
+                .map_err(|e| say(&e)),
+            DnsOp::LanDomainMain => lan_domain_action(&app, &s, LanDomainEdit::Main, &domain)
+                .await
+                .map_err(|e| say(&e)),
             DnsOp::PtrAdd | DnsOp::PtrRemove => {
                 let input = crate::dns::PtrInput {
                     ip: get("ip"),
                     hostname: get("hostname"),
                     ttl: get("ttl").parse().unwrap_or(0),
                 };
-                ptr(&s, matches!(op, DnsOp::PtrAdd), &input).await
+                ptr(&s, matches!(op, DnsOp::PtrAdd), &input)
+                    .await
+                    .map_err(|e| say(&e))
             }
-            DnsOp::ZoneRollback => rollback(&s, &get("zone"), &get("snapshot_id")).await,
+            DnsOp::ZoneRollback => rollback(&s, &get("zone"), &get("snapshot_id"))
+                .await
+                .map_err(|e| say(&e)),
             DnsOp::TsigRotate => rotate_tsig(&app).await,
         };
         finish(result, &s.text("UI_PAGE_DOMAINS")?)
@@ -16303,7 +16404,7 @@ mod ui {
                 commit(&app, dnsmasq_fields(&form, matches!(op, DhcpOp::Proxy))).await
             }
             other => match kea_edit_of(other, &get) {
-                Ok(edit) => kea_change(&app, &s, &edit).await,
+                Ok(edit) => kea_change(&app, &s, &edit).await.map_err(|e| say(&e)),
                 Err(e) => Err(e),
             },
         };
@@ -16569,7 +16670,7 @@ mod ui {
                     .stats(&name, limit)
                     .await
                     .map_err(|e| e.to_string()),
-                Err(e) => Err(e),
+                Err(e) => Err(say(&e)),
             };
             let v = match got {
                 Ok(v) => v,
@@ -16663,7 +16764,7 @@ mod ui {
         let (svc, cmd) = apply::exec_rows(&rows)
             .next()
             .ok_or("CHRONY_TRACKING_EXEC has no service:command row")?;
-        let (code, text) = exec_in(app, s, svc, &cmd).await?;
+        let (code, text) = exec_in(app, s, svc, &cmd).await.map_err(|e| say(&e))?;
         if code != 0 {
             return Err(format!("{} exit {code}: {}", cmd.join(" "), text.trim()));
         }
@@ -16717,7 +16818,7 @@ mod ui {
             let (svc, cmd) = apply::exec_rows(&rows)
                 .next()
                 .ok_or("SYSTEM_TIME_EXEC has no service:command row")?;
-            match exec_json(&app, &s, svc, &cmd).await? {
+            match exec_json(&app, &s, svc, &cmd).await.map_err(|e| say(&e))? {
                 (0, v) => Ok(v),
                 (code, v) => Err(format!("{} exit {code}: {v}", cmd.join(" "))),
             }
@@ -16869,14 +16970,14 @@ mod ui {
         let status = [control.as_str(), program.as_str(), "status"];
         let (code, _) = exec_in(&app, &s, &container, &status)
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
         if code != 0 {
             return Err(Fail(StatusCode::CONFLICT, tr("err_program_not_running")));
         }
         let cmd = [control.as_str(), program.as_str(), action.as_str()];
         let (code, out) = exec_in(&app, &s, &container, &cmd)
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
         if code != 0 {
             return Err(Fail(
                 StatusCode::BAD_GATEWAY,
@@ -16894,7 +16995,9 @@ mod ui {
         let program = s.text("CACHEHAMSTER_PROGRAM")?;
         let mut cmd = vec![program.as_str(), "cachehamster"];
         cmd.extend_from_slice(args);
-        let (code, v) = exec_json(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd).await?;
+        let (code, v) = exec_json(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd)
+            .await
+            .map_err(|e| say(&e))?;
         if let Some(e) = v.get("error").and_then(Value::as_str) {
             // What: service text behind a translated lead.
             // Why: Steam details stay as the service wrote.
@@ -16919,7 +17022,7 @@ mod ui {
         let cmd = [program.as_str(), "watchdog", "check"];
         let (_, v) = exec_json(&app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
         Ok(axum::Json(v).into_response())
     }
 
@@ -16946,7 +17049,7 @@ mod ui {
         let service = s.text("SERVICES_SERVICE")?;
         let (_, v) = exec_json(&app, &s, &service, &cmd)
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
         Ok(axum::Json(v).into_response())
     }
 
@@ -17342,7 +17445,7 @@ mod ui {
         };
         set_wanted(&app, &service, wish.runs())
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
         Ok(StatusCode::NO_CONTENT.into_response())
     }
 
@@ -17788,7 +17891,7 @@ mod ui {
                 }
             })),
             Some("zone-rollback") => Some(match &args[1..] {
-                [zone, id] => rollback(s, zone, id).await.map(|()| {
+                [zone, id] => rollback(s, zone, id).await.map_err(|e| say(&e)).map(|()| {
                     println!("{}", json!({"restored": zone, "snapshot": id}));
                 }),
                 _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
