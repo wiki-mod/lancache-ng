@@ -16862,7 +16862,7 @@ mod ui {
     }
 
     // What: unhealthy until the configs are rendered.
-    // Why: a failed start render hid behind a healthy ui.
+    // Why: a failed start render must show as unhealthy.
     // From: Issue #1683 | PR #1858
     pub(crate) async fn health(State(app): Shared) -> Response {
         if app.rendered.load(Ordering::Relaxed) {
@@ -17175,6 +17175,9 @@ mod ui {
     #[derive(Clone, Copy)]
     pub(crate) struct Op<T>(T);
 
+    // What: makes an enum of route keys with ALL and key().
+    // Why: router and handlers read one list per enum.
+    // From: Issue #1683 | PR #2019
     macro_rules! route_ops {
     ($name:ident { $($var:ident => $key:literal),+ $(,)? }) => {
         #[derive(Clone, Copy)]
