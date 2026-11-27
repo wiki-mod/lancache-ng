@@ -15227,6 +15227,27 @@ mod stack {
         }
     }
 
+    // What: run one owner's exec rows in its container.
+    // Why: daemon reloads and dnsmasq run them one way.
+    // From: Issue #1683 | PR #2020
+    async fn reload_owner(
+        app: &Stack,
+        s: &Settings,
+        owner: &str,
+        ex: &[String],
+        tag: &str,
+        limit: Duration,
+    ) -> (Option<apply::Outcome>, Fault) {
+        match container_of(app, s, owner).await {
+            Ok(name) => {
+                let r = apply::reload_exec(&app.docker, &name, ex, owner, limit).await;
+                let line = format!("{owner} {tag}: {r:?}").into();
+                (Some(r), line)
+            }
+            Err(e) => (None, Fault::lead(format!("{owner} {tag}: skipped, "), e)),
+        }
+    }
+
     // What: SOT keys and values of one change.
     // Why: forms, REST and CLI change settings so.
     // From: Issue #1683 | PR #1980
@@ -15688,13 +15709,7 @@ mod stack {
             let ex = new.list(exec)?;
             let owners: BTreeSet<&str> = apply::exec_rows(&ex).map(|(owner, _)| owner).collect();
             for owner in owners {
-                match container_of(app, new, owner).await {
-                    Ok(name) => {
-                        let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
-                        report.push(format!("{owner} {tag}: {r:?}").into());
-                    }
-                    Err(e) => report.push(Fault::lead(format!("{owner} {tag}: skipped, "), e)),
-                }
+                report.push(reload_owner(app, new, owner, &ex, tag, limit).await.1);
             }
         }
         // What: at start zones_at_start owns this step.
@@ -15729,19 +15744,13 @@ mod stack {
         // Why: a mode change keeps the container running.
         // From: Issue #1683 | PR #2002
         let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
-        if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) {
-            let ex = new.list("DNSMASQ_RESTART_EXEC")?;
-            match container_of(app, new, &dhcp).await {
-                Ok(name) if !ex.is_empty() => {
-                    let r = apply::reload_exec(&app.docker, &name, &ex, &dhcp, limit).await;
-                    if !matches!(r, apply::Outcome::Failed(_)) {
-                        plan.remove(&dhcp);
-                    }
-                    report.push(format!("{dhcp} dnsmasq: {r:?}").into());
-                }
-                Ok(_) => {}
-                Err(e) => report.push(Fault::lead(format!("{dhcp} dnsmasq: skipped, "), e)),
+        let ex = new.list("DNSMASQ_RESTART_EXEC")?;
+        if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) && !ex.is_empty() {
+            let (r, line) = reload_owner(app, new, &dhcp, &ex, "dnsmasq", limit).await;
+            if r.is_some_and(|r| !matches!(r, apply::Outcome::Failed(_))) {
+                plan.remove(&dhcp);
             }
+            report.push(line);
         }
         // What: skip an owner that has no container yet.
         // Why: at stack start it reads new files anyway.
