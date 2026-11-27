@@ -8206,14 +8206,13 @@ mod shared {
             ) -> Result<(), String> {
                 let body = json!({"name": name, "algorithm": algorithm, "key": secret});
                 let path = format!("/tsigkeys/{}", zone_id(name));
-                if self
-                    .call(Method::PUT, &path, Some(body.clone()))
+                let put = match self.call(Method::PUT, &path, Some(body.clone())).await {
+                    Ok(_) => return Ok(()),
+                    Err(e) => e,
+                };
+                self.send(Method::POST, "/tsigkeys", Some(body))
                     .await
-                    .is_ok()
-                {
-                    return Ok(());
-                }
-                self.send(Method::POST, "/tsigkeys", Some(body)).await
+                    .map_err(|e| format!("PUT: {put}; POST: {e}"))
             }
 
             // What: set one metadata kind of a zone.
@@ -9174,29 +9173,38 @@ mod shared {
         }
 
         // What: IPv4 text of each host; names resolve.
-        // Why: option 42 holds IPs; dead names are skipped.
-        // From: Issue #1683 | PR #1980
+        // Why: option 42 holds IPs; a dead name is a note.
+        // From: Issue #1683 | PR #2020
         pub fn ipv4_of(hosts: &[String], key: &str) -> Vec<String> {
             use std::net::ToSocketAddrs as _;
-            hosts
-                .iter()
-                .map(|host| {
-                    if let Ok(std::net::IpAddr::V4(ip)) = crate::shared::dns::parse_ip(host) {
-                        return Ok(ip.to_string());
-                    }
-                    (host.as_str(), 0)
-                        .to_socket_addrs()
-                        .map_err(|e| format!("{key}: cannot resolve {host}: {e}"))?
-                        .find_map(|a| match a {
+            let mut addrs = Vec::new();
+            for host in hosts {
+                if let Ok(std::net::IpAddr::V4(ip)) = crate::shared::dns::parse_ip(host) {
+                    addrs.push(ip.to_string());
+                    continue;
+                }
+                let found = (host.as_str(), 0)
+                    .to_socket_addrs()
+                    .map_err(|e| format!("cannot resolve {host}: {e}"))
+                    .and_then(|mut all| {
+                        all.find_map(|a| match a {
                             std::net::SocketAddr::V4(v4) => Some(v4.ip().to_string()),
                             std::net::SocketAddr::V6(_) => None,
                         })
-                        .ok_or_else(|| format!("{key}: {host} has no IPv4 address"))
-                })
-                .filter_map(|r: Result<String, String>| {
-                    r.map_err(|e| eprintln!("{e}; skipped")).ok()
-                })
-                .collect()
+                        .ok_or_else(|| format!("{host} has no IPv4 address"))
+                    });
+                // What: a dead name drops one address.
+                // Why: no DNS yet must not stop every file.
+                // From: Issue #1683 | PR #2020
+                match found {
+                    Ok(ip) => addrs.push(ip),
+                    Err(e) => crate::shared::render::note(format!("{key}: {e}; left out")),
+                }
+            }
+            if addrs.is_empty() && !hosts.is_empty() {
+                crate::shared::render::note(format!("{key}: no address left; option off"));
+            }
+            addrs
         }
 
         // What: the four DHCP modes of the SOT choice.
@@ -11132,12 +11140,15 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: the SOT list holds one name@address per row.
         // From: Issue #1683 | PR #2017
         pub fn secondaries(s: &Settings) -> Result<Vec<(String, String)>, String> {
-            let rows = s.list("DNS_SECONDARIES")?;
-            Ok(rows
+            s.list("DNS_SECONDARIES")?
                 .iter()
-                .filter_map(|row| row.split_once('@'))
-                .map(|(name, addr)| (name.to_string(), addr.to_string()))
-                .collect())
+                .map(|row| {
+                    let (name, addr) = row
+                        .split_once('@')
+                        .ok_or_else(|| format!("DNS_SECONDARIES: {row:?} is no name@address"))?;
+                    Ok((name.to_string(), addr.to_string()))
+                })
+                .collect()
         }
 
         // What: the SOT text of a list of secondaries.
@@ -11152,11 +11163,13 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: NOTIFY goes to every registered secondary.
         // From: Issue #1683 | PR #1980
         pub fn secondary_ips(s: &Settings) -> Result<Vec<String>, String> {
-            Ok(secondaries(s)?
+            secondaries(s)?
                 .into_iter()
-                .map(|(_, ip)| ip)
-                .filter(|ip| crate::shared::dns::is_ip(ip))
-                .collect())
+                .map(|(name, ip)| match crate::shared::dns::is_ip(&ip) {
+                    true => Ok(ip),
+                    false => Err(format!("DNS_SECONDARIES: {name}@{ip} has no IP address")),
+                })
+                .collect()
         }
 
         // What: address and port of the own pdns.
@@ -13498,6 +13511,34 @@ end
         use crate::shared::{chrony, dhcp, dnsmasq_conf, kea_conf, log, nginx_conf, pdns_conf};
         use std::path::{Path, PathBuf};
 
+        // What: warnings of the render in progress.
+        // Why: a dead name leaves an option out.
+        // From: Issue #1683 | PR #2020
+        static NOTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+        // What: remember and log one warning of the render.
+        // Why: plan and the ui log show what was left out.
+        // From: Issue #1683 | PR #2020
+        pub fn note(text: String) {
+            eprintln!("render: warning: {text}");
+            let mut list = NOTES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !list.contains(&text) {
+                list.push(text);
+            }
+        }
+
+        // What: the warnings since the last take.
+        // Why: each render starts with an empty list.
+        // From: Issue #1683 | PR #2020
+        pub fn take_notes() -> Vec<String> {
+            let mut list = NOTES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *list)
+        }
+
         // What: secrets the config files embed.
         // Why: the caller reads them from the store.
         // From: Issue #1683 | PR #1980
@@ -14112,6 +14153,7 @@ end
         // Why: one call for the ui; nothing half written.
         // From: Issue #1683 | PR #1980
         pub fn all(s: &Settings, sec: &Secrets, chain: &Chain) -> Result<Vec<File>, Vec<String>> {
+            take_notes();
             let mut o = Out::new(s);
             let domains = match crate::shared::cdn::effective(s) {
                 Ok(d) => d,
@@ -14142,6 +14184,7 @@ end
         // Why: a secondary runs only the dns container.
         // From: Issue #1683 | PR #1980
         pub fn dns_only(s: &Settings, sec: &Secrets) -> Result<Vec<File>, Vec<String>> {
+            take_notes();
             let mut o = Out::new(s);
             let domains = crate::shared::cdn::effective(s).map_err(|e| vec![e])?;
             // What: a secondary renders without anchors.
