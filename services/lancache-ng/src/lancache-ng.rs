@@ -4860,28 +4860,7 @@ mod dns {
         kind: &str,
     ) -> Result<Vec<String>, String> {
         let rows = api.rrsets(zone).await?;
-        Ok(find_rrset(&rows, name, kind).map_or_else(Vec::new, record_texts))
-    }
-
-    // What: the rrset of a name and type in a rrset list.
-    // Why: contents, SOA and ensure find a row one way.
-    // From: Issue #1683 | PR #2020
-    fn find_rrset<'a>(rows: &'a [Value], name: &str, kind: &str) -> Option<&'a Value> {
-        let id = pdns::zone_id(name);
-        rows.iter()
-            .find(|r| r["name"] == id.as_str() && r["type"] == kind)
-    }
-
-    // What: the record contents of one rrset row.
-    // Why: contents and ensure compare the same texts.
-    // From: Issue #1683 | PR #2020
-    fn record_texts(r: &Value) -> Vec<String> {
-        r["records"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|c| c["content"].as_str().map(str::to_string))
-            .collect()
+        Ok(pdns::find_rrset(&rows, name, kind).map_or_else(Vec::new, pdns::record_texts))
     }
 
     // What: a record TTL within DNS_RECORD_TTL_MAX.
@@ -5787,7 +5766,7 @@ mod dns {
         zone: &str,
     ) -> Result<Option<(u32, Vec<String>)>, String> {
         let rrsets = api.rrsets(zone).await?;
-        let Some(r) = find_rrset(&rrsets, zone, "SOA") else {
+        let Some(r) = pdns::find_rrset(&rrsets, zone, "SOA") else {
             return Ok(None);
         };
         let have = r["records"][0]["content"].as_str().unwrap_or_default();
@@ -5814,13 +5793,13 @@ mod dns {
         want: &[String],
     ) -> Result<(), String> {
         let rows = api.rrsets(zone).await?;
-        let same = match find_rrset(&rows, name, kind) {
+        let same = match pdns::find_rrset(&rows, name, kind) {
             // What: an absent rrset that should be absent.
             // Why: a DELETE of nothing still raises serial.
             // From: Issue #1683 | PR #2019
             None => want.is_empty(),
             Some(r) => {
-                let have = record_texts(r);
+                let have = pdns::record_texts(r);
                 r["ttl"] == ttl && have.len() == want.len() && want.iter().all(|w| have.contains(w))
             }
         };
@@ -6700,6 +6679,27 @@ mod shared {
         // From: Issue #1683 | PR #1980
         pub fn zone_id(zone: &str) -> String {
             format!("{}.", super::dns::bare_zone(zone))
+        }
+
+        // What: the rrset of a name and type in a list.
+        // Why: the rrset row form belongs to the client.
+        // From: Issue #1683 | PR #2020
+        pub fn find_rrset<'a>(rows: &'a [Value], name: &str, kind: &str) -> Option<&'a Value> {
+            let id = zone_id(name);
+            rows.iter()
+                .find(|r| r["name"] == id.as_str() && r["type"] == kind)
+        }
+
+        // What: the record contents of one rrset row.
+        // Why: the rrset row form belongs to the client.
+        // From: Issue #1683 | PR #2020
+        pub fn record_texts(r: &Value) -> Vec<String> {
+            r["records"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c["content"].as_str().map(str::to_string))
+                .collect()
         }
 
         // What: the API path of one zone.
