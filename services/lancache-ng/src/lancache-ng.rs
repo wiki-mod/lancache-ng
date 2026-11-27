@@ -2640,6 +2640,10 @@ mod config {
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum Effect {
         Live,
+        // What: only the SOT sets it; no save changes it.
+        // Why: commands, URLs and fences are no input.
+        // From: Issue #1683 | PR #2020
+        Fixed,
         Reload,
         Restart,
         Container,
@@ -2812,8 +2816,9 @@ mod config {
         // What: every effect with its SOT word.
         // Why: parse and word read one table.
         // From: Issue #1683 | PR #2020
-        const WORDS: [(&'static str, Self); 5] = [
+        const WORDS: [(&'static str, Self); 6] = [
             ("live", Self::Live),
+            ("fixed", Self::Fixed),
             ("reload", Self::Reload),
             ("restart", Self::Restart),
             ("container", Self::Container),
@@ -2828,6 +2833,13 @@ mod config {
                 .iter()
                 .find_map(|(w, effect)| (*w == word).then_some(*effect))
                 .ok_or_else(|| format!("unknown effect {word:?}"))
+        }
+
+        // What: true if the ui may store a value for it.
+        // Why: container keys are host paths, fixed SOT.
+        // From: Issue #1683 | PR #2020
+        pub fn writable(self) -> bool {
+            !matches!(self, Self::Container | Self::Fixed)
         }
 
         // What: the SOT word of an effect.
@@ -3139,6 +3151,12 @@ mod config {
             {
                 return Err(format!("{key}: a container setting; setup.sh sets it"));
             }
+            // What: a fixed setting is refused here.
+            // Why: no save sets a command or a fence.
+            // From: Issue #1683 | PR #2020
+            if current.spec(key).is_some_and(|s| s.effect == Effect::Fixed) {
+                return Err(format!("{key}: fixed by the SOT; no setting changes it"));
+            }
             if !raw.is_empty() {
                 current.validate(key, raw)?;
             }
@@ -3288,12 +3306,12 @@ mod config {
                 Some(path) => read_file(path)?,
                 None => BTreeMap::new(),
             };
-            // What: file sets ui keys, not container ones.
-            // Why: .env has host paths under these names.
+            // What: file sets only keys the ui may store.
+            // Why: host paths and fixed SOT values stay.
             // From: Issue #1683 | PR #2017
             let ui_keys: BTreeSet<&str> = specs
                 .iter()
-                .filter(|s| s.effect != Effect::Container)
+                .filter(|s| s.effect.writable())
                 .map(|s| s.key.as_str())
                 .collect();
             file.retain(|k, _| ui_keys.contains(k.as_str()));
@@ -12762,7 +12780,7 @@ end
         // From: Issue #1683 | PR #1980
         fn action_of(effect: Effect) -> Option<Action> {
             match effect {
-                Effect::Live | Effect::Recreate => None,
+                Effect::Live | Effect::Fixed | Effect::Recreate => None,
                 Effect::Reload => Some(Action::Reload),
                 Effect::Restart | Effect::Container => Some(Action::Restart),
             }
@@ -15306,11 +15324,11 @@ mod stack {
     }
 
     // What: a settings key a state holds and restores.
-    // Why: secrets and container keys stay as they are.
+    // Why: secrets and keys the ui never stores stay.
     // From: Issue #1683 | PR #2020
     fn state_key(s: &Settings, key: &str) -> bool {
         s.spec(key)
-            .is_some_and(|sp| !sp.is_secret() && sp.effect != config::Effect::Container)
+            .is_some_and(|sp| !sp.is_secret() && sp.effect.writable())
     }
 
     // What: put the stack back to one saved state.
