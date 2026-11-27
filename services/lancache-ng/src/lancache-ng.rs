@@ -4576,28 +4576,59 @@ mod dns {
         all
     }
 
+    // What: what to do with one LAN domain.
+    // Why: typed; no route name decides the change.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    pub(crate) enum LanDomainEdit {
+        Add,
+        Remove,
+        Main,
+    }
+
+    // What: one LAN record set as typed input.
+    // Why: no form field names in the dns owner.
+    // From: Issue #1683 | PR #2020
+    pub(crate) struct RecordInput {
+        pub zone: String,
+        pub kind: String,
+        pub name: String,
+        pub contents: Vec<String>,
+        pub ttl: u32,
+        pub ptr: bool,
+    }
+
+    // What: one PTR record as typed input.
+    // Why: no form field names in the dns owner.
+    // From: Issue #1683 | PR #2020
+    pub(crate) struct PtrInput {
+        pub ip: String,
+        pub hostname: String,
+        pub ttl: u32,
+    }
+
     // What: add, remove or promote one LAN domain.
     // Why: each LAN domain is one zone in PowerDNS.
     // From: Issue #1683
     pub(crate) async fn lan_domain_action(
         app: &App,
         s: &Settings,
-        op: &str,
+        edit: LanDomainEdit,
         raw: &str,
     ) -> Result<(), String> {
         let zone = crate::shared::dns::canonical_zone(raw.trim());
         let name = zone.trim_end_matches('.').to_string();
         let lans = crate::shared::dns::lan_domains(s)?;
         let before = hosted_now(s)?;
-        let change = match op {
-            "UI_ROUTE_LAN_DOMAIN_ADD" => {
+        let change = match edit {
+            LanDomainEdit::Add => {
                 let mut extra: Vec<String> = lans.iter().skip(1).cloned().collect();
                 extra.push(name.clone());
                 let main = lans.first().cloned().unwrap_or_default();
                 crate::shared::dns::validate_lan_domains(&main, &extra)?;
                 list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, true)
             }
-            "UI_ROUTE_LAN_DOMAIN_REMOVE" => {
+            LanDomainEdit::Remove => {
                 if lans.first() == Some(&zone) {
                     return Err(tr("err_main_domain_remove").replace("{x}", &name));
                 }
@@ -4615,7 +4646,7 @@ mod dns {
                 }
                 list_change(s, "DNS_EXTRA_LAN_DOMAINS", &name, false)
             }
-            _ => {
+            LanDomainEdit::Main => {
                 if !lans.contains(&zone) {
                     return Err(tr("err_not_lan_domain").replace("{x}", &name));
                 }
@@ -4666,28 +4697,24 @@ mod dns {
     // What: add or remove one LAN record set.
     // Why: PATCH sets or deletes; NOTIFY follows.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn record(
-        s: &Settings,
-        add: bool,
-        get: &(dyn Fn(&str) -> String + Sync),
-    ) -> Result<(), String> {
-        let zone = chosen_lan_zone(s, &get("zone"))?;
-        let kind = get("record_type");
+    pub(crate) async fn record(s: &Settings, add: bool, input: &RecordInput) -> Result<(), String> {
+        let zone = chosen_lan_zone(s, &input.zone)?;
+        let kind = input.kind.clone();
         if !s.list("DNS_LAN_RECORD_TYPES").contains(&kind) {
             return Err(tr("err_record_type").replace("{kind}", &kind));
         }
-        let name = in_zone(&get("name"), &zone);
+        let name = in_zone(&input.name, &zone);
         let mut contents = Vec::new();
         let mut ttl = 0;
         if add {
-            let raw = get("content");
-            contents = raw
-                .split(';')
-                .map(str::trim)
+            contents = input
+                .contents
+                .iter()
+                .map(|c| c.trim())
                 .filter(|c| !c.is_empty())
                 .map(|c| canonical(&kind, c))
                 .collect();
-            ttl = form_ttl(s, get)?;
+            ttl = check_ttl(s, input.ttl)?;
         }
         let api = peer::own_api(s)?;
         let host = crate::shared::pdns::zone_id(&name);
@@ -4695,7 +4722,7 @@ mod dns {
         // Why: no A is saved when its PTR cannot follow.
         // From: Issue #1683 | PR #2019
         let mut places = Vec::new();
-        if add && kind == "A" && get("ptr") == "1" {
+        if add && kind == "A" && input.ptr {
             for ip in &contents {
                 let Some((rev, rz)) = served_reverse_place(s, ip)? else {
                     return Err(tr("err_ptr_no_zone").replace("{ip}", ip));
@@ -4763,15 +4790,11 @@ mod dns {
             .collect())
     }
 
-    // What: the TTL a record form sends, within the limit.
-    // Why: the LAN and the PTR form take the same field.
+    // What: a record TTL within DNS_RECORD_TTL_MAX.
+    // Why: LAN and PTR records share the rule.
     // From: Issue #1683 | PR #2019
-    pub(crate) fn form_ttl(
-        s: &Settings,
-        get: &(dyn Fn(&str) -> String + Sync),
-    ) -> Result<u32, String> {
+    pub(crate) fn check_ttl(s: &Settings, ttl: u32) -> Result<u32, String> {
         let max = s.uint("DNS_RECORD_TTL_MAX")?;
-        let ttl = get("ttl").parse::<u32>().unwrap_or(0);
         if ttl == 0 || u64::from(ttl) > max {
             return Err(tr("err_ttl_range").replace("{max}", &max.to_string()));
         }
@@ -4781,12 +4804,8 @@ mod dns {
     // What: add or remove one PTR record.
     // Why: name from the IP; zone from the list.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn ptr(
-        s: &Settings,
-        add: bool,
-        get: &(dyn Fn(&str) -> String + Sync),
-    ) -> Result<(), String> {
-        let ip = get("ip");
+    pub(crate) async fn ptr(s: &Settings, add: bool, input: &PtrInput) -> Result<(), String> {
+        let ip = input.ip.clone();
         let name = if crate::shared::dns::is_reverse_name(&ip) {
             ip
         } else {
@@ -4798,8 +4817,8 @@ mod dns {
         let mut ttl = 0;
         let mut contents = Vec::new();
         if add {
-            ttl = form_ttl(s, get)?;
-            contents.push(crate::shared::pdns::zone_id(&get("hostname")));
+            ttl = check_ttl(s, input.ttl)?;
+            contents.push(crate::shared::pdns::zone_id(&input.hostname));
         }
         let api = peer::own_api(s)?;
         api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
@@ -13689,7 +13708,7 @@ mod ui {
         dhcp_probe_cli, dhcp_stays_off, kea_change, kea_snapshots, kea_state, kea_store,
     };
     use crate::dns::{
-        answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones,
+        LanDomainEdit, answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
         ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
         snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
@@ -14793,15 +14812,40 @@ mod ui {
             DnsOp::DdnsUnsigned => commit(&app, single_field("DDNS_ALLOW_UNSIGNED", on)).await,
             DnsOp::NsSwitch => commit(&app, single_field("DNS_SECONDARY_NS_ENABLED", on)).await,
             DnsOp::NsAuto => commit(&app, single_field("DNS_SECONDARY_NS_AUTO_REMOVE", on)).await,
-            DnsOp::LanAdd | DnsOp::LanRemove => record(&s, matches!(op, DnsOp::LanAdd), &get).await,
-            DnsOp::LanDomainAdd | DnsOp::LanDomainRemove | DnsOp::LanDomainMain => {
-                lan_domain_action(&app, &s, op.key(), &domain).await
+            DnsOp::LanAdd | DnsOp::LanRemove => {
+                record(&s, matches!(op, DnsOp::LanAdd), &record_input(&get)).await
             }
-            DnsOp::PtrAdd | DnsOp::PtrRemove => ptr(&s, matches!(op, DnsOp::PtrAdd), &get).await,
+            DnsOp::LanDomainAdd => lan_domain_action(&app, &s, LanDomainEdit::Add, &domain).await,
+            DnsOp::LanDomainRemove => {
+                lan_domain_action(&app, &s, LanDomainEdit::Remove, &domain).await
+            }
+            DnsOp::LanDomainMain => lan_domain_action(&app, &s, LanDomainEdit::Main, &domain).await,
+            DnsOp::PtrAdd | DnsOp::PtrRemove => {
+                let input = crate::dns::PtrInput {
+                    ip: get("ip"),
+                    hostname: get("hostname"),
+                    ttl: get("ttl").parse().unwrap_or(0),
+                };
+                ptr(&s, matches!(op, DnsOp::PtrAdd), &input).await
+            }
             DnsOp::ZoneRollback => rollback(&s, &get("zone"), &get("snapshot_id")).await,
             DnsOp::TsigRotate => rotate_tsig(&app).await,
         };
         finish(result, &s.text("UI_PAGE_DOMAINS")?)
+    }
+
+    // What: the LAN record form as typed input.
+    // Why: form field names stay in the ui.
+    // From: Issue #1683 | PR #2020
+    fn record_input(get: &dyn Fn(&str) -> String) -> crate::dns::RecordInput {
+        crate::dns::RecordInput {
+            zone: get("zone"),
+            kind: get("record_type"),
+            name: get("name"),
+            contents: get("content").split(';').map(str::to_string).collect(),
+            ttl: get("ttl").parse().unwrap_or(0),
+            ptr: get("ptr") == "1",
+        }
     }
 
     // What: token secondaries register with.
