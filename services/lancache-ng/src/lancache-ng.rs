@@ -16547,10 +16547,9 @@ mod ui {
     // Why: page edits need no image build.
     // From: Issue #1683 | PR #1991
     pub(crate) fn folder(dir: &str, ext: &str) -> Result<Vec<(String, String)>, String> {
-        let err = |e: std::io::Error| format!("{dir}: {e}");
+        let entries = fs::entries_if_present(Path::new(dir)).map_err(|e| format!("{dir}: {e}"))?;
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir).map_err(err)? {
-            let path = entry.map_err(err)?.path();
+        for path in entries {
             if path.extension().and_then(|e| e.to_str()) != Some(ext) {
                 continue;
             }
