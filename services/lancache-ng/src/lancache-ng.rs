@@ -16448,13 +16448,6 @@ mod ui {
         }
     }
 
-    // What: session id from the Cookie header.
-    // Why: browsers may send several Cookie headers.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn session_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-        cookie(headers, name)
-    }
-
     // What: one cookie value by name.
     // Why: session and language cookie share the parse.
     // From: Issue #1683 | PR #1980
@@ -16522,7 +16515,7 @@ mod ui {
         let (Ok(name), Ok(header)) = (s.text("UI_SESSION_COOKIE"), s.text("UI_CSRF_HEADER")) else {
             return (StatusCode::INTERNAL_SERVER_ERROR, "session names missing").into_response();
         };
-        let known = session_cookie(req.headers(), &name);
+        let known = cookie(req.headers(), &name);
         let session = known.clone().unwrap_or_else(|| secret::random_hex(32));
         req.extensions_mut()
             .insert(Csrf::from_session(&app.session_key, &session, &header));
