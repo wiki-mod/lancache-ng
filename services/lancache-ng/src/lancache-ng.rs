@@ -15687,7 +15687,7 @@ mod ui {
         // What: setup.sh from the branch of this channel.
         // Why: a nightly primary must not hand out master.
         // From: Issue #1683 | PR #1980
-        let nightly = config::image().channel == "nightly";
+        let nightly = config::image().channel == s.text("SETUP_CHANNEL_NIGHTLY")?;
         let (url_key, ref_key) = if nightly {
             ("SETUP_SCRIPT_URL_NIGHTLY", "SETUP_GIT_REF_NIGHTLY")
         } else {
