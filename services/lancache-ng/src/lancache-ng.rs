@@ -15109,18 +15109,18 @@ mod stack {
     // What: the state of the stack now as one value.
     // Why: settings, Kea and zones of one moment.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn state_capture(app: &Stack) -> Result<Value, String> {
-        let s = app.settings();
-        let settings: BTreeMap<String, String> = config::read_raw(&saved_path(app)?)?
+    pub(crate) async fn state_capture(s: &Settings) -> Result<Value, String> {
+        let file = config::saved_file().ok_or("no settings file is set")?;
+        let settings: BTreeMap<String, String> = config::read_raw(&file)?
             .into_iter()
-            .filter(|(k, _)| state_key(&s, k))
+            .filter(|(k, _)| state_key(s, k))
             .collect();
-        let role = crate::shared::dns::Role::from_settings(&s)?;
+        let role = crate::shared::dns::Role::from_settings(s)?;
         let mut zones = BTreeMap::new();
         if role == crate::shared::dns::Role::Primary {
-            let api = crate::shared::peer::own_api(&s)?;
+            let api = crate::shared::peer::own_api(s)?;
             let have = crate::dns::zone_names(&api).await?;
-            for zone in crate::dns::snapshot_zones(&s)? {
+            for zone in crate::dns::snapshot_zones(s)? {
                 let id = crate::shared::pdns::zone_id(&zone);
                 if have.contains(&id) {
                     let rows = api.rrsets(&zone).await?;
@@ -15134,7 +15134,7 @@ mod stack {
             "role": format!("{role:?}"),
             "dhcp_mode": s.text("DHCP_MODE")?,
             "settings": settings,
-            "kea": crate::dhcp::kea_current(&s).await?,
+            "kea": crate::dhcp::kea_current(s).await?,
             "zones": zones,
             "left_out": STATE_LEAVES_OUT,
         }))
@@ -15154,7 +15154,10 @@ mod stack {
     pub(crate) async fn state_restore(app: &Stack, id: &str) -> Result<(bool, Vec<Fault>), String> {
         let _held = app.change.lock().await;
         let state: Value = state_store(&app.settings())?.read(id)?;
-        let mut report = vec![Fault::Plain(format!("backup: {}", state_save(app).await?))];
+        let mut report = vec![Fault::Plain(format!(
+            "backup: {}",
+            state_save(&app.settings()).await?
+        ))];
         let old = app.settings();
         let path = saved_path(app)?;
         let want: BTreeMap<String, String> =
@@ -15199,17 +15202,29 @@ mod stack {
                 }
             }
         }
-        report.push(Fault::Plain(format!("now: {}", state_save(app).await?)));
+        report.push(Fault::Plain(format!(
+            "now: {}",
+            state_save(&app.settings()).await?
+        )));
         Ok((ok, report))
     }
 
     // What: keep the state of now as a snapshot.
     // Why: REST, CLI and changes save it one way.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn state_save(app: &Stack) -> Result<String, String> {
-        let state = state_capture(app).await?;
+    pub(crate) async fn state_save(s: &Settings) -> Result<String, String> {
+        let state = state_capture(s).await?;
         let body = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
-        state_store(&app.settings())?.save(&body)
+        state_store(s)?.save(&body)
+    }
+
+    // What: after a change, keep the new state.
+    // Why: any earlier state can be given back later.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn state_after(s: &Settings) {
+        if let Err(e) = state_save(s).await {
+            eprintln!("ui: state after the change not kept: {e}");
+        }
     }
 
     // What: SOT keys and values of one change.
@@ -15335,7 +15350,9 @@ mod stack {
         let _held = app.change.lock().await;
         let old = app.settings();
         let form = build(&old)?;
-        Ok(store_and_adopt(app, old, form).await?)
+        store_and_adopt(app, old, form).await?;
+        state_after(&app.settings()).await;
+        Ok(())
     }
 
     // What: write a change and apply it; lock is held.
@@ -16943,6 +16960,20 @@ mod ui {
                 .map_err(|e| say(&e)),
             DnsOp::TsigRotate => rotate_tsig(&app).await,
         };
+        // What: record and zone changes keep the state.
+        // Why: settings changes keep it in commit_with.
+        // From: Issue #1683 | PR #2020
+        let zone_change = matches!(
+            op,
+            DnsOp::LanAdd
+                | DnsOp::LanRemove
+                | DnsOp::PtrAdd
+                | DnsOp::PtrRemove
+                | DnsOp::ZoneRollback
+        );
+        if result.is_ok() && zone_change {
+            crate::stack::state_after(&app.settings()).await;
+        }
         finish(result, &s.text("UI_PAGE_DOMAINS")?)
     }
 
@@ -17241,6 +17272,16 @@ mod ui {
                 Err(e) => Err(e),
             },
         };
+        // What: Kea changes keep the state.
+        // Why: settings changes keep it in commit_with.
+        // From: Issue #1683 | PR #2020
+        let kea = !matches!(
+            op,
+            DhcpOp::Mode | DhcpOp::Ddns | DhcpOp::Proxy | DhcpOp::Relay
+        );
+        if result.is_ok() && kea {
+            crate::stack::state_after(&app.settings()).await;
+        }
         finish(result, &s.text("UI_PAGE_DHCP")?)
     }
 
@@ -18069,7 +18110,7 @@ mod ui {
         headers: HeaderMap,
     ) -> Page {
         csrf.check_header(&headers)?;
-        let id = crate::stack::state_save(&app).await?;
+        let id = crate::stack::state_save(&app.settings()).await?;
         Ok(axum::Json(json!({"id": id})).into_response())
     }
 
