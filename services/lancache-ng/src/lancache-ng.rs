@@ -3425,10 +3425,20 @@ mod dhcp {
     // Why: one Kea read for every subnet reader.
     // From: Issue #1683 | PR #2020
     async fn kea_config(s: &Settings) -> Result<Option<Value>, String> {
+        let Some(api) = kea_api_in_kea_mode(s)? else {
+            return Ok(None);
+        };
+        Ok(Some(api.config().await?))
+    }
+
+    // What: the Kea API; none if the mode is not Kea.
+    // Why: every Kea read stops the same way in other modes.
+    // From: Issue #1683 | PR #2020
+    fn kea_api_in_kea_mode(s: &Settings) -> Result<Option<crate::shared::kea::Api>, String> {
         if DhcpMode::from_settings(s)? != DhcpMode::Kea {
             return Ok(None);
         }
-        Ok(Some(kea_api(s)?.config().await?))
+        kea_api(s).map(Some)
     }
 
     // What: subnet rows and reservations of a Kea config.
@@ -3452,12 +3462,12 @@ mod dhcp {
     // Why: one reader for the page, REST and CLI.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_state(s: &Settings) -> Result<Option<Value>, String> {
-        let Some(cfg) = kea_config(s).await? else {
+        let Some(api) = kea_api_in_kea_mode(s)? else {
             return Ok(None);
         };
-        let (subnets, reservations) = kea_subnets(&cfg);
+        let (subnets, reservations) = kea_subnets(&api.config().await?);
         let mut leases = Vec::new();
-        for l in kea_api(s)?.leases().await? {
+        for l in api.leases().await? {
             let ends = l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
             leases.push(json!({
                 "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
@@ -3577,10 +3587,10 @@ mod dhcp {
     // Why: one reader for graphs, REST and CLI.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_stats(s: &Settings) -> Result<Option<BTreeMap<String, f64>>, String> {
-        if DhcpMode::from_settings(s)? != DhcpMode::Kea {
+        let Some(api) = kea_api_in_kea_mode(s)? else {
             return Ok(None);
-        }
-        let all = kea_api(s)?.command("statistic-get-all", None).await?;
+        };
+        let all = api.command("statistic-get-all", None).await?;
         let map = all.as_object().ok_or("kea statistic-get-all: no object")?;
         Ok(Some(
             map.iter()
