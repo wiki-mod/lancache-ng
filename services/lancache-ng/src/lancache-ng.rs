@@ -3814,10 +3814,7 @@ mod dhcp {
         };
         let (grace, limit) = app.limits(s)?;
         let list = app.docker.stack(s).await?;
-        let running = list.iter().find(|c| {
-            docker::service_of(c) == Some(service.as_str())
-                && c["State"].as_str() == Some("running")
-        });
+        let running = docker::rows_of(&list, &service).find(|c| docker::is_running(c));
         let Some(name) = running.and_then(docker::name_of) else {
             return Ok(None);
         };
@@ -7919,6 +7916,23 @@ mod shared {
         // From: Issue #1683 | PR #2017
         pub fn name_of(row: &serde_json::Value) -> Option<&str> {
             row["Names"][0].as_str().map(|n| n.trim_start_matches('/'))
+        }
+
+        // What: the rows of one compose service in a list.
+        // Why: each lookup by service reads the label so.
+        // From: Issue #1683 | PR #2020
+        pub fn rows_of<'a>(
+            list: &'a [serde_json::Value],
+            service: &'a str,
+        ) -> impl Iterator<Item = &'a serde_json::Value> {
+            list.iter().filter(move |r| service_of(r) == Some(service))
+        }
+
+        // What: true if a list row says the container runs.
+        // Why: list rows carry State; inspect has its own.
+        // From: Issue #1683 | PR #2020
+        pub fn is_running(row: &serde_json::Value) -> bool {
+            row["State"].as_str() == Some("running")
         }
 
         // What: one stack container with its full state.
@@ -14072,7 +14086,7 @@ mod stack {
         service: &str,
     ) -> Result<String, String> {
         let list = app.docker.stack(s).await?;
-        let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
+        let hit = docker::rows_of(&list, service).next();
         hit.and_then(docker::name_of)
             .map(str::to_string)
             .ok_or_else(|| tr("err_no_container").replace("{service}", service))
