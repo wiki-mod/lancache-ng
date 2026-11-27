@@ -3577,26 +3577,57 @@ mod config {
         }
     }
 
+    // What: what one config command does.
+    // Why: run() matches these, the table names them.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    enum Op {
+        Show,
+        Schema,
+        Set,
+        Validate,
+    }
+
+    // What: every command of the config group.
+    // Why: help, errors and the choice read this table.
+    // From: Issue #1683 | PR #2020
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
+        (
+            "show",
+            crate::shared::cli::row(Op::Show, "config show [KEY]"),
+        ),
+        (
+            "schema",
+            crate::shared::cli::row(Op::Schema, "config schema [KEY]"),
+        ),
+        (
+            "set",
+            crate::shared::cli::row(Op::Set, "config set|validate KEY=VALUE ..."),
+        ),
+        ("validate", crate::shared::cli::row(Op::Validate, "")),
+    ];
+
     // What: lancache-ng config: show, schema, set, validate
     // Why: settings reads have their CLI with their owner.
     // From: Issue #1683 | PR #2020
     pub async fn run(args: &[String]) -> Result<(), String> {
         let s = Settings::from_process()?;
-        match args {
-            [cmd] if cmd == "show" => println!("{}", s.view_json()),
+        let op = crate::shared::cli::op_of(&COMMANDS, args.first());
+        match (op, args.get(1..).unwrap_or_default()) {
+            (Some(Op::Show), []) => println!("{}", s.view_json()),
             // What: schema row and origin of every setting.
             // Why: type, limits and why a value is set.
             // From: Issue #1683 | PR #2020
-            [cmd] if cmd == "schema" => println!("{}", s.describe(None)?),
-            [cmd, key] if cmd == "schema" => println!("{}", s.describe(Some(key))?),
-            [cmd, key] if cmd == "show" => match s.view().get(key) {
+            (Some(Op::Schema), []) => println!("{}", s.describe(None)?),
+            (Some(Op::Schema), [key]) => println!("{}", s.describe(Some(key))?),
+            (Some(Op::Show), [key]) => match s.view().get(key) {
                 Some(v) => println!("{v}"),
                 None => return Err(format!("{key}: no such setting or a secret")),
             },
             // What: KEY=VALUE pairs go to the running ui.
             // Why: it saves, renders and applies at once.
             // From: Issue #1683 | PR #2020
-            [cmd, pairs @ ..] if (cmd == "set" || cmd == "validate") && !pairs.is_empty() => {
+            (Some(op @ (Op::Set | Op::Validate)), pairs) if !pairs.is_empty() => {
                 let mut body = serde_json::Map::new();
                 for pair in pairs {
                     let (k, v) = pair
@@ -3608,7 +3639,7 @@ mod config {
                 // Why: one save path checks both.
                 // From: Issue #1683 | PR #2020
                 let mut route = s.text("UI_ROUTE_SETTINGS")?;
-                if cmd == "validate" {
+                if op == Op::Validate {
                     route.push_str("?dry_run=1");
                 }
                 let body = crate::shared::http::Body::Json(body.into());
@@ -3616,10 +3647,8 @@ mod config {
                 println!("{v}");
             }
             _ => {
-                return Err(
-                    "usage: config show [KEY] | config schema [KEY] | config set|validate KEY=VALUE ..."
-                        .into(),
-                );
+                let usage = crate::shared::cli::forms(&COMMANDS, " | ");
+                return Err(format!("usage: {usage}"));
             }
         }
         Ok(())
@@ -6352,6 +6381,44 @@ mod shared {
                 .map_or("", |(w, _)| *w)
         }
 
+        // What: a command row: action and help form.
+        // Why: help shows arguments; match runs the action.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy)]
+        pub struct Entry<T> {
+            pub op: T,
+            pub form: &'static str,
+        }
+
+        // What: a command row from its action and its form.
+        // Why: tables read one row per line.
+        // From: Issue #1683 | PR #2020
+        pub const fn row<T>(op: T, form: &'static str) -> Entry<T> {
+            Entry { op, form }
+        }
+
+        // What: the action of the first word of a command.
+        // Why: the match runs the row; none = unknown.
+        // From: Issue #1683 | PR #2020
+        pub fn op_of<T: Copy>(
+            table: &[(&'static str, Entry<T>)],
+            word: Option<&String>,
+        ) -> Option<T> {
+            pick(table, word?).map(|row| row.op)
+        }
+
+        // What: the forms of a table with a separator.
+        // Why: help shows each command with its arguments.
+        // From: Issue #1683 | PR #2020
+        pub fn forms<T>(table: &[(&'static str, Entry<T>)], sep: &str) -> String {
+            let shown: Vec<&str> = table
+                .iter()
+                .map(|(_, row)| row.form)
+                .filter(|form| !form.is_empty())
+                .collect();
+            shown.join(sep)
+        }
+
         // What: the error and help line of an unknown word.
         // Why: every owner says it the same way.
         // From: Issue #1683 | PR #2020
@@ -6947,12 +7014,27 @@ mod shared {
             Ok(out)
         }
 
+        // What: what the secret command does.
+        // Why: secret_run() matches it, the table names it.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            List,
+        }
+
+        // What: every command of the secret group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 1] =
+            [("list", crate::shared::cli::row(Op::List, "list"))];
+
         // What: lancache-ng secret list: states as JSON.
         // Why: the CLI of secret reads sits with them.
         // From: Issue #1683 | PR #2020
         pub fn secret_run(args: &[String]) -> Result<(), String> {
-            if args.first().map(String::as_str) != Some("list") {
-                return Err("commands: list".into());
+            use crate::shared::cli;
+            if cli::op_of(&COMMANDS, args.first()) != Some(Op::List) {
+                return Err(format!("commands: {}", cli::forms(&COMMANDS, " | ")));
             }
             let v = states(&crate::config::Settings::from_process()?)?;
             println!("{v}");
@@ -8890,18 +8972,64 @@ mod shared {
             Ok(v)
         }
 
+        // What: what one system command does.
+        // Why: the match runs these; the table names them.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            Status,
+            Docker,
+            Plan,
+            Apply,
+            Render,
+            Container,
+            Ui,
+            Service,
+            Time,
+        }
+
+        // What: every command of the system group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 9] = [
+            ("status", crate::shared::cli::row(Op::Status, "status")),
+            ("docker", crate::shared::cli::row(Op::Docker, "docker")),
+            ("plan", crate::shared::cli::row(Op::Plan, "plan")),
+            ("apply", crate::shared::cli::row(Op::Apply, "apply")),
+            (
+                "render",
+                crate::shared::cli::row(Op::Render, "render [owner|path]"),
+            ),
+            (
+                "container",
+                crate::shared::cli::row(Op::Container, "container <service> start|stop"),
+            ),
+            ("ui", crate::shared::cli::row(Op::Ui, "ui restart")),
+            (
+                "service",
+                crate::shared::cli::row(
+                    Op::Service,
+                    "service <container> <program> restart|reload",
+                ),
+            ),
+            ("time", crate::shared::cli::row(Op::Time, "time")),
+        ];
+
         // What: lancache-ng system status: stack as JSON.
         // Why: stack reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
         pub async fn system_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
+            use crate::shared::cli;
             use crate::shared::http::Body;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            let op = cli::op_of(&COMMANDS, args.first());
+            let rest = words.get(1..).unwrap_or_default();
             // What: start/stop/restart/reload go to the ui.
             // Why: the ui keeps SERVICES_STOPPED.
             // From: Issue #1683 | PR #2020
-            let (route, body) = match words.as_slice() {
-                ["status"] => {
+            let (route, body) = match (op, rest) {
+                (Some(Op::Status), []) => {
                     let v = status_json(&client(&s)?, &s).await;
                     println!("{v}");
                     return match v["state"].as_str() {
@@ -8909,16 +9037,16 @@ mod shared {
                         _ => Err(v["error"].as_str().unwrap_or("unavailable").to_string()),
                     };
                 }
-                ["container", svc, word @ ("start" | "stop")] => {
+                (Some(Op::Container), [svc, word @ ("start" | "stop")]) => {
                     let state = Wish::of(*word == "start").word();
                     let r = s.text("UI_ROUTE_DESIRED_STATE")?.replace("{service}", svc);
                     (r, Body::Json(json!({"state": state})))
                 }
-                ["ui", "restart"] => (s.text("UI_ROUTE_RESTART_UI")?, Body::Form(vec![])),
+                (Some(Op::Ui), ["restart"]) => (s.text("UI_ROUTE_RESTART_UI")?, Body::Form(vec![])),
                 // What: dry run: render, compare, no write.
                 // Why: a read; it needs no running ui.
                 // From: Issue #1683 | PR #2020
-                ["plan"] => {
+                (Some(Op::Plan), []) => {
                     let v = crate::stack::render_plan(&s).await?;
                     println!("{v}");
                     return match v["errors"].as_array().map(Vec::len) {
@@ -8926,18 +9054,18 @@ mod shared {
                         _ => Err("plan: the render has errors".into()),
                     };
                 }
-                ["apply"] => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
+                (Some(Op::Apply), []) => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
                 // What: the clock: unix, local, zone file.
                 // Why: a read; it needs no running ui.
                 // From: Issue #871 | PR #2020
-                ["time"] => {
+                (Some(Op::Time), []) => {
                     println!("{}", crate::shared::clock::report(&s)?);
                     return Ok(());
                 }
                 // What: Docker engine check; rc 1 on fail.
                 // Why: a read; it needs no running ui.
                 // From: Issue #1683 | PR #2020
-                ["docker"] => {
+                (Some(Op::Docker), []) => {
                     let v = engine_check(&client(&s)?, &s).await?;
                     println!("{v}");
                     return match v["ok"].as_bool() {
@@ -8948,7 +9076,7 @@ mod shared {
                 // What: render bodies of an owner or path.
                 // Why: a read; secrets show as <secret>.
                 // From: Issue #1683 | PR #2020
-                ["render", rest @ ..] if rest.len() <= 1 => {
+                (Some(Op::Render), rest) if rest.len() <= 1 => {
                     let v = crate::ui::render_preview(&s, rest.first().copied()).await?;
                     println!("{v}");
                     return match v["errors"].as_array().map(Vec::len) {
@@ -8956,7 +9084,7 @@ mod shared {
                         _ => Err("render: the render has errors".into()),
                     };
                 }
-                ["service", c, p, a @ ("restart" | "reload")] => {
+                (Some(Op::Service), [c, p, a @ ("restart" | "reload")]) => {
                     let r = s
                         .text("UI_ROUTE_SERVICE_ACTION")?
                         .replace("{container}", c)
@@ -8964,14 +9092,7 @@ mod shared {
                         .replace("{action}", a);
                     (r, Body::Form(vec![]))
                 }
-                _ => {
-                    return Err(
-                        "commands: status | docker | plan | apply | render [owner|path] | \
-                                container <service> start|stop | ui restart | \
-                                service <container> <program> restart|reload"
-                            .into(),
-                    );
-                }
+                _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
             };
             let v = crate::shared::http::ui_socket(&s, &route, body).await?;
             println!("{}", json!({"done": route, "answer": v}));
@@ -11913,25 +12034,47 @@ end
             }))
         }
 
+        // What: what one proxy command does.
+        // Why: the match runs these; the table names them.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            Status,
+            Log,
+            Psl,
+            Certs,
+        }
+
+        // What: every command of the proxy group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
+            ("status", crate::shared::cli::row(Op::Status, "status")),
+            ("log", crate::shared::cli::row(Op::Log, "log")),
+            ("psl", crate::shared::cli::row(Op::Psl, "psl")),
+            ("certs", crate::shared::cli::row(Op::Certs, "certs")),
+        ];
+
         // What: lancache-ng proxy status|log as JSON.
         // Why: proxy reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
         pub async fn proxy_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
-            let v = match args.first().map(String::as_str) {
-                Some("status") => live(&s).await?,
-                Some("log") => crate::shared::access::summary(&s).await?,
+            use crate::shared::cli;
+            let v = match cli::op_of(&COMMANDS, args.first()) {
+                Some(Op::Status) => live(&s).await?,
+                Some(Op::Log) => crate::shared::access::summary(&s).await?,
                 // What: how the proxy maps one host name.
                 // Why: root, cache match and cert per host.
                 // From: Issue #1683 | PR #2020
-                Some("psl") => match args.get(1) {
+                Some(Op::Psl) => match args.get(1) {
                     Some(host) => crate::shared::render::psl_lookup(&s, host)?,
                     None => return Err("usage: psl <host>".into()),
                 },
                 // What: certs list; check: rc 1; renew: ui.
                 // Why: renew reloads the proxy like apply.
                 // From: Issue #1683 | PR #2020
-                Some("certs") => match args.get(1).map(String::as_str) {
+                Some(Op::Certs) => match args.get(1).map(String::as_str) {
                     None | Some("check") => crate::shared::render::cert_list(&s)?,
                     Some("renew") => {
                         let route = s.text("UI_ROUTE_PROXY_CERTS_RENEW")?;
@@ -11940,7 +12083,7 @@ end
                     }
                     Some(x) => return Err(format!("{x}: certs [check | renew]")),
                 },
-                _ => return Err("commands: status log psl certs".into()),
+                None => return Err(format!("commands: {}", cli::forms(&COMMANDS, " "))),
             };
             println!("{v}");
             let check = args.get(1).is_some_and(|a| a == "check");
@@ -13259,17 +13402,38 @@ end
             Ok(out.into())
         }
 
+        // What: what one ntp command does.
+        // Why: the match runs these; the table names them.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            Check,
+            Tracking,
+        }
+
+        // What: every command of the ntp group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 2] = [
+            ("check", crate::shared::cli::row(Op::Check, "check")),
+            (
+                "tracking",
+                crate::shared::cli::row(Op::Tracking, "tracking"),
+            ),
+        ];
+
         // What: lancache-ng ntp check | tracking.
         // Why: NTP reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
         pub async fn ntp_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
-            match args.first().map(String::as_str) {
-                Some("check") => {}
+            use crate::shared::cli;
+            match cli::op_of(&COMMANDS, args.first()) {
+                Some(Op::Check) => {}
                 // What: tracking through the ui.
                 // Why: chronyc runs in services via docker.
                 // From: Issue #1683 | PR #2020
-                Some("tracking") => {
+                Some(Op::Tracking) => {
                     let route = s.text("UI_ROUTE_NTP_TRACKING")?;
                     let body = crate::shared::http::Body::None;
                     println!(
@@ -13278,7 +13442,7 @@ end
                     );
                     return Ok(());
                 }
-                _ => return Err("commands: check | tracking".into()),
+                None => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
             }
             let v = status(&s).await?;
             println!("{v}");
@@ -13687,33 +13851,59 @@ end
             Ok(serde_json::json!({"rows": rows, "effective": effective}))
         }
 
+        // What: what one cdn command does.
+        // Why: the match runs these; the table names them.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            List,
+            Add,
+            Remove,
+            On,
+            Off,
+        }
+
+        // What: every command of the cdn group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 5] = [
+            ("list", crate::shared::cli::row(Op::List, "list")),
+            ("add", crate::shared::cli::row(Op::Add, "add <domain>")),
+            (
+                "remove",
+                crate::shared::cli::row(Op::Remove, "remove <domain>"),
+            ),
+            ("on", crate::shared::cli::row(Op::On, "on <domain>")),
+            ("off", crate::shared::cli::row(Op::Off, "off <domain>")),
+        ];
+
         // What: lancache-ng cdn list|add|remove|on|off.
         // Why: list reads here; changes go to the ui.
         // From: Issue #1683 | PR #2020
         pub async fn cdn_run(args: &[String]) -> Result<(), String> {
             use crate::shared::http::{Body, ui_socket};
             let s = Settings::from_process()?;
+            use crate::shared::cli;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            let op = cli::op_of(&COMMANDS, args.first());
+            let rest = words.get(1..).unwrap_or_default();
             let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
-            let (key, form) = match words.as_slice() {
-                ["list"] => {
+            let (key, form) = match (op, rest) {
+                (Some(Op::List), []) => {
                     println!("{}", listing(&s)?);
                     return Ok(());
                 }
-                ["add", d] => ("UI_ROUTE_DNS_ADD", vec![pair("domain", d)]),
-                ["remove", d] => ("UI_ROUTE_DNS_REMOVE", vec![pair("domain", d)]),
-                ["on", d] => (
+                (Some(Op::Add), [d]) => ("UI_ROUTE_DNS_ADD", vec![pair("domain", d)]),
+                (Some(Op::Remove), [d]) => ("UI_ROUTE_DNS_REMOVE", vec![pair("domain", d)]),
+                (Some(Op::On), [d]) => (
                     "UI_ROUTE_DNS_TOGGLE",
                     vec![pair("domain", d), pair("enabled", "true")],
                 ),
-                ["off", d] => (
+                (Some(Op::Off), [d]) => (
                     "UI_ROUTE_DNS_TOGGLE",
                     vec![pair("domain", d), pair("enabled", "false")],
                 ),
-                _ => return Err(
-                    "commands: list | add <domain> | remove <domain> | on <domain> | off <domain>"
-                        .into(),
-                ),
+                _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
             };
             ui_socket(&s, &s.text(key)?, Body::Form(form)).await?;
             println!("{}", listing(&Settings::from_process()?)?);
@@ -14042,15 +14232,39 @@ end
             Ok(serde_json::json!({"graphs": rows}))
         }
 
+        // What: what one stats command does.
+        // Why: the match runs these; the table names them.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            List,
+            Graph,
+            Sample,
+        }
+
+        // What: every command of the stats group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 3] = [
+            ("list", crate::shared::cli::row(Op::List, "list")),
+            (
+                "graph",
+                crate::shared::cli::row(Op::Graph, "graph <name> <range> <file.png>"),
+            ),
+            ("sample", crate::shared::cli::row(Op::Sample, "sample")),
+        ];
+
         // What: lancache-ng stats list|graph|sample.
         // Why: reads here; a sample round runs in the ui.
         // From: Issue #1683 | PR #2020
         pub async fn stats_run(args: &[String]) -> Result<(), String> {
             let s = Settings::from_process()?;
+            use crate::shared::cli;
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
-            match words.as_slice() {
-                ["list"] => println!("{}", listing(&s)?),
-                ["graph", name, range, out] => {
+            let op = cli::op_of(&COMMANDS, args.first());
+            match (op, words.get(1..).unwrap_or_default()) {
+                (Some(Op::List), []) => println!("{}", listing(&s)?),
+                (Some(Op::Graph), [name, range, out]) => {
                     let g = all(&s)?
                         .into_iter()
                         .find(|g| g.name == *name)
@@ -14062,7 +14276,7 @@ end
                         serde_json::json!({"graph": name, "file": out, "bytes": png.len()})
                     );
                 }
-                ["sample"] => {
+                (Some(Op::Sample), []) => {
                     let route = s.text("UI_ROUTE_STATS_SAMPLE")?;
                     let body = crate::shared::http::Body::Form(vec![]);
                     let v = crate::shared::http::ui_socket(&s, &route, body).await?;
@@ -14071,7 +14285,7 @@ end
                         return Err("sample: a graph could not be recorded".into());
                     }
                 }
-                _ => return Err("commands: list | graph <name> <range> <file.png> | sample".into()),
+                _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
             }
             Ok(())
         }
@@ -14437,13 +14651,31 @@ end
             }))
         }
 
+        // What: what one cache command does.
+        // Why: the match runs these; the table names them.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            Usage,
+            Wipe,
+        }
+
+        // What: every command of the cache group.
+        // Why: help, errors and the choice read this table.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 2] = [
+            ("usage", crate::shared::cli::row(Op::Usage, "usage")),
+            ("wipe", crate::shared::cli::row(Op::Wipe, "wipe")),
+        ];
+
         // What: lancache-ng cache usage: counts, then JSON.
         // Why: cache reads have their CLI with their owner.
         // From: Issue #1683 | PR #2020
         pub async fn cache_run(args: &[String]) -> Result<(), String> {
             let s = crate::config::Settings::from_process()?;
-            match args.first().map(String::as_str) {
-                Some("usage") => {
+            use crate::shared::cli;
+            match cli::op_of(&COMMANDS, args.first()) {
+                Some(Op::Usage) => {
                     let (used, errs) = cache_bytes(&cache_root(&s)?);
                     println!("{}", usage(&s, Some(used))?);
                     match errs.is_empty() {
@@ -14454,14 +14686,14 @@ end
                 // What: wipe goes to the ui, as the button.
                 // Why: the ui lowers the shown sum at once.
                 // From: Issue #1683 | PR #2020
-                Some("wipe") => {
+                Some(Op::Wipe) => {
                     let r = s.text("UI_ROUTE_HAMSTER_API")?.replace("{op}", "wipe");
                     let body = crate::shared::http::Body::Form(vec![]);
                     let v = crate::shared::http::ui_socket(&s, &r, body).await?;
                     println!("{v}");
                     Ok(())
                 }
-                _ => Err("commands: usage | wipe".into()),
+                None => Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
             }
         }
 
@@ -19571,13 +19803,37 @@ mod watchdog {
         Ok(())
     }
 
+    // What: what one watchdog command does.
+    // Why: run() matches these; tidy steps are TIDY_STEPS.
+    // From: Issue #1683 | PR #2020
+    #[derive(Clone, Copy, PartialEq)]
+    enum Op {
+        Healthcheck,
+        Alarms,
+        Check,
+    }
+
+    // What: every watchdog command but the tidy steps.
+    // Why: help, errors and the choice read this table.
+    // From: Issue #1683 | PR #2020
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 3] = [
+        (
+            "healthcheck",
+            crate::shared::cli::row(Op::Healthcheck, "healthcheck"),
+        ),
+        ("alarms", crate::shared::cli::row(Op::Alarms, "alarms")),
+        ("check", crate::shared::cli::row(Op::Check, "check")),
+    ];
+
     // What: healthcheck command, else the check loop.
     // Why: settings are reread; a bad round never exits.
     // From: Issue #1683 | PR #1858
     pub async fn run(args: &[String]) -> Result<(), String> {
-        match args.first().map(String::as_str) {
-            None => {}
-            Some("healthcheck") => {
+        use crate::shared::cli;
+        let first = args.first().map(String::as_str);
+        match (first, cli::op_of(&COMMANDS, args.first())) {
+            (None, _) => {}
+            (_, Some(Op::Healthcheck)) => {
                 if let Err(e) = healthcheck() {
                     eprintln!("watchdog healthcheck: {e}");
                     std::process::exit(1);
@@ -19587,7 +19843,7 @@ mod watchdog {
             // What: last alarm report as JSON on stdout.
             // Why: the CLI reads what the ui and REST show.
             // From: Issue #1683 | PR #2020
-            Some("alarms") => {
+            (_, Some(Op::Alarms)) => {
                 let s = Settings::from_process()?;
                 let v = report(&s)?.ok_or("no alarm report written yet")?;
                 println!("{v}");
@@ -19596,7 +19852,7 @@ mod watchdog {
             // What: the checks once, no heal, no tidy.
             // Why: see a fix now, not after CHECK_INTERVAL.
             // From: Issue #1683 | PR #2020
-            Some("check") => {
+            (_, Some(Op::Check)) => {
                 let s = Settings::from_process()?;
                 let mut f = checks(&s, &mut Memory::default(), false).await;
                 sort_alarms(&mut f);
@@ -19610,7 +19866,7 @@ mod watchdog {
             // What: one tidy step now, or --dry-run.
             // Why: the same functions as the round.
             // From: Issue #1683 | PR #2020
-            Some(step) if TIDY_STEPS.contains(&step) => {
+            (Some(step), None) if TIDY_STEPS.contains(&step) => {
                 let dry = match args.get(1).map(String::as_str) {
                     None => false,
                     Some("--dry-run") => true,
@@ -19626,10 +19882,11 @@ mod watchdog {
             // What: an unknown word fails with the list.
             // Why: it must not start a second check loop.
             // From: Issue #1683 | PR #2020
-            Some(_) => {
+            (Some(_), None) => {
                 let steps = TIDY_STEPS.join(" | ");
+                let own = cli::forms(&COMMANDS, " | ");
                 return Err(format!(
-                    "commands: healthcheck | alarms | check | {steps} [--dry-run] (none: check loop)"
+                    "commands: {own} | {steps} [--dry-run] (none: check loop)"
                 ));
             }
         }
