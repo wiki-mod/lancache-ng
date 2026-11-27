@@ -14087,10 +14087,10 @@ mod stack {
         // Why: pdns starts only after the restart below.
         // From: Issue #1683 | PR #1980
         let mut report = Vec::new();
+        let (grace, limit) = app.limits(new)?;
         // What: a new file runs the commands of its daemon.
         // Why: snmpd and pdns read their file only at start
         // From: Issue #1683
-        let (_, limit) = app.limits(new)?;
         for (file, exec, tag) in [
             ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
             ("PDNS_CONF_FILE", "PDNS_RESTART_EXEC", "pdns"),
@@ -14129,7 +14129,6 @@ mod stack {
             }
         }
         let mut plan = apply::plan(&changes);
-        let (grace, limit) = app.limits(new)?;
         // What: mode off stops dhcp; a missing one is fine.
         // Why: compose up may have started it again.
         // From: Issue #1683 | PR #1980
