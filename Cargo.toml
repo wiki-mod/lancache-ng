@@ -48,6 +48,10 @@ rustix = { version = "*", default-features = false, features = ["std", "fs", "pr
 # Why: stats ask snmpd natively; v3 would pull crypto.
 # From: Issue #1683 | PR #2020
 snmp2 = { version = "*", default-features = false }
+# What: lzma-rust2 for xz packing, pure Rust, no lzip.
+# Why: logs pack without the xz program; no unsafe tuning.
+# From: Issue #1683 | PR #2020
+lzma-rust2 = { version = "*", default-features = false, features = ["std", "encoder", "xz"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 sha2 = "*"

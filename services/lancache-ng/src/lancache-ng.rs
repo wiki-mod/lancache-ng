@@ -15777,7 +15777,6 @@ end
     // From: Issue #1683 | PR #1980
     pub mod tidy {
         use std::path::{Component, Path, PathBuf};
-        use std::process::Command;
 
         // What: seconds of one day.
         // Why: ages and daily stamps count in days.
@@ -16034,36 +16033,72 @@ end
             let mut errs = Vec::new();
             for f in pick {
                 // What: late lines join existing .xz file.
-                // Why: xz will not overwrite a file.
+                // Why: a second stream; xz reads one file.
                 // From: Issue #1683 | PR #1985
                 let packed = super::fs::with_suffix(&f.path, ".xz");
-                if packed.exists() {
-                    if let Err(e) = append_xz(&f.path, &packed, preset) {
-                        errs.push(e);
-                    }
-                    continue;
-                }
-                let mut xz = Command::new("xz");
-                xz.arg(format!("-{preset}")).arg("--").arg(&f.path);
-                if let Err(e) = crate::shared::tool::run(&mut xz) {
+                if let Err(e) = pack_one(&f.path, &packed, preset) {
                     errs.push(e);
                 }
             }
             errs
         }
 
-        // What: xz one file as a second stream onto .xz.
-        // Why: xz reads joined streams as one file.
-        // From: Issue #1683 | PR #1985
-        fn append_xz(src: &Path, packed: &Path, preset: u64) -> Result<(), String> {
-            let out = std::fs::OpenOptions::new()
-                .append(true)
-                .open(packed)
-                .map_err(|e| format!("{}: {e}", packed.display()))?;
-            let mut xz = Command::new("xz");
-            xz.arg(format!("-{preset}")).arg("-c").arg("--").arg(src);
-            crate::shared::tool::run(xz.stdout(out))?;
-            std::fs::remove_file(src).map_err(|e| format!("{}: {e}", src.display()))
+        // What: xz one file into dst, then remove the file.
+        // Why: the source goes only after dst is complete.
+        // From: Issue #1683 | PR #2020
+        fn pack_one(src: &Path, dst: &Path, preset: u64) -> Result<(), String> {
+            use std::io::{BufWriter, Write};
+            use std::os::unix::fs::MetadataExt as _;
+            let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+            let level = u32::try_from(preset)
+                .ok()
+                .filter(|p| *p <= 9)
+                .ok_or_else(|| format!("xz preset {preset} is not 0 to 9"))?;
+            let tmp = super::fs::with_suffix(dst, ".part");
+            let made = (|| -> std::io::Result<()> {
+                let mut input = std::fs::File::open(src)?;
+                let meta = input.metadata()?;
+                let out = std::fs::File::create(&tmp)?;
+                let options = lzma_rust2::XzOptions::with_preset(level);
+                let mut xz = lzma_rust2::XzWriter::new(BufWriter::new(out), options)?;
+                std::io::copy(&mut input, &mut xz)?;
+                let mut out = xz.finish()?;
+                out.flush()?;
+                let out = out.into_inner().map_err(|e| e.into_error())?;
+                // What: the .xz file keeps owner and mode.
+                // Why: log folder readers can read it.
+                // From: Issue #1683 | PR #2020
+                let (uid, gid) = (meta.uid(), meta.gid());
+                if std::fs::metadata(&tmp)?.uid() != uid || std::fs::metadata(&tmp)?.gid() != gid {
+                    std::os::unix::fs::fchown(&out, Some(uid), Some(gid))?;
+                }
+                out.set_permissions(meta.permissions())?;
+                out.sync_all()?;
+                // What: the .xz file keeps the log's time.
+                // Why: age rules read the .xz time.
+                // From: Issue #1683 | PR #2020
+                out.set_modified(meta.modified()?)?;
+                Ok(())
+            })();
+            let finished = made.map_err(|e| err(&tmp, e)).and_then(|()| {
+                if dst.exists() {
+                    // What: append the stream to the .xz.
+                    // Why: xz will not overwrite a file.
+                    // From: Issue #1683 | PR #1985
+                    let mut from = std::fs::File::open(&tmp).map_err(|e| err(&tmp, e))?;
+                    let mut to = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(dst)
+                        .map_err(|e| err(dst, e))?;
+                    std::io::copy(&mut from, &mut to).map_err(|e| err(dst, e))?;
+                    to.sync_all().map_err(|e| err(dst, e))
+                } else {
+                    std::fs::rename(&tmp, dst).map_err(|e| err(dst, e))
+                }
+            });
+            let left = super::fs::delete_if_present(&tmp).map_err(|e| err(&tmp, e));
+            finished.and(left)?;
+            std::fs::remove_file(src).map_err(|e| err(src, e))
         }
 
         // What: is a daily job due by its stamp.
