@@ -3077,28 +3077,48 @@ mod config {
         if depth > 16 {
             return Err(format!("default {value:?}: @KEY@ refers to itself"));
         }
-        let key_char = |b: &u8| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_';
         let mut out = String::new();
         let mut rest = value;
-        while let Some(at) = rest.find('@') {
+        while let Some((at, name)) = next_at_key(rest) {
             out.push_str(&rest[..at]);
-            let after = &rest[at + 1..];
-            let len = after.bytes().take_while(key_char).count();
-            if len > 0 && after[len..].starts_with('@') {
-                let name = &after[..len];
-                let (got, _) =
-                    effective(name, file, env, defaults, depth + 1)?.ok_or_else(|| {
-                        format!("default {value:?} names @{name}@, which has no value")
-                    })?;
-                out.push_str(&got);
-                rest = &after[len + 1..];
-            } else {
-                out.push('@');
-                rest = after;
-            }
+            let (got, _) = effective(name, file, env, defaults, depth + 1)?
+                .ok_or_else(|| format!("default {value:?} names @{name}@, which has no value"))?;
+            out.push_str(&got);
+            rest = &rest[at + name.len() + 2..];
         }
         out.push_str(rest);
         Ok(out)
+    }
+
+    // What: first @KEY@ of a text: its offset and KEY.
+    // Why: one reader of the @KEY@ form for fill and check.
+    // From: Issue #1683 | PR #2020
+    fn next_at_key(text: &str) -> Option<(usize, &str)> {
+        let key_char = |b: &u8| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_';
+        let mut from = 0;
+        while let Some(i) = text[from..].find('@') {
+            let at = from + i;
+            let after = &text[at + 1..];
+            let len = after.bytes().take_while(key_char).count();
+            if len > 0 && after[len..].starts_with('@') {
+                return Some((at, &after[..len]));
+            }
+            from = at + 1;
+        }
+        None
+    }
+
+    // What: every KEY a text names as @KEY@.
+    // Why: a fixed value must not take a stored one.
+    // From: Issue #1683 | PR #2020
+    fn at_keys(text: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some((at, name)) = next_at_key(rest) {
+            out.push(name);
+            rest = &rest[at + name.len() + 2..];
+        }
+        out
     }
 
     // What: key and value of a KEY=VALUE line; else None.
@@ -3372,7 +3392,21 @@ mod config {
                 .map(|s| s.key.as_str())
                 .collect();
             file.retain(|k, _| ui_keys.contains(k.as_str()));
+            let stored: BTreeSet<String> = ui_keys.iter().map(|k| k.to_string()).collect();
             for spec in specs {
+                // What: fixed values hold only fixed parts.
+                // Why: a stored @KEY@ part undoes the fix.
+                // From: Issue #1683 | PR #2020
+                if spec.effect == Effect::Fixed {
+                    let raw = defaults.get(spec.key.as_str()).copied().unwrap_or_default();
+                    let names: BTreeSet<&str> = at_keys(raw).into_iter().collect();
+                    for name in names.into_iter().filter(|k| stored.contains(*k)) {
+                        errors.push(format!(
+                            "{}: fixed, but its default names @{name}@, which a save can change",
+                            spec.key
+                        ));
+                    }
+                }
                 let raw = match effective(&spec.key, &file, env, &defaults, 0) {
                     Ok(raw) => raw,
                     Err(e) => {
