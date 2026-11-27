@@ -14113,7 +14113,19 @@ mod ui {
             .inspect_err(|e| eprintln!("ui: alarms: {e}"))
             .ok()
             .flatten();
+        // What: age of the report in seconds.
+        // Why: an old report means a stopped watchdog.
+        // From: Issue #1683 | PR #2020
+        let age = alarms
+            .as_ref()
+            .and_then(|v| v["written"].as_u64())
+            .map(|w| {
+                crate::shared::clock::unix_secs()
+                    .saturating_sub(w)
+                    .to_string()
+            });
         ctx.insert("alarms", &alarms);
+        ctx.insert("alarms_age", &age);
         // What: no Docker answer: empty list, error logged.
         // Why: the page must render while Docker is down.
         // From: Issue #1683 | PR #2020

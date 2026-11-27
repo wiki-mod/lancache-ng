@@ -49,6 +49,27 @@
   {% endif %}
   </div>
 
+  <!-- What: alarms of the last watchdog check
+       Why: a fault shows on the first page
+       From: Issue #1683 | PR #2020 -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-head">
+      <h3>{{ t.watchdog_alarms }}</h3>
+      {% if alarms_age %}<span class="mono" style="font-size:12px;color:var(--mist-dim);">{{ t.alarms_age | replace(from="{x}", to=alarms_age) }}</span>{% endif %}
+    </div>
+    <div class="card-body">
+      {% if not alarms %}
+      <p class="status-line"><span class="beam-light off"></span>{{ t.alarms_missing }}</p>
+      {% elif alarms.alarms | length == 0 %}
+      <p class="status-line"><span class="beam-light"></span>{{ t.alarms_none }}</p>
+      {% else %}
+      {% for a in alarms.alarms %}
+      <p class="status-line"><span class="beam-light {% if a.level == "Crit" %}warn{% else %}off{% endif %}"></span><b>{{ a.source }}</b> {{ a.text }}</p>
+      {% endfor %}
+      {% endif %}
+    </div>
+  </div>
+
   <!-- What: cache figures from one shared CACHE_DIR
        Why: http and https share one cache; no per-side size
        From: Issue #1683 | PR #1912 -->

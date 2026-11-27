@@ -480,5 +480,9 @@
   "err_address_body": "The request needs an address.",
   "err_no_ip": "That is not an IP address.",
   "zone_col_primary": "Primary",
-  "games_search": "Name, app ID or regex"
+  "games_search": "Name, app ID or regex",
+  "watchdog_alarms": "Watchdog alarms",
+  "alarms_none": "No alarms in the last check.",
+  "alarms_missing": "The watchdog has not written a report yet.",
+  "alarms_age": "last check {x} s ago"
 }
