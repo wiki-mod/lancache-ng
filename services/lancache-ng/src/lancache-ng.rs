@@ -10687,12 +10687,12 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: host and port of an SNMP target text.
-        // Why: the setting reads "udp:host:port" or "host".
+        // Why: the endpoint reader checks the host name.
         // From: Issue #1683 | PR #2020
         fn target_of(target: &str) -> Result<(String, u16), String> {
             let rest = target.strip_prefix("udp:").unwrap_or(target);
-            let (host, port) = crate::shared::dns::split_host_port(rest)?;
-            Ok((host.to_string(), port.unwrap_or(DEFAULT_PORT)))
+            let (host, port) = crate::shared::dns::parse_endpoint(rest, true)?;
+            Ok((host, port.unwrap_or(DEFAULT_PORT)))
         }
 
         // What: UDP port of an SNMP agent.
