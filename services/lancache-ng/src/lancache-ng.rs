@@ -2994,20 +2994,12 @@ mod config {
         (!key.is_empty() && !key.starts_with('#')).then_some((key, value.trim()))
     }
 
-    // What: the text of the stack .env; missing is empty.
-    // Why: reading and writing see a new install alike.
-    // From: Issue #1683 | PR #2017
-    fn read_text(path: &Path) -> Result<String, String> {
-        let bytes = crate::shared::fs::read_if_present(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        String::from_utf8(bytes.unwrap_or_default()).map_err(|e| format!("{}: {e}", path.display()))
-    }
-
     // What: the raw KEY=VALUE lines of the stack .env.
     // Why: a missing file means no values yet.
     // From: Issue #1683 | PR #2017
     pub fn read_raw(path: &Path) -> Result<BTreeMap<String, String>, String> {
-        Ok(read_text(path)?
+        Ok(crate::shared::fs::read_text_if_present(path)?
+            .unwrap_or_default()
             .lines()
             .filter_map(line_entry)
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -3165,7 +3157,7 @@ mod config {
             .map_err(|e| format!("{}: {e}", lock.display()))?;
         held.lock()
             .map_err(|e| format!("{}: {e}", lock.display()))?;
-        let old = read_text(path)?;
+        let old = crate::shared::fs::read_text_if_present(path)?.unwrap_or_default();
         let mut done = BTreeSet::new();
         let mut body = String::new();
         for line in old.lines() {
@@ -6693,6 +6685,16 @@ mod shared {
             fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
         }
 
+        // What: a file as text, or None if it is absent.
+        // Why: one reader of a file that may be missing.
+        // From: Issue #1683 | PR #2020
+        pub fn read_text_if_present(path: &Path) -> Result<Option<String>, String> {
+            let raw = read_if_present(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            raw.map(String::from_utf8)
+                .transpose()
+                .map_err(|e| format!("{}: {e}", path.display()))
+        }
+
         // What: a file as bytes; the error names the path.
         // Why: one reader of a file that must be there.
         // From: Issue #1683 | PR #2020
@@ -6731,10 +6733,10 @@ mod shared {
                 .unwrap_or(0)
         }
 
-        // What: every file below root, and unread parts.
-        // Why: a skipped folder must not look like done.
+        // What: every entry below root, root too; errors.
+        // Why: one walk for file lists and owner fixes.
         // From: Issue #1683 | PR #1980
-        pub fn files_under(root: &Path) -> (Vec<(PathBuf, fs::Metadata)>, Vec<String>) {
+        pub fn entries_under(root: &Path) -> (Vec<(PathBuf, fs::Metadata)>, Vec<String>) {
             let (mut out, mut errs) = (Vec::new(), Vec::new());
             // What: a vanished entry is no error.
             // Why: nginx evicts while the walk runs.
@@ -6744,32 +6746,39 @@ mod shared {
                     errs.push(format!("{}: {e}", path.display()));
                 }
             };
-            let mut dirs = vec![root.to_path_buf()];
-            while let Some(dir) = dirs.pop() {
-                let entries = match fs::read_dir(&dir) {
-                    Ok(entries) => entries,
+            let mut todo = vec![root.to_path_buf()];
+            while let Some(path) = todo.pop() {
+                let meta = match fs::symlink_metadata(&path) {
+                    Ok(meta) => meta,
                     Err(e) => {
-                        note(&dir, e);
+                        note(&path, e);
                         continue;
                     }
                 };
-                for entry in entries {
-                    let path = match entry {
-                        Ok(entry) => entry.path(),
-                        Err(e) => {
-                            note(&dir, e);
-                            continue;
+                if meta.is_dir() {
+                    match fs::read_dir(&path) {
+                        Ok(rd) => {
+                            for entry in rd {
+                                match entry {
+                                    Ok(entry) => todo.push(entry.path()),
+                                    Err(e) => note(&path, e),
+                                }
+                            }
                         }
-                    };
-                    match fs::symlink_metadata(&path) {
-                        Ok(meta) if meta.is_dir() => dirs.push(path),
-                        Ok(meta) if meta.is_file() => out.push((path, meta)),
-                        Ok(_) => {}
                         Err(e) => note(&path, e),
                     }
                 }
+                out.push((path, meta));
             }
             (out, errs)
+        }
+
+        // What: every regular file below root, and errors.
+        // Why: a skipped folder must not look like done.
+        // From: Issue #1683 | PR #1980
+        pub fn files_under(root: &Path) -> (Vec<(PathBuf, fs::Metadata)>, Vec<String>) {
+            let (all, errs) = entries_under(root);
+            (all.into_iter().filter(|(_, m)| m.is_file()).collect(), errs)
         }
 
         // What: give every entry below root one owner.
@@ -6777,35 +6786,22 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub fn chown_tree(root: &Path, uid: u32, gid: u32, apply: bool) -> (u64, Vec<String>) {
             use std::os::unix::fs::MetadataExt;
-            let (mut fixed, mut errs) = (0u64, Vec::new());
-            let mut todo = vec![root.to_path_buf()];
-            while let Some(path) = todo.pop() {
-                let meta = match fs::symlink_metadata(&path) {
-                    Ok(m) => m,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(e) => {
-                        errs.push(format!("{}: {e}", path.display()));
-                        continue;
-                    }
-                };
-                if (meta.uid(), meta.gid()) != (uid, gid) {
-                    // What: a dry run only counts.
-                    // Why: it shows what the run would fix.
-                    // From: Issue #1683 | PR #2020
-                    let done = match apply {
-                        true => std::os::unix::fs::lchown(&path, Some(uid), Some(gid)),
-                        false => Ok(()),
-                    };
-                    match done {
-                        Ok(()) => fixed += 1,
-                        Err(e) => errs.push(format!("{}: {e}", path.display())),
-                    }
+            let (all, mut errs) = entries_under(root);
+            let mut fixed = 0u64;
+            for (path, meta) in all {
+                if (meta.uid(), meta.gid()) == (uid, gid) {
+                    continue;
                 }
-                if meta.is_dir() {
-                    match fs::read_dir(&path) {
-                        Ok(rd) => todo.extend(rd.flatten().map(|e| e.path())),
-                        Err(e) => errs.push(format!("{}: {e}", path.display())),
-                    }
+                // What: a dry run only counts.
+                // Why: it shows what the run would fix.
+                // From: Issue #1683 | PR #2020
+                let done = match apply {
+                    true => std::os::unix::fs::lchown(&path, Some(uid), Some(gid)),
+                    false => Ok(()),
+                };
+                match done {
+                    Ok(()) => fixed += 1,
+                    Err(e) => errs.push(format!("{}: {e}", path.display())),
                 }
             }
             (fixed, errs)
@@ -6937,28 +6933,32 @@ mod shared {
                     Ok(text)
                 }
             };
-            match read_text(path) {
-                Ok(text) => usable(text),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let read = || {
+                fs::read_text_if_present(path)
+                    .map(|t| t.map(|t| t.trim().to_string()))
+                    .map_err(io::Error::other)
+            };
+            match read()? {
+                Some(text) => usable(text),
+                None => {
                     let text = create();
                     let mode = fs::PRIVATE_MODE;
                     match fs::write(path, text.as_bytes(), mode, Place::Exclusive, owner) {
                         Ok(()) => Ok(text),
                         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                            usable(read_text(path)?)
+                            usable(read()?.unwrap_or_default())
                         }
                         Err(e) => Err(e),
                     }
                 }
-                Err(e) => Err(e),
             }
         }
 
         // What: a secret file's text without outer blanks.
         // Why: every reader of a secret file trims alike.
         // From: Issue #1683 | PR #2020
-        fn read_text(path: &Path) -> io::Result<String> {
-            std::fs::read_to_string(path).map(|t| t.trim().to_string())
+        fn read_text(path: &Path) -> Result<String, String> {
+            fs::read_text(path).map(|t| t.trim().to_string())
         }
 
         // What: the files in the secret directory.
@@ -7012,7 +7012,7 @@ mod shared {
                 let key = key_of(name);
                 let meta =
                     std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                let text = read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let text = read_text(&path)?;
                 let text = text.as_str();
                 let mode = meta.permissions().mode() & 0o777;
                 rows.push(serde_json::json!({
@@ -7032,7 +7032,7 @@ mod shared {
             let d = dir(s)?;
             let mut out = s.secret_values();
             for path in files_in(&d)? {
-                out.push(read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?);
+                out.push(read_text(&path)?);
             }
             out.push(tsig_secret(s)?);
             out.retain(|v| v.len() >= 4);
