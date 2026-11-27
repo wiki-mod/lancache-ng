@@ -1954,20 +1954,28 @@ mod cachehamster {
         drop: &dyn Fn(u32) -> bool,
         sizes: &mut BTreeMap<u32, u64>,
         freed: &mut (u64, u64),
-    ) -> Result<(), String> {
-        for (path, meta) in crate::shared::fs::files_under(dir) {
+    ) -> Vec<String> {
+        let (found, mut errs) = crate::shared::fs::files_under(dir);
+        let mut gone = Vec::new();
+        for (path, meta) in found {
             let Some(depot) = key_depot(&path) else {
                 continue;
             };
             if drop(depot) {
-                remove(&path)?;
-                freed.0 += meta.len();
-                freed.1 += 1;
+                gone.push(crate::shared::tidy::Item {
+                    path,
+                    size: meta.len(),
+                    mtime: 0,
+                });
             } else {
                 *sizes.entry(depot).or_default() += meta.len();
             }
         }
-        Ok(())
+        let (bytes, failed) = crate::shared::tidy::remove(&gone);
+        freed.0 += bytes;
+        freed.1 += (gone.len() - failed.len()) as u64;
+        errs.extend(failed);
+        errs
     }
 
     // What: cache bytes of every known app.
@@ -1976,7 +1984,7 @@ mod cachehamster {
     fn cached(c: &Ctx) -> Result<Value, String> {
         let mut sizes = BTreeMap::new();
         let dir = crate::shared::tidy::cache_root(&c.s)?;
-        walk_cache(&dir, &|_| false, &mut sizes, &mut (0, 0))?;
+        let errors = walk_cache(&dir, &|_| false, &mut sizes, &mut (0, 0));
         let apps: BTreeMap<String, u64> = known_depots(&c.dir)?
             .into_iter()
             .map(|(app, ids)| {
@@ -1986,31 +1994,24 @@ mod cachehamster {
             .collect();
         let human: BTreeMap<&String, String> =
             apps.iter().map(|(a, n)| (a, human::bytes(*n))).collect();
-        Ok(json!({"apps": apps, "apps_human": human}))
-    }
-
-    // What: delete every file in the cache, keep folders.
-    // Why: one button empties the whole cache.
-    // From: Issue #871 | PR #1991
-    fn wipe_dir(dir: &Path, freed: &mut (u64, u64)) -> Result<(), String> {
-        for (path, meta) in crate::shared::fs::files_under(dir) {
-            remove(&path)?;
-            freed.0 += meta.len();
-            freed.1 += 1;
-        }
-        Ok(())
+        Ok(json!({"apps": apps, "apps_human": human, "ok": errors.is_empty(), "errors": errors}))
     }
 
     // What: empty the whole cache of every service.
     // Why: a full wipe stands next to the per-game evict.
     // From: Issue #871 | PR #1991
     fn wipe(c: &Ctx) -> Result<Value, String> {
-        let mut freed = (0, 0);
-        wipe_dir(&crate::shared::tidy::cache_root(&c.s)?, &mut freed)?;
+        use crate::shared::tidy;
+        let (all, mut errors) = tidy::files(&tidy::cache_root(&c.s)?);
+        let (freed, failed) = tidy::remove(&all);
+        let files = all.len() - failed.len();
+        errors.extend(failed);
         Ok(json!({
-            "freed": freed.0,
-            "freed_human": human::bytes(freed.0),
-            "files": freed.1,
+            "freed": freed,
+            "freed_human": human::bytes(freed),
+            "files": files,
+            "ok": errors.is_empty(),
+            "errors": errors,
         }))
     }
 
@@ -2037,7 +2038,7 @@ mod cachehamster {
         let (mut sizes, mut freed) = (BTreeMap::new(), (0, 0));
         let dir = crate::shared::tidy::cache_root(&c.s)?;
         let hit = |d: u32| evict && ids.contains(&d);
-        walk_cache(&dir, &hit, &mut sizes, &mut freed)?;
+        let errors = walk_cache(&dir, &hit, &mut sizes, &mut freed);
         let bytes: u64 = ids.iter().filter_map(|d| sizes.get(d)).sum();
         Ok(json!({
             "app": app,
@@ -2046,6 +2047,8 @@ mod cachehamster {
             "freed": freed.0,
             "freed_human": human::bytes(freed.0),
             "files": freed.1,
+            "ok": errors.is_empty(),
+            "errors": errors,
         }))
     }
 
@@ -6173,29 +6176,45 @@ mod shared {
                 .unwrap_or(0)
         }
 
-        // What: every regular file below root.
-        // Why: retention sums and prunes by size and age.
+        // What: every file below root, and unread parts.
+        // Why: a skipped folder must not look like done.
         // From: Issue #1683 | PR #1980
-        pub fn files_under(root: &Path) -> Vec<(PathBuf, fs::Metadata)> {
-            let mut out = Vec::new();
+        pub fn files_under(root: &Path) -> (Vec<(PathBuf, fs::Metadata)>, Vec<String>) {
+            let (mut out, mut errs) = (Vec::new(), Vec::new());
+            // What: a vanished entry is no error.
+            // Why: nginx evicts while the walk runs.
+            // From: Issue #1683 | PR #2020
+            let mut note = |path: &Path, e: io::Error| {
+                if e.kind() != io::ErrorKind::NotFound {
+                    errs.push(format!("{}: {e}", path.display()));
+                }
+            };
             let mut dirs = vec![root.to_path_buf()];
             while let Some(dir) = dirs.pop() {
-                let Ok(entries) = fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let Ok(meta) = fs::symlink_metadata(&path) else {
+                let entries = match fs::read_dir(&dir) {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        note(&dir, e);
                         continue;
+                    }
+                };
+                for entry in entries {
+                    let path = match entry {
+                        Ok(entry) => entry.path(),
+                        Err(e) => {
+                            note(&dir, e);
+                            continue;
+                        }
                     };
-                    if meta.is_dir() {
-                        dirs.push(path);
-                    } else if meta.is_file() {
-                        out.push((path, meta));
+                    match fs::symlink_metadata(&path) {
+                        Ok(meta) if meta.is_dir() => dirs.push(path),
+                        Ok(meta) if meta.is_file() => out.push((path, meta)),
+                        Ok(_) => {}
+                        Err(e) => note(&path, e),
                     }
                 }
             }
-            out
+            (out, errs)
         }
 
         // What: total and free bytes of a filesystem.
@@ -13838,13 +13857,13 @@ end
         // What: bytes the cache files hold on the disk.
         // Why: the disk holds files of the system too.
         // From: Issue #1683 | PR #1980
-        pub fn cache_bytes(root: &Path) -> u64 {
+        pub fn cache_bytes(root: &Path) -> (u64, Vec<String>) {
             use std::os::unix::fs::MetadataExt;
-            crate::shared::fs::files_under(root)
-                .into_iter()
-                .fold(0u64, |total, (_, meta)| {
-                    total.saturating_add(meta.blocks().saturating_mul(512))
-                })
+            let (found, errs) = crate::shared::fs::files_under(root);
+            let used = found.into_iter().fold(0u64, |total, (_, meta)| {
+                total.saturating_add(meta.blocks().saturating_mul(512))
+            });
+            (used, errs)
         }
 
         // What: largest cache size the disk allows.
@@ -13892,9 +13911,12 @@ end
             let s = crate::config::Settings::from_process()?;
             match args.first().map(String::as_str) {
                 Some("usage") => {
-                    let used = cache_bytes(&cache_root(&s)?);
+                    let (used, errs) = cache_bytes(&cache_root(&s)?);
                     println!("{}", usage(&s, Some(used))?);
-                    Ok(())
+                    match errs.is_empty() {
+                        true => Ok(()),
+                        false => Err(format!("cache usage: not read: {}", errs.join("; "))),
+                    }
                 }
                 // What: wipe goes to the ui, as the button.
                 // Why: the ui lowers the shown sum at once.
@@ -13922,15 +13944,17 @@ end
         // What: all regular files below a folder.
         // Why: base for age, size and pack runs.
         // From: Issue #1683 | PR #1980
-        pub fn files(dir: &Path) -> Vec<Item> {
-            crate::shared::fs::files_under(dir)
+        pub fn files(dir: &Path) -> (Vec<Item>, Vec<String>) {
+            let (found, errs) = crate::shared::fs::files_under(dir);
+            let items = found
                 .into_iter()
                 .map(|(path, meta)| Item {
                     path,
                     size: meta.len(),
                     mtime: crate::shared::fs::modified_secs(&meta),
                 })
-                .collect()
+                .collect();
+            (items, errs)
         }
 
         // What: split files into older than days, rest.
@@ -13978,12 +14002,14 @@ end
         // What: files closed before today, not yet xz.
         // Why: past days are never written again.
         // From: Issue #1683 | PR #2020
-        pub fn closed(dir: &Path, now: u64) -> Vec<Item> {
+        pub fn closed(dir: &Path, now: u64) -> (Vec<Item>, Vec<String>) {
             let today = day_start(now);
-            files(dir)
+            let (all, errs) = files(dir);
+            let pick = all
                 .into_iter()
                 .filter(|f| f.mtime < today && f.path.extension().is_none_or(|e| e != "xz"))
-                .collect()
+                .collect();
+            (pick, errs)
         }
 
         // What: xz every picked file.
@@ -14049,8 +14075,9 @@ end
         // What: newest change time below a folder.
         // Why: shows whether logs are still written.
         // From: Issue #1683 | PR #1980
-        pub fn newest(dir: &Path) -> u64 {
-            files(dir).iter().map(|f| f.mtime).max().unwrap_or(0)
+        pub fn newest(dir: &Path) -> (u64, Vec<String>) {
+            let (all, errs) = files(dir);
+            (all.iter().map(|f| f.mtime).max().unwrap_or(0), errs)
         }
 
         // What: processed count of syslog-ng file outputs.
@@ -16661,7 +16688,12 @@ mod ui {
             })
             .await
             {
-                Ok(bytes) => app.cache_used.store(bytes, Ordering::Relaxed),
+                Ok((bytes, errs)) => {
+                    for e in errs {
+                        eprintln!("ui: cache count: not read: {e}");
+                    }
+                    app.cache_used.store(bytes, Ordering::Relaxed);
+                }
                 Err(e) => eprintln!("ui: cache count: {e}"),
             }
             tokio::time::sleep(Duration::from_secs(step)).await;
@@ -18375,15 +18407,15 @@ mod watchdog {
         if when == When::Due && !tidy::is_due(&stamp, now) {
             return Ok(None);
         }
-        let all = tidy::files(&tidy::cache_root(s)?);
+        let (all, unread) = tidy::files(&tidy::cache_root(s)?);
         let (pick, _) = tidy::older(all, s.uint("CACHE_VALID_DAYS")?, now);
         let mut t = picked(s, PURGE, when, &pick)?;
+        t.errors = unread;
         if when != When::Dry {
-            t.errors = tidy::remove(&pick).1;
-            eprintln!(
-                "watchdog: cache purge removed {} files",
-                t.count - t.errors.len()
-            );
+            let failed = tidy::remove(&pick).1;
+            let removed = t.count - failed.len();
+            eprintln!("watchdog: cache purge removed {removed} files");
+            t.errors.extend(failed);
             tidy::save_stamp(&stamp, now)?;
         }
         Ok(Some(t))
@@ -18411,17 +18443,19 @@ mod watchdog {
         let budget = crate::shared::human::gib_bytes(s.uint("SYSLOG_MAX_GB")?)
             .ok_or("SYSLOG_MAX_GB is too big")?;
         let days = s.uint("SYSLOG_RETENTION_DAYS")?;
-        let (mut pick, rest) = tidy::older(tidy::files(&root), days, now);
+        let (all, unread) = tidy::files(&root);
+        let (mut pick, rest) = tidy::older(all, days, now);
         let (more, mut size) = tidy::over_budget(rest, budget, now);
         pick.extend(more);
         let mut t = picked(s, PRUNE, when, &pick)?;
+        t.errors = unread;
         if when != When::Dry {
             let (freed, errs) = tidy::remove(&pick);
             // What: bytes of failed removals stay counted.
             // Why: the budget check sees the real size.
             // From: Issue #1683 | PR #2020
             size = size.saturating_add(t.bytes.saturating_sub(freed));
-            t.errors = errs;
+            t.errors.extend(errs);
             let wait = s.uint("SYSLOG_PRUNE_RETRY_COOLDOWN")?;
             let at = if size <= budget {
                 now
@@ -18438,10 +18472,12 @@ mod watchdog {
     // Why: saves log disk; open files stay plain.
     // From: Issue #1683 | PR #1980
     fn pack_logs(s: &Settings, now: u64, when: When) -> Result<Option<Tidied>, String> {
-        let pick = tidy::closed(&log_root(s)?, now);
+        let (pick, unread) = tidy::closed(&log_root(s)?, now);
         let mut t = picked(s, PACK, when, &pick)?;
+        t.errors = unread;
         if when != When::Dry {
-            t.errors = tidy::pack(&pick, s.uint("SYSLOG_XZ_PRESET")?);
+            t.errors
+                .extend(tidy::pack(&pick, s.uint("SYSLOG_XZ_PRESET")?));
         }
         Ok(Some(t))
     }
@@ -18481,7 +18517,10 @@ mod watchdog {
     // Why: a full or read-only log disk hides itself.
     // From: Issue #1683 | PR #1980
     fn log_writing(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
-        let newest = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
+        let (newest, unread) = tidy::newest(Path::new(&s.text("SYSLOG_LOG_ROOT")?));
+        if !unread.is_empty() {
+            f.warn("logs", format!("log files not read: {}", unread.join("; ")));
+        }
         let count = tidy::syslog_processed()?;
         if let Some((was_count, was_newest)) = m.log_counter
             && count > was_count

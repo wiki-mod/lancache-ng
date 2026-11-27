@@ -288,6 +288,7 @@
       b.disabled = true; b.textContent = LC_T.loading;
       api('evict-' + id).then(function (v) {
         cell.textContent = LC_T.cache_freed.replace('{x}', v.freed_human);
+        if (v.errors && v.errors.length) { window.LancacheUi.fail(new Error(v.errors.join('\n'))); }
       }).catch(function (e) { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_evict; window.LancacheUi.fail(e); });
     });
     cell.appendChild(b);

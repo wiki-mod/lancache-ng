@@ -1261,7 +1261,10 @@
           b.disabled = true; b.textContent = LC_T.loading;
           fetch(b.dataset.cacheWipe, { method: 'POST', headers: { [CSRF_HEADER]: b.dataset.csrf } })
             .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
-            .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', v.freed_human); })
+            .then(function (v) {
+              st.textContent = LC_T.cache_freed.replace('{x}', v.freed_human);
+              if (v.errors && v.errors.length) { window.LancacheUi.fail(new Error(v.errors.join('\n'))); }
+            })
             .catch(function (e) { window.LancacheUi.fail(e); })
             .finally(function () { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_wipe; });
         });
