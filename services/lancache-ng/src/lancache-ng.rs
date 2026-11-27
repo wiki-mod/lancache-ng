@@ -17608,11 +17608,7 @@ mod ui {
         // What: a socket file of an earlier run goes.
         // Why: bind fails on an existing path.
         // From: Issue #1683 | PR #2020
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{path}: {e}")),
-        }
+        fs::remove_if_present(Path::new(&path)).map_err(|e| format!("{path}: {e}"))?;
         let sock = tokio::net::UnixListener::bind(&path).map_err(|e| format!("{path}: {e}"))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
             .map_err(|e| format!("{path}: {e}"))?;
