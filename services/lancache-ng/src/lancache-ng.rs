@@ -2470,18 +2470,35 @@ mod config {
     }
 
     impl Effect {
+        // What: every effect with its SOT word.
+        // Why: parse and word read one table.
+        // From: Issue #1683 | PR #2020
+        const WORDS: [(&'static str, Self); 5] = [
+            ("live", Self::Live),
+            ("reload", Self::Reload),
+            ("restart", Self::Restart),
+            ("container", Self::Container),
+            ("recreate", Self::Recreate),
+        ];
+
         // What: effect from its SOT word.
         // Why: an unknown word is an error, never Live.
         // From: Issue #1683 | PR #1980
         fn parse(word: &str) -> Result<Self, String> {
-            match word {
-                "live" => Ok(Self::Live),
-                "reload" => Ok(Self::Reload),
-                "restart" => Ok(Self::Restart),
-                "container" => Ok(Self::Container),
-                "recreate" => Ok(Self::Recreate),
-                other => Err(format!("unknown effect {other:?}")),
-            }
+            Self::WORDS
+                .iter()
+                .find_map(|(w, effect)| (*w == word).then_some(*effect))
+                .ok_or_else(|| format!("unknown effect {word:?}"))
+        }
+
+        // What: the SOT word of an effect.
+        // Why: REST and CLI show the word the SOT uses.
+        // From: Issue #1683 | PR #2020
+        pub fn word(self) -> &'static str {
+            Self::WORDS
+                .iter()
+                .find_map(|(w, effect)| (*effect == self).then_some(*w))
+                .unwrap_or_default()
         }
     }
 
@@ -3073,7 +3090,7 @@ mod config {
                         "kind": kind,
                         "limits": extra,
                         "required": sp.required,
-                        "effect": format!("{:?}", sp.effect).to_lowercase(),
+                        "effect": sp.effect.word(),
                         "owner": sp.owner,
                         "secret": sp.is_secret(),
                         "value": view.get(&sp.key),
