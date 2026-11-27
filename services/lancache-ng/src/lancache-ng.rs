@@ -4295,10 +4295,23 @@ mod dns {
         }
     }
 
+    // What: save a change, then drop zones it left behind.
+    // Why: LAN domain edits and settings saves end alike.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn commit_and_prune(
+        app: &Stack,
+        form: Fields,
+        before: &[String],
+    ) -> Result<(), String> {
+        commit(app, form).await?;
+        drop_old_zones(&app.settings(), before).await;
+        Ok(())
+    }
+
     // What: remove zones a new LAN domain left behind.
     // Why: an old zone would keep answering its names.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn drop_old_zones(s: &Settings, before: &[String]) {
+    async fn drop_old_zones(s: &Settings, before: &[String]) {
         let read = (hosted_now(s), Role::from_settings(s), peer::own_api(s));
         let (now, role, api) = match read {
             (Ok(now), Ok(role), Ok(api)) => (now, role, api),
@@ -4735,9 +4748,7 @@ mod dns {
                 main_domain_fields(s, &name)?
             }
         };
-        commit(app, change).await?;
-        drop_old_zones(&app.settings(), &before).await;
-        Ok(())
+        commit_and_prune(app, change, &before).await
     }
 
     // What: full name inside the LAN zone.
@@ -14776,7 +14787,7 @@ mod ui {
         dhcp_probe_cli, dhcp_stays_off, kea_change, kea_snapshots, kea_state, kea_store,
     };
     use crate::dns::{
-        LanDomainEdit, answers_aa, drop_old_zones, drop_peer_records, ensure_zones,
+        LanDomainEdit, answers_aa, commit_and_prune, drop_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
         primary_https_ip, ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch,
         snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
@@ -15548,8 +15559,9 @@ mod ui {
         if dry {
             return check_change(app, form).map_err(bad_request);
         }
-        commit(app, form).await.map_err(bad_request)?;
-        drop_old_zones(&app.settings(), &before).await;
+        commit_and_prune(app, form, &before)
+            .await
+            .map_err(bad_request)?;
         Ok(Vec::new())
     }
 
