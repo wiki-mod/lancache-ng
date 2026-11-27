@@ -50,6 +50,21 @@ mod cachehamster {
     const INBOX_DIR: &str = "inbox";
     const DEPOTS_DIR: &str = "depots";
 
+    // What: path part of every Steam depot URL.
+    // Why: the URL builders and key_depot name one path.
+    // From: Issue #871 | PR #1991
+    const DEPOT_PATH: &str = "/depot/";
+
+    // What: text nginx writes before a cache file key.
+    // Why: file head is a header, "\nKEY: ", the key, "\n".
+    // From: Issue #871 | PR #1991
+    const CACHE_KEY_MARKER: &[u8] = b"\nKEY: ";
+
+    // What: bytes of a cache file head key_depot reads.
+    // Why: nginx keeps header and key in its first block.
+    // From: Issue #871 | PR #1991
+    const CACHE_HEAD_BYTES: usize = 4096;
+
     // What: when a job may run.
     // Why: a download runs now, later or on a schedule.
     // From: Issue #871 | PR #1980
@@ -1869,7 +1884,7 @@ mod cachehamster {
                 }
             };
             let url = format!(
-                "http://{}/depot/{depot}/manifest/{gid}/{}/{code}",
+                "http://{}{DEPOT_PATH}{depot}/manifest/{gid}/{}/{code}",
                 cfg.cdn_host, cfg.manifest_api
             );
             let resp = dl
@@ -1885,7 +1900,10 @@ mod cachehamster {
             }
             let body = http::read_body(resp, cfg.max_body, &url).await?;
             for (sha, n) in chunks_of(&body)? {
-                urls.push(format!("http://{}/depot/{depot}/chunk/{sha}", cfg.cdn_host));
+                urls.push(format!(
+                    "http://{}{DEPOT_PATH}{depot}/chunk/{sha}",
+                    cfg.cdn_host
+                ));
                 size += n;
             }
         }
@@ -1943,13 +1961,16 @@ mod cachehamster {
     // From: Issue #871 | PR #1991
     fn key_depot(path: &Path) -> Option<u32> {
         use std::io::Read as _;
-        let mut head = vec![0; 4096];
+        let mut head = vec![0; CACHE_HEAD_BYTES];
         let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
         let head = &head[..n];
-        let at = head.windows(6).position(|w| w == b"\nKEY: ")? + 6;
+        let at = head
+            .windows(CACHE_KEY_MARKER.len())
+            .position(|w| w == CACHE_KEY_MARKER)?
+            + CACHE_KEY_MARKER.len();
         let end = head[at..].iter().position(|b| *b == b'\n')? + at;
         let key = std::str::from_utf8(&head[at..end]).ok()?;
-        let rest = key.split_once("/depot/")?.1;
+        let rest = key.split_once(DEPOT_PATH)?.1;
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         digits.parse().ok()
     }
@@ -5607,7 +5628,7 @@ mod dns {
             "pdns_api_key": secret::get(s, "PDNS_API_KEY")?,
             "tsig_name": s.text("DDNS_TSIG_NAME")?,
             "tsig_secret": secret::tsig_secret(s)?,
-            "syslog_primary": format!("{primary}:{}", s.uint("LANCACHE_LOG_PORT")?),
+            "syslog_primary": crate::shared::dns::host_port(&primary, s.uint("LANCACHE_LOG_PORT")?),
             "dns_local_reverse_zones": s.text_or_empty("DNS_LOCAL_REVERSE_ZONES"),
             "image_registry": image.registry,
             "image_prefix": image.prefix,
