@@ -8484,14 +8484,20 @@ mod shared {
             .map(drop)
         }
 
+        // What: the files of the CA that signs leaves.
+        // Why: make_leaf takes them as one value.
+        // From: Issue #1683 | PR #2020
+        pub struct Ca<'a> {
+            pub key: &'a Path,
+            pub crt: &'a Path,
+            pub serial: &'a Path,
+        }
+
         // What: leaf key and certificate signed by the CA.
         // Why: one leaf per CDN name set in HTTPS mode.
         // From: Issue #1683 | PR #1980
-        #[allow(clippy::too_many_arguments)]
         pub fn make_leaf(
-            ca_key: &Path,
-            ca_crt: &Path,
-            ca_serial: &Path,
+            ca: &Ca,
             key: &Path,
             crt: &Path,
             subject: &str,
@@ -8535,11 +8541,11 @@ mod shared {
                     "-in",
                     &arg(&csr),
                     "-CA",
-                    &arg(ca_crt),
+                    &arg(ca.crt),
                     "-CAkey",
-                    &arg(ca_key),
+                    &arg(ca.key),
                     "-CAserial",
-                    &arg(ca_serial),
+                    &arg(ca.serial),
                     "-out",
                     &arg(crt),
                     "-days",
@@ -12048,10 +12054,13 @@ end
             for (name, sans) in wanted_leaves(s)? {
                 let (key, crt) = leaf_files(s, &name)?;
                 if !(crt.exists() && key.exists()) {
+                    let ca = crate::shared::cert::Ca {
+                        key: &ca_key,
+                        crt: &ca_crt,
+                        serial: &serial,
+                    };
                     crate::shared::cert::make_leaf(
-                        &ca_key,
-                        &ca_crt,
-                        &serial,
+                        &ca,
                         &key,
                         &crt,
                         &s.text("LEAF_SUBJECT")?,
