@@ -50,6 +50,7 @@ The table names the source of each component.
 | Secondary-node registration | `services/lancache-ng/src/lancache-ng.rs` (`ui::register`, `ui::registration_token`, `ui::secondary_action`), `deploy/secondary/docker-compose.yml` | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` (section 4) | T4, T10 |
 | Zone/record known-good snapshot + rollback | `services/lancache-ng/src/lancache-ng.rs` (`dns::rollback`, `dns::zone_snapshots`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | T4 |
+| Whole-stack state + rollback | `services/lancache-ng/src/lancache-ng.rs` (`stack::state_save`, `stack::state_restore`, routes `UI_ROUTE_STACK_SNAPSHOTS`, `UI_ROUTE_STACK_SNAPSHOT_SAVE`, `UI_ROUTE_STACK_SNAPSHOT_RESTORE`, CLI `lancache-ng system snapshot`), `setup.sh reset-to-last-known-good-config stack` | T3, T4 |
 
 ---
 
@@ -298,6 +299,14 @@ only its Argon2id hash.
   and the Docker socket, so the mount adds no new privilege. The UI refuses
   values Compose would read differently (`$`, quotes, a backquote, a
   backslash, `#`, line breaks).
+- Settings with the schema effect `fixed` (program lines such as
+  `RELOAD_EXEC`, paths, URLs, service names) cannot be stored through the
+  settings form, REST or CLI, and a value for them in the stack `.env` is
+  ignored (`Effect::writable` in `mod config`). A `fixed` default that names a
+  storable `@KEY@` is a load error, so no stored value reaches a program line.
+- Address and network settings (schema kinds `ip`, `net`, `nets`, `addrs`,
+  `hosts`) are parsed by the address readers of `shared::dns` and stored in
+  one form; anything else is refused.
 - The registration route for secondaries has its own token (T14).
 
 **Residual risk**: Depends on the operator's explicit choice. With a password
@@ -330,6 +339,12 @@ appliance spoofs.
   authentication and CSRF check, and the CLI `lancache-ng ui zone-snapshots` /
   `zone-rollback`). Rollback is always operator-selected, never automatic on
   startup. It is therefore only as protected as the Admin UI itself (T3).
+- **Whole-stack rollback**: a saved stack state holds the storable settings,
+  the Kea config and the own zones (`stack::state_save`); a restore takes a
+  backup first and runs under the change lock (`stack::state_restore`,
+  REST `UI_ROUTE_STACK_SNAPSHOT_RESTORE`, CLI `lancache-ng system snapshot
+  restore`, `setup.sh reset-to-last-known-good-config stack`). It is behind
+  the same Admin UI authentication and CSRF check (T3).
 - The PowerDNS API key is a shared secret resolved by `secret::resolve`: the
   operator's value wins; an empty or template-like value
   (`secret::is_placeholder`) is replaced by a generated value stored in the
@@ -391,6 +406,9 @@ sensitive) · **Impact**: Critical (full host compromise)
   read stats, `exec` in a container, and start, stop, restart or HUP a
   container. The mounted socket itself grants the full Docker API, so a
   compromise of either container is a host compromise.
+- The renderer of the `ui` writes only below `CONFIG_DIR` and
+  `KEA_DATA_DIR` (`render::confine`); a target outside them is an error and
+  nothing is written.
 - Reaching the `ui` through the network therefore reaches Docker; this makes
   the Admin UI authentication (T3) part of this threat; with the unauthenticated
   default, reaching the UI is enough.

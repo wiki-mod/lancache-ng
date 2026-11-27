@@ -6464,7 +6464,7 @@ Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snaps
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
 control surface still is. Automates the exact by-hand recovery
-sequence docs/README.md section 6.4
+sequence docs/README.md section 6.5
 documents: list this install's known-good config snapshots for <service> and
 apply one -- the given [snapshot-id], or the newest after an explicit
 confirmation if omitted -- via that service's own real validate/apply/persist

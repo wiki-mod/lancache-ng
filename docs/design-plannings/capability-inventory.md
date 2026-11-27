@@ -183,7 +183,8 @@ Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/
   (settings, Kea config, own zones) after every change; REST
   `/api/stack/snapshots[/save|/restore]` and CLI `lancache-ng system snapshot
   list|save|restore <id>` list, keep and give back one state, with a backup
-  of the current state first.
+  of the current state first. `setup.sh reset-to-last-known-good-config
+  stack` runs the same CLI in the ui container.
 - **Config rendering.** `render::all` renders every config from the SOT and the
   settings into the `lancache-config` volume; `apply::owner_effects` and `apply::run` reload
   or restart only the owners with changes, through `docker::Api`. A reload runs

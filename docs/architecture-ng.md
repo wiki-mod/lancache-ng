@@ -79,6 +79,12 @@ Healthchecks:
    action (reload or restart, `apply::owner_effects`).
 4. The owner containers mount `lancache-config` read-only and start their
    programs with the SOT config paths.
+5. After a successful change the ui keeps the new stack state: the storable
+   settings, the Kea config and the own zones (`stack::state_after`).
+   `lancache-ng system snapshot restore <id>` (REST
+   `UI_ROUTE_STACK_SNAPSHOT_RESTORE`) and `setup.sh
+   reset-to-last-known-good-config stack` give an earlier state back as a
+   whole.
 
 The ui also renders once at start, because the volume starts empty.
 nginx templates come from `services/ui/nginx` in the checkout (mounted into
