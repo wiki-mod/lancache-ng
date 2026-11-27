@@ -2367,12 +2367,12 @@ mod config {
     // What: env key of the baked default rows.
     // Why: the SOT bakes defaults into each image.
     // From: Issue #1683 | PR #1980
-    pub const DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
+    const DEFAULTS_KEY: &str = "LANCACHE_RUNTIME_DEFAULTS";
 
     // What: env key of the baked schema rows.
     // Why: kind, range, effect and owner per key.
     // From: Issue #1683 | PR #1980
-    pub const SCHEMA_KEY: &str = "LANCACHE_RUNTIME_SCHEMA";
+    const SCHEMA_KEY: &str = "LANCACHE_RUNTIME_SCHEMA";
 
     // What: env name of the saved settings file.
     // Why: needed before any setting can be read.
@@ -2842,7 +2842,7 @@ mod config {
     // What: the values of stack .env; "$" values left out.
     // Why: setup.sh keeps ${VAR} that only Compose expands.
     // From: Issue #1683 | PR #2017
-    pub fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    fn read_file(path: &Path) -> Result<BTreeMap<String, String>, String> {
         let mut all = read_raw(path)?;
         // What: a key of <file>.local replaces file's one.
         // Why: Compose reads it as the second env file.
@@ -2855,14 +2855,14 @@ mod config {
     // What: override file of the stack .env: <file>.local.
     // Why: it wins for single keys, as fail2ban's .local.
     // From: Issue #1683 | PR #2017
-    pub fn override_path(path: &Path) -> PathBuf {
+    fn override_path(path: &Path) -> PathBuf {
         crate::shared::fs::with_suffix(path, ".local")
     }
 
     // What: lock file of the stack .env: <file>.lock.
     // Why: setup.sh flocks the same name before it writes.
     // From: Issue #1683 | PR #2017
-    pub fn lock_path(path: &Path) -> PathBuf {
+    fn lock_path(path: &Path) -> PathBuf {
         crate::shared::fs::with_suffix(path, ".lock")
     }
 
@@ -3122,7 +3122,7 @@ mod config {
         // What: all schema rows in key order.
         // Why: the setup page lists every setting.
         // From: Issue #1683 | PR #1980
-        pub fn specs(&self) -> impl Iterator<Item = &Spec> {
+        fn specs(&self) -> impl Iterator<Item = &Spec> {
             self.specs.values()
         }
 
