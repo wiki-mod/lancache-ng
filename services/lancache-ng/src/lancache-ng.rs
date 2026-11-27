@@ -5565,7 +5565,7 @@ mod dns {
             && https != s.text("IP_HTTP")?
             && !crate::shared::dns::is_loopback(&https);
         // What: no HTTPS part while HTTPS is off.
-        // Why: the field woke HTTPS that was off.
+        // Why: IP_HTTPS must not wake HTTPS that is off.
         // From: Issue #1683 | PR #1980
         let own = own && s.flag("HTTPS_ENABLED")?;
         Ok(if own { https } else { String::new() })
@@ -12958,8 +12958,8 @@ end
     // Why: ui and dns tasks end alike on a missing value.
     // From: Issue #1683 | PR #2020
     pub mod task {
-        // What: a setting a background task cannot run without.
-        // Why: the task ends with a log line, no made-up value.
+        // What: a setting a task cannot run without.
+        // Why: the task ends with a log line, no guess.
         // From: Issue #1683 | PR #2017
         pub fn or_stop<T>(task: &str, value: Result<T, String>) -> Option<T> {
             value
@@ -15741,7 +15741,7 @@ mod ui {
         ctx.insert("option_code_min", &1);
         ctx.insert("option_code_max", &(u8::MAX - 1));
         // What: a Kea error is logged and kept as hint.
-        // Why: empty lists alone hid a dead Kea.
+        // Why: empty lists alone would hide a dead Kea.
         // From: Issue #1683 | PR #2020
         let state = match kea_state(&s).await {
             Ok(v) => v.unwrap_or_else(|| json!({})),
