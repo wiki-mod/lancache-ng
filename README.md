@@ -240,7 +240,7 @@ You need:
 - enough disk space for the cache
 - port `53` free for DNS
 - port `80` free for HTTP cache traffic
-- port `443` free on both LAN IPs
+- port `443` free on the cache server IP, and on the second LAN IP in HTTPS mode
 - port `5300` free on the HTTP IP (zone transfer to secondary DNS nodes of older versions)
 - port `8080` for the Admin UI
 - a second LAN IP, only for HTTPS mode (HTTPS mode answers on it)
@@ -965,8 +965,8 @@ cached there, for clients with the CA certificate installed.
 
 | Port | Protocol | Used for |
 |---|---|---|
-| `53` | TCP and UDP | DNS (both LAN IPs); dnsdist also passes zone transfer and NOTIFY to the authoritative server |
-| `80` | TCP | HTTP cache (both LAN IPs) |
+| `53` | TCP and UDP | DNS (cache server IP, and the second LAN IP in HTTPS mode); dnsdist also passes zone transfer and NOTIFY to the authoritative server |
+| `80` | TCP | HTTP cache (cache server IP, and the second LAN IP in HTTPS mode) |
 | `443` | TCP | TLS passthrough on the HTTP IP, HTTPS mode cache on the HTTPS IP |
 | `5300` | TCP and UDP | zone transfer to secondary DNS nodes of older versions (HTTP IP); a new secondary uses `53` |
 | `8080` | TCP | Admin UI |
