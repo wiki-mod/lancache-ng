@@ -1789,6 +1789,11 @@ runtime:
     # Why: syslog-ng drops every line without a size.
     # From: Issue #1683 | PR #2020
     - SYSLOG_BUFFER_BYTES=1073741824
+    # What: control socket of syslog-ng and its read wait.
+    # Why: the watchdog asks it for the processed count.
+    # From: Issue #1683 | PR #2020
+    - SYSLOG_CTL_SOCKET=/run/syslog-ng.ctl
+    - SYSLOG_CTL_TIMEOUT=5
     # What: syslog buffer, forward, form, mute, primary.
     # Why: the syslog render writes them.
     # From: Issue #1683 | PR #2020
@@ -2192,6 +2197,8 @@ runtime:
     - STEAM_QR_SIZE=uint;100;1000;live;services
     - SYSLOG_BUFFER_BYTES=uint;1048576;1099511627776;restart;services
     - SYSLOG_BUFFER_DIR=path;;;fixed;services
+    - SYSLOG_CTL_SOCKET=path;;;fixed;services
+    - SYSLOG_CTL_TIMEOUT=uint;1;60;live;services
     - SYSLOG_FORWARD=list?;;;restart;services
     - SYSLOG_LINE_TEMPLATE=text;;;restart;services
     - SYSLOG_LOG_ROOT=path;;;container;services

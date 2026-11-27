@@ -16085,12 +16085,38 @@ end
             (all.iter().map(|f| f.mtime).max().unwrap_or(0), errs)
         }
 
+        // What: STATS CSV answer of the syslog-ng socket.
+        // Why: the socket answers it, no syslog-ng-ctl.
+        // From: Issue #1683 | PR #2020
+        fn syslog_stats(s: &crate::config::Settings) -> Result<String, String> {
+            use std::io::{BufRead, BufReader, Write};
+            let path = s.text("SYSLOG_CTL_SOCKET")?;
+            let wait = std::time::Duration::from_secs(s.uint("SYSLOG_CTL_TIMEOUT")?);
+            let err = |e: std::io::Error| format!("{path}: {e}");
+            let sock = std::os::unix::net::UnixStream::connect(&path).map_err(err)?;
+            sock.set_read_timeout(Some(wait)).map_err(err)?;
+            sock.set_write_timeout(Some(wait)).map_err(err)?;
+            (&sock).write_all(b"STATS CSV\n").map_err(err)?;
+            // What: the answer ends with a line of one dot.
+            // Why: the syslog-ng control protocol says so.
+            // From: Issue #1683 | PR #2020
+            let mut text = String::new();
+            for line in BufReader::new(&sock).lines() {
+                let line = line.map_err(err)?;
+                if line == "." {
+                    return Ok(text);
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+            Err(format!("{path}: the answer has no end"))
+        }
+
         // What: processed count of syslog-ng file outputs.
-        // Why: syslog-ng-ctl stats lists the store rows.
+        // Why: the control socket lists the store rows.
         // From: Issue #1683 | PR #1980
-        pub fn syslog_processed() -> Result<u64, String> {
-            let out = crate::shared::tool::run(Command::new("syslog-ng-ctl").arg("stats"))?;
-            let text = String::from_utf8_lossy(&out);
+        pub fn syslog_processed(s: &crate::config::Settings) -> Result<u64, String> {
+            let text = syslog_stats(s)?;
             let mut total = 0;
             for row in text.lines() {
                 let cols: Vec<&str> = row.split(';').collect();
@@ -20903,7 +20929,7 @@ mod watchdog {
                 Fault::key("alarm_logs_unread", [("files", unread.join("; "))]),
             );
         }
-        let count = tidy::syslog_processed()?;
+        let count = tidy::syslog_processed(s)?;
         if let Some((was_count, was_newest)) = m.log_counter
             && count > was_count
             && newest == was_newest
