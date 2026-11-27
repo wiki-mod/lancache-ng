@@ -6338,12 +6338,18 @@ mod shared {
         }
     }
 
+    // What: a text error becomes a plain failure.
+    // Why: ? keeps working on the String errors.
+    // From: Issue #1683 | PR #2020
     impl From<String> for Fault {
         fn from(text: String) -> Self {
             Self::Plain(text)
         }
     }
 
+    // What: a text slice becomes a plain failure.
+    // Why: ok_or("text")? works in these functions.
+    // From: Issue #1683 | PR #2020
     impl From<&str> for Fault {
         fn from(text: &str) -> Self {
             Self::Plain(text.to_string())
@@ -7164,8 +7170,8 @@ mod shared {
         }
     }
 
-    // What: HTTP client, probe and drain.
-    // Why: every crate uses the same timeouts from the SOT.
+    // What: HTTP client, probe, drain and ui socket.
+    // Why: every role uses the same timeouts from the SOT.
     // From: Issue #1683 | PR #1980
     pub mod http {
         use crate::config::Settings;
@@ -9818,7 +9824,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     }
 
     // What: net-snmp snmpd.conf.
-    // Why: statistics, alarms come from SNMP, not Netdata.
+    // Why: statistics and alarms read SNMP values.
     // From: Issue #1683 | PR #1980
     pub mod snmp {
         use crate::config::Settings;
@@ -10537,8 +10543,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Ok(out)
         }
     }
-    // What: compare a secondary's loaded serials to ours.
-    // Why: ui status and watchdog alarm use one owner.
+
+    // What: PowerDNS peers: API clients, zone sync, flush.
+    // Why: ui, dns helper and watchdog share one owner.
     // From: Issue #1683 | PR #2019
     pub mod peer {
         use crate::config::Settings;
@@ -10612,8 +10619,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // From: Issue #1683 | PR #2017
         pub fn zone_state(z: &PeerZone) -> ZoneState {
             use std::cmp::Ordering;
-            // What: let-else instead of None in a tuple.
-            // Why: CodeQL read that None as unused.
+            // What: no primary serial is the state Error.
+            // Why: CodeQL read a None in a tuple as unused.
             // From: Issue #1683
             let Some(p) = z.primary else {
                 return ZoneState::Error;
@@ -11860,7 +11867,7 @@ end
         }
 
         // What: kea-ctrl-agent.conf with basic-auth login.
-        // Why: threat model G2: port was open to the LAN.
+        // Why: threat model G2: the LAN port needs a login.
         // From: Issue #1683 | PR #1985
         pub fn ctrl_agent(s: &Settings, token: &str) -> Result<Value, String> {
             Ok(json!({"Control-agent": {
@@ -14156,7 +14163,7 @@ end
     }
 
     // What: statistics: SNMP samples into RRD files.
-    // Why: replaces Netdata with native rrdtool.
+    // Why: rrdtool keeps the graphs; no extra daemon.
     // From: Issue #1683 | PR #1980
     pub mod rrd {
         use crate::config::Settings;
@@ -19394,7 +19401,7 @@ mod ui {
 }
 
 // What: watchdog: decides when to check and tidy.
-// Why: shared.rs holds the how; it renders no config.
+// Why: the shared modules hold the how; no config here.
 // From: Issue #1683 | PR #2020
 mod watchdog {
     use crate::config::Settings;
@@ -20173,11 +20180,11 @@ mod watchdog {
     }
 }
 
+// What: lancache-<role> as program name picks the role.
+// Why: old callers run lancache-ui/-dns/... unchanged.
+// From: Issue #1683 | PR #2020
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    // What: lancache-<role> as program name picks the role.
-    // Why: old callers run lancache-ui/-dns/... unchanged.
-    // From: Issue #1683 | PR #2020
     let exe = std::env::args().next().unwrap_or_default();
     let exe = std::path::Path::new(&exe)
         .file_name()
