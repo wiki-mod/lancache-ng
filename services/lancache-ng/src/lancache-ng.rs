@@ -4774,14 +4774,10 @@ mod dns {
             gone = rrset_contents(&api, &zone, &name, "A").await?;
             gone.retain(|ip| !contents.contains(ip));
         }
-        api.set_rrset(&zone, &name, &kind, ttl, &contents).await?;
-        snapshot(s, &api, &zone).await?;
-        peer::flush_zone(s, &zone).await?;
+        write_rrset(s, &api, &zone, (&name, &kind), ttl, &contents).await?;
         for (rev, rz) in &places {
-            api.set_rrset(rz, rev, "PTR", ttl, std::slice::from_ref(&host))
-                .await?;
-            snapshot(s, &api, rz).await?;
-            peer::flush_zone(s, rz).await?;
+            let one = std::slice::from_ref(&host);
+            write_rrset(s, &api, rz, (rev, "PTR"), ttl, one).await?;
         }
         for ip in &gone {
             let Some((rev, rz)) = served_reverse_place(s, ip)? else {
@@ -4791,12 +4787,26 @@ mod dns {
             // Why: a PTR to another name: not ours to drop
             // From: Issue #1683 | PR #2019
             if rrset_contents(&api, &rz, &rev, "PTR").await? == [host.clone()] {
-                api.set_rrset(&rz, &rev, "PTR", 0, &[]).await?;
-                snapshot(s, &api, &rz).await?;
-                peer::flush_zone(s, &rz).await?;
+                write_rrset(s, &api, &rz, (&rev, "PTR"), 0, &[]).await?;
             }
         }
         Ok(())
+    }
+
+    // What: write one rrset, snapshot the zone, flush caches.
+    // Why: every LAN record change ends with these steps.
+    // From: Issue #1683 | PR #2020
+    async fn write_rrset(
+        s: &Settings,
+        api: &crate::shared::pdns::Api,
+        zone: &str,
+        (name, kind): (&str, &str),
+        ttl: u32,
+        contents: &[String],
+    ) -> Result<(), String> {
+        api.set_rrset(zone, name, kind, ttl, contents).await?;
+        snapshot(s, api, zone).await?;
+        peer::flush_zone(s, zone).await
     }
 
     // What: the contents of one record set; none: empty.
@@ -4864,9 +4874,7 @@ mod dns {
             contents.push(crate::shared::pdns::zone_id(&input.hostname));
         }
         let api = peer::own_api(s)?;
-        api.set_rrset(&zone, &name, "PTR", ttl, &contents).await?;
-        snapshot(s, &api, &zone).await?;
-        peer::flush_zone(s, &zone).await
+        write_rrset(s, &api, &zone, (&name, "PTR"), ttl, &contents).await
     }
 
     // What: saves secondaries as name@address rows.
