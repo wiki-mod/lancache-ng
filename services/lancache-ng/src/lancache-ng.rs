@@ -3852,7 +3852,7 @@ mod dns {
     use crate::shared::tool;
     use crate::shared::{apply, fs, pdns, recursor_conf, render, secret};
     use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
-    use crate::ui::{primary_https_ip, tr};
+    use crate::ui::tr;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::net::{IpAddr, SocketAddr};
@@ -5554,6 +5554,21 @@ mod dns {
             moved.len()
         );
         Ok(())
+    }
+
+    // What: HTTPS IP when HTTPS runs on its own LAN IP.
+    // Why: one rule for the DNS page and the ns2 record.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn primary_https_ip(s: &Settings) -> Result<String, String> {
+        let https = s.text_or_empty("IP_HTTPS");
+        let own = !https.is_empty()
+            && https != s.text("IP_HTTP")?
+            && !crate::shared::dns::is_loopback(&https);
+        // What: no HTTPS part while HTTPS is off.
+        // Why: the field woke HTTPS that was off.
+        // From: Issue #1683 | PR #1980
+        let own = own && s.flag("HTTPS_ENABLED")?;
+        Ok(if own { https } else { String::new() })
     }
 
     // What: NS and A record for the SOA's nameserver.
@@ -14499,8 +14514,8 @@ mod ui {
     use crate::dns::{
         LanDomainEdit, answers_aa, drop_old_zones, drop_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
-        ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
-        snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
+        primary_https_ip, ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch,
+        snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
@@ -16581,21 +16596,6 @@ mod ui {
         let report = issue_and_reload(&app, &s).await?;
         let v = json!({"renewed": dropped, "report": report, "certs": render::cert_list(&s)?});
         Ok(axum::Json(v).into_response())
-    }
-
-    // What: HTTPS IP when HTTPS runs on its own LAN IP.
-    // Why: one rule for the DNS page and the ns2 record.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn primary_https_ip(s: &Settings) -> Result<String, String> {
-        let https = s.text_or_empty("IP_HTTPS");
-        let own = !https.is_empty()
-            && https != s.text("IP_HTTP")?
-            && !crate::shared::dns::is_loopback(&https);
-        // What: no HTTPS part while HTTPS is off.
-        // Why: the field woke HTTPS that was off.
-        // From: Issue #1683 | PR #1980
-        let own = own && s.flag("HTTPS_ENABLED")?;
-        Ok(if own { https } else { String::new() })
     }
 
     // What: seconds as "4 h", "90 min" or "45 s".
