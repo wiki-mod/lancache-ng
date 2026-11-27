@@ -1578,6 +1578,12 @@ runtime:
     - UI_FRAME_OPTIONS=DENY
     - UI_HSTS=max-age=31536000; includeSubDomains
     - UI_REFERRER_POLICY=no-referrer
+    # What: cookie and header names of the ui session.
+    # Why: Rust and the page script read one name each.
+    # From: Issue #1683 | PR #2020
+    - UI_CSRF_HEADER=x-csrf-token
+    - UI_LANG_COOKIE=lc_lang
+    - UI_SESSION_COOKIE=lancache_session
     # What: file holding the DHCP mode for the dhcp start.
     # Why: the ui writes it; dhcp start_pre reads it.
     # From: Issue #1683 | PR #2020
@@ -2071,6 +2077,9 @@ runtime:
     - UI_FRAME_OPTIONS=text;;;live;ui
     - UI_HSTS=text;;;live;ui
     - UI_REFERRER_POLICY=text;;;live;ui
+    - UI_CSRF_HEADER=text;;;live;ui
+    - UI_LANG_COOKIE=text;;;live;ui
+    - UI_SESSION_COOKIE=text;;;live;ui
     - DHCP_MODE_FILE=path;;;container;dhcp
     - RELOAD_EXEC=list;;;live;ui
     - SNMPD_RELOAD_EXEC=list;;;live;ui

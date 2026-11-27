@@ -14856,11 +14856,6 @@ mod ui {
         Ok(Box::leak(body.into_boxed_slice()))
     }
 
-    // What: cookie of the language the user picked.
-    // Why: the selector sets it; the ui reads it.
-    // From: Issue #1683 | PR #1980
-    pub(crate) const LANG_COOKIE: &str = "lc_lang";
-
     // What: texts per language: code, key, text.
     // Why: page() picks one map per request.
     // From: Issue #1683 | PR #1980
@@ -14899,20 +14894,10 @@ mod ui {
         static LANG: String;
     }
 
-    // What: session cookie name.
-    // Why: the CSRF token is derived from it.
-    // From: Issue #1683 | PR #1980
-    pub(crate) const COOKIE: &str = "lancache_session";
-
     // What: form field that carries the CSRF token.
     // Why: templates and handlers share one name.
     // From: Issue #1683 | PR #1980
     pub(crate) const CSRF_FIELD: &str = "csrf_token";
-
-    // What: request header that carries the CSRF token.
-    // Why: script calls and the token route name it once.
-    // From: Issue #1683 | PR #2020
-    pub(crate) const CSRF_HEADER: &str = "x-csrf-token";
 
     // What: a form field without blanks; empty if missing.
     // Why: one reader for every form handler.
@@ -15061,24 +15046,24 @@ mod ui {
     // Why: a foreign site cannot read the cookie.
     // From: Issue #1683 | PR #1980
     #[derive(Clone)]
-    pub(crate) struct Csrf(String, bool);
+    pub(crate) struct Csrf(String, bool, String);
 
     impl Csrf {
         // What: token: SHA-256 of key and session.
         // Why: each session has its own form token.
         // From: Issue #1683 | PR #1980
-        fn from_session(key: &[u8; 32], session: &str) -> Self {
+        fn from_session(key: &[u8; 32], session: &str, header: &str) -> Self {
             let mut h = Sha256::new();
             h.update(key);
             h.update(session.as_bytes());
-            Csrf(hex::encode(h.finalize()), false)
+            Csrf(hex::encode(h.finalize()), false, header.to_string())
         }
 
         // What: the CLI socket: every check passes.
         // Why: no browser reaches it; file mode guards it.
         // From: Issue #1683 | PR #2020
-        fn local() -> Self {
-            Csrf(String::new(), true)
+        fn local(header: &str) -> Self {
+            Csrf(String::new(), true, header.to_string())
         }
 
         // What: compares a given token in constant time.
@@ -15106,7 +15091,7 @@ mod ui {
         // Why: JSON calls send the token as a header.
         // From: Issue #1683 | PR #1980
         fn check_header(&self, headers: &HeaderMap) -> Result<(), Fail> {
-            let given = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok());
+            let given = headers.get(self.2.as_str()).and_then(|v| v.to_str().ok());
             match given.or(self.1.then_some("")) {
                 Some(t) if self.matches(t) => Ok(()),
                 _ => Err(Fail(StatusCode::FORBIDDEN, tr("err_csrf"))),
@@ -15117,8 +15102,8 @@ mod ui {
     // What: session id from the Cookie header.
     // Why: browsers may send several Cookie headers.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<String> {
-        cookie(headers, COOKIE)
+    pub(crate) fn session_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+        cookie(headers, name)
     }
 
     // What: one cookie value by name.
@@ -15185,10 +15170,13 @@ mod ui {
             let realm = [(header::WWW_AUTHENTICATE, "Basic realm=\"LanCache Admin\"")];
             return (StatusCode::UNAUTHORIZED, realm, "Unauthorized").into_response();
         }
-        let known = session_cookie(req.headers());
+        let (Ok(name), Ok(header)) = (s.text("UI_SESSION_COOKIE"), s.text("UI_CSRF_HEADER")) else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "session names missing").into_response();
+        };
+        let known = session_cookie(req.headers(), &name);
         let session = known.clone().unwrap_or_else(|| secret::random_hex(32));
         req.extensions_mut()
-            .insert(Csrf::from_session(&app.session_key, &session));
+            .insert(Csrf::from_session(&app.session_key, &session, &header));
         let mut res = next.run(req).await;
         if known.is_none() {
             // What: cookie lives UI_SESSION_TTL_SECONDS.
@@ -15198,7 +15186,7 @@ mod ui {
                 .uint("UI_SESSION_TTL_SECONDS")
                 .and_then(|t| s.uint("UI_SESSION_TTL_MAX_SECONDS").map(|m| t.min(m)));
             let age = ttl.map(|t| format!("; Max-Age={t}")).unwrap_or_default();
-            let v = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/{age}");
+            let v = format!("{name}={session}; HttpOnly; SameSite=Strict; Path=/{age}");
             if let Ok(v) = v.parse() {
                 res.headers_mut().append(header::SET_COOKIE, v);
             }
@@ -17391,7 +17379,11 @@ mod ui {
     // From: Issue #1683 | PR #1980
     pub(crate) fn pick_lang(app: &Stack, headers: &HeaderMap) -> String {
         let known = |c: &str| all_texts().contains_key(c);
-        if let Some(c) = cookie(headers, LANG_COOKIE).filter(|c| known(c)) {
+        let picked = app.settings().text("UI_LANG_COOKIE").ok();
+        if let Some(c) = picked
+            .and_then(|name| cookie(headers, &name))
+            .filter(|c| known(c))
+        {
             return c;
         }
         let accept = headers
@@ -17788,7 +17780,7 @@ mod ui {
     // Why: a script posts it like the page forms do.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn csrf_api(Extension(csrf): Extension<Csrf>) -> Response {
-        let v = json!({"token": csrf.0, "header": CSRF_HEADER, "field": CSRF_FIELD});
+        let v = json!({"token": csrf.0, "header": csrf.2, "field": CSRF_FIELD});
         axum::Json(v).into_response()
     }
 
@@ -17851,8 +17843,9 @@ mod ui {
     // From: Issue #1683 | PR #2020
     fn socket_router(app: Arc<App>) -> Result<Router, String> {
         let s = app.settings();
+        let header = s.text("UI_CSRF_HEADER")?;
         Ok(routes_of(&s, &mut table(&s)?, &[Access::Api])?
-            .layer(Extension(Csrf::local()))
+            .layer(Extension(Csrf::local(&header)))
             .layer(axum::extract::DefaultBodyLimit::max(
                 s.num::<usize>("UI_REQUEST_BODY_MAX_BYTES")?,
             ))

@@ -915,15 +915,17 @@
 
   <script>
     // What: CSRF token for the fetch()-based POSTs below
-    // Why: sent as X-CSRF-Token header, not a form field
+    // Why: sent as a SOT-named header, not a form field
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
+    const CSRF_HEADER = "{{ v.UI_CSRF_HEADER }}";
+    const LANG_COOKIE = "{{ v.UI_LANG_COOKIE }}";
 
     // What: POST with the CSRF header; data goes as JSON
     // Why: every page action sends the same request
     // From: Issue #1683 | PR #2019
     function csrfPost(url, data) {
-      const init = { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } };
+      const init = { method: 'POST', headers: { [CSRF_HEADER]: CSRF_TOKEN } };
       if (data !== undefined) {
         init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(data);
@@ -1257,7 +1259,7 @@
         b.addEventListener('click', function () {
           if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_wipe_sure; return; }
           b.disabled = true; b.textContent = LC_T.loading;
-          fetch(b.dataset.cacheWipe, { method: 'POST', headers: { 'X-CSRF-Token': b.dataset.csrf } })
+          fetch(b.dataset.cacheWipe, { method: 'POST', headers: { [CSRF_HEADER]: b.dataset.csrf } })
             .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
             .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', v.freed_human); })
             .catch(function (e) { window.LancacheUi.fail(e); })
@@ -1324,7 +1326,7 @@
   <script>
     (function () {
       const choose = function (code) {
-        document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
+        document.cookie = LANG_COOKIE + '=' + code + '; path=/; max-age=31536000; samesite=strict';
         location.reload();
       };
       const pick = document.getElementById('lang-select');
