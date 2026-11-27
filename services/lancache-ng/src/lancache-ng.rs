@@ -8503,9 +8503,9 @@ mod shared {
             let ext = crt.with_extension("ext");
             let san: Vec<String> = sans
                 .iter()
-                .map(|n| match n.parse::<std::net::IpAddr>() {
-                    Ok(_) => format!("IP:{n}"),
-                    Err(_) => format!("DNS:{n}"),
+                .map(|n| match crate::shared::dns::is_ip(n) {
+                    true => format!("IP:{n}"),
+                    false => format!("DNS:{n}"),
                 })
                 .collect();
             let mut body = String::from("extendedKeyUsage=serverAuth\n");
@@ -8548,17 +8548,16 @@ mod shared {
                     &arg(&ext),
                 ])
             });
-            for tmp in [&csr, &ext] {
-                if let Err(e) = crate::shared::fs::remove_if_present(tmp) {
-                    eprintln!("cert: {} left behind: {e}", tmp.display());
-                }
-            }
             // What: a failed sign leaves no half key pair.
             // Why: a lone key would stop the next attempt.
             // From: Issue #1683 | PR #1980
+            let mut gone = vec![csr.as_path(), ext.as_path()];
             if signed.is_err() {
-                for f in [key, crt] {
-                    let _ = std::fs::remove_file(f);
+                gone.extend([key, crt]);
+            }
+            for f in gone {
+                if let Err(e) = crate::shared::fs::remove_if_present(f) {
+                    eprintln!("cert: {} left behind: {e}", f.display());
                 }
             }
             signed.map(drop)
