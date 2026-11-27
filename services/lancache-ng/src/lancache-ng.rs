@@ -14172,18 +14172,13 @@ mod stack {
         // What: one more try for owners that got a 409.
         // Why: compose may recreate a container meanwhile.
         // From: Issue #1683 | PR #1980
-        if results
-            .iter()
-            .any(|(_, r)| matches!(r, apply::Outcome::Failed(docker::Error::Status(409))))
-        {
+        let conflict =
+            |r: &apply::Outcome| matches!(r, apply::Outcome::Failed(docker::Error::Status(409)));
+        if results.iter().any(|(_, r)| conflict(r)) {
             tokio::time::sleep(limit).await;
             let again: BTreeMap<_, _> = plan
                 .iter()
-                .filter(|(o, _)| {
-                    results.iter().any(|(x, r)| {
-                        x == *o && matches!(r, apply::Outcome::Failed(docker::Error::Status(409)))
-                    })
-                })
+                .filter(|(o, _)| results.iter().any(|(x, r)| x == *o && conflict(r)))
                 .map(|(o, e)| (o.clone(), *e))
                 .collect();
             let retried = apply::run(&app.docker, &again, &rx, &lookup, grace, limit).await;
