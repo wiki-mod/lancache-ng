@@ -263,7 +263,7 @@ mod cachehamster {
     // Why: use what the machine offers, skip the rest.
     // From: Issue #871
     fn feature(path: &str) -> Option<Vec<u8>> {
-        let raw = std::fs::read(path).ok()?;
+        let raw = crate::shared::fs::read_bytes(Path::new(path)).ok()?;
         let text = String::from_utf8_lossy(&raw).trim().to_string();
         (!text.is_empty()).then(|| text.into_bytes())
     }
@@ -6022,6 +6022,20 @@ mod shared {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
             }
+        }
+
+        // What: a file as text; the error names the path.
+        // Why: one reader of a file that must be there.
+        // From: Issue #1683 | PR #2020
+        pub fn read_text(path: &Path) -> Result<String, String> {
+            fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+        }
+
+        // What: a file as bytes; the error names the path.
+        // Why: one reader of a file that must be there.
+        // From: Issue #1683 | PR #2020
+        pub fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
+            fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
         }
 
         // What: a JSON file as T, or None if it is absent.
@@ -11897,13 +11911,6 @@ end
             }
         }
 
-        // What: reads a file; the error names the path.
-        // Why: an io error alone names no file.
-        // From: Issue #1683 | PR #1980
-        fn read(path: &PathBuf) -> Result<String, String> {
-            std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
-        }
-
         // What: the hosts of a cache domain list.
         // Why: nginx files and certificates need same set.
         // From: Issue #1683 | PR #2017
@@ -11945,7 +11952,7 @@ end
         // From: Issue #1683 | PR #2019
         pub fn psl(s: &Settings) -> Result<nginx_conf::Psl, String> {
             let dir = PathBuf::from(s.text("NGINX_TEMPLATE_DIR")?);
-            let text = read(&dir.join(s.text("NGINX_PSL_FILE")?))?;
+            let text = crate::shared::fs::read_text(&dir.join(s.text("NGINX_PSL_FILE")?))?;
             Ok(nginx_conf::Psl::parse(&text))
         }
 
@@ -11974,7 +11981,8 @@ end
                 if !https && name.ends_with("https.conf") {
                     continue;
                 }
-                let body = nginx_conf::template(&read(&src.join(&name))?, s)?;
+                let body =
+                    nginx_conf::template(&crate::shared::fs::read_text(&src.join(&name))?, s)?;
                 o.add_path(&proxy, dst.join(&name), body);
             }
             for (rel, body) in nginx_conf::files(s, &hosts, https)? {
@@ -12778,7 +12786,7 @@ end
         // From: Issue #1683 | PR #1980
         pub fn defaults(s: &Settings) -> Result<Vec<String>, String> {
             let path = s.text("CDN_DEFAULT_DOMAINS_FILE")?;
-            let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+            let text = crate::shared::fs::read_text(std::path::Path::new(&path))?;
             Ok(crate::config::data_rows(&text)
                 .map(str::to_ascii_lowercase)
                 .collect())
@@ -13691,7 +13699,7 @@ end
         // Why: a missing or future stamp means due.
         // From: Issue #1683 | PR #1980
         pub fn is_due(stamp: &Path, now: u64) -> bool {
-            let last = std::fs::read_to_string(stamp)
+            let last = crate::shared::fs::read_text(stamp)
                 .ok()
                 .and_then(|t| t.trim().parse::<u64>().ok())
                 .filter(|t| *t <= now)
@@ -14576,7 +14584,7 @@ mod ui {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let body = std::fs::read_to_string(&path).map_err(err)?;
+            let body = fs::read_text(&path)?;
             out.push((name.to_string(), body));
         }
         if out.is_empty() {
@@ -14591,7 +14599,7 @@ mod ui {
     // From: Issue #1683 | PR #1991
     pub(crate) fn static_file(dir: &str, name: &str) -> Result<&'static [u8], String> {
         let path = std::path::Path::new(dir).join(name);
-        let body = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let body = fs::read_bytes(&path)?;
         Ok(Box::leak(body.into_boxed_slice()))
     }
 
@@ -16145,7 +16153,7 @@ mod ui {
         // From: Issue #1683 | PR #1980
         if has("host")
             && let Ok(file) = s.text("HOST_NET_DEV_FILE")
-            && let Ok(text) = std::fs::read_to_string(&file)
+            && let Ok(text) = fs::read_text(Path::new(&file))
         {
             let skip = s.list("STATS_HOST_IF_SKIP");
             let (mut rx, mut tx) = (0u64, 0u64);
@@ -18214,7 +18222,7 @@ mod watchdog {
     // From: Issue #1683 | PR #1985
     fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
         let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join(s.text("CONNTRACK_STAT_FILE")?);
-        let Ok(stat) = std::fs::read_to_string(&path) else {
+        let Ok(stat) = fs::read_text(&path) else {
             return Ok(());
         };
         let used = stat
@@ -18224,8 +18232,7 @@ mod watchdog {
             .and_then(|h| u64::from_str_radix(h, 16).ok())
             .ok_or_else(|| format!("{}: no entries column", path.display()))?;
         let max_file = s.text("CONNTRACK_MAX_FILE")?;
-        let max: u64 = std::fs::read_to_string(&max_file)
-            .map_err(|e| format!("{max_file}: {e}"))?
+        let max: u64 = fs::read_text(Path::new(&max_file))?
             .trim()
             .parse()
             .map_err(|e| format!("{max_file}: {e}"))?;
