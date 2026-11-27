@@ -9807,10 +9807,18 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: records and zones live only in PowerDNS.
         // From: Issue #1683 | PR #2019
         pub fn own_api(s: &Settings) -> Result<crate::shared::pdns::Api, String> {
+            pdns_api(s, &s.text("PDNS_PRIMARY_API_URL")?)
+        }
+
+        // What: an auth pdns API client for one base URL.
+        // Why: every auth node shares the key and the client.
+        // From: Issue #1683 | PR #2020
+        fn pdns_api(s: &Settings, url: &str) -> Result<crate::shared::pdns::Api, String> {
+            let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
             Ok(crate::shared::pdns::Api::new(
                 crate::shared::http::client(s)?,
-                &s.text("PDNS_PRIMARY_API_URL")?,
-                &crate::shared::secret::get(s, "PDNS_API_KEY")?,
+                url,
+                &key,
             ))
         }
 
@@ -9820,12 +9828,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         pub fn api_at(s: &Settings, address: &str) -> Result<crate::shared::pdns::Api, String> {
             let host = crate::shared::dns::host_port(address, s.uint("PDNS_AUTH_API_PORT")?);
             let url = format!("http://{host}{}", s.text("PDNS_API_PATH")?);
-            let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
-            Ok(crate::shared::pdns::Api::new(
-                crate::shared::http::client(s)?,
-                &url,
-                &key,
-            ))
+            pdns_api(s, &url)
         }
 
         // What: state of one zone and the worst-of rule.
