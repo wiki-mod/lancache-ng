@@ -2959,17 +2959,10 @@ mod config {
         new
     }
 
-    // What: puts raw lines back as read_raw gave them.
-    // Why: a refused save restores even ${VAR} values.
-    // From: Issue #1683 | PR #2017
-    pub fn restore(path: &Path, values: &BTreeMap<String, String>) -> Result<(), String> {
-        write_lines(path, values)
-    }
-
     // What: sets KEY=VALUE lines in place under the lock.
     // Why: one file; comments, order and other keys stay.
     // From: Issue #1683 | PR #2017
-    fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), String> {
+    pub fn write_lines(path: &Path, updates: &BTreeMap<String, String>) -> Result<(), String> {
         let lock = lock_path(path);
         let held = std::fs::OpenOptions::new()
             .create(true)
@@ -14334,7 +14327,7 @@ mod stack {
                 .keys()
                 .map(|k| (k.clone(), before.get(k).cloned().unwrap_or_default()))
                 .collect();
-            config::restore(&path, &back)
+            config::write_lines(&path, &back)
                 .map_err(|w| format!("{e}; old values not restored: {w}"))?;
             return Err(e);
         }
