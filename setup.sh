@@ -2357,6 +2357,10 @@ migrate_dhcp_mode_for_update() {
 # From: Issue #1683 | PR #1858
 readonly LEGACY_STATE_ROOT="/srv/lancache"
 readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nats nats-conf)
+# What: the PowerDNS data folder name of 1.x installs
+# Why: legacy move and PDNS_DIR rename read one name
+# From: Issue #1683 | PR #2020
+readonly LEGACY_PDNS_SUBDIR=pdns-standard
 
 # What: the legacy path of state child $1, or the root
 # Why: one place joins root and child; pdns differs
@@ -2366,7 +2370,7 @@ legacy_state_path() {
     # What: old installs keep PowerDNS data in pdns-standard
     # Why: the move must find the data where 1.x wrote it
     # From: Issue #1683 | PR #1912
-    [[ "$child" != pdns ]] || child=pdns-standard
+    [[ "$child" != pdns ]] || child=$LEGACY_PDNS_SUBDIR
     if [[ -n "$child" ]]; then
         printf '%s/%s\n' "$LEGACY_STATE_ROOT" "$child"
     else
@@ -5245,8 +5249,8 @@ migrate_env_for_update() (
     # Why: moving the key must not move the zone data.
     # From: Issue #1683 | PR #1912
     pdns_default=$(prod_state_dir_for_key PDNS_DIR "" "$state_dir") || exit $?
-    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$pdns_default" ]]; then
-        set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
+    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/$LEGACY_PDNS_SUBDIR" && ! -d "$pdns_default" ]]; then
+        set_env_key PDNS_DIR "$state_dir/$LEGACY_PDNS_SUBDIR" "$env_file"
     fi
 
     # What: derives state dirs from the legacy root
