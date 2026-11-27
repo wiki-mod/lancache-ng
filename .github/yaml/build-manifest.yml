@@ -1997,6 +1997,7 @@ runtime:
     - IP_HTTP=text;;;recreate;proxy services
     - KEA_CTRL_ADDRESS=text;;;reload;dhcp
     - KEA_CTRL_PORT=uint;1;65535;reload;dhcp
+    - KEA_CTRL_TOKEN=secret?;;;reload;dhcp
     - DHCP_API_HOST=text;;;container;ui
     - KEA_DATA_DIR=path;;;container;dhcp
     - KEA_DDNS_ADDRESS=text;;;reload;dhcp
@@ -2061,6 +2062,7 @@ runtime:
     - PROXY_LOG_PROGRAM=text;;;live;ui
     - PROXY_SECURITY_MODE=choice;lazy,strict;;reload;proxy
     - RECURSOR_AAAA_LUA_FILE=path;;;restart;dns
+    - RECURSOR_API_KEY=secret?;;;restart;dns
     - RECURSOR_RUN_DIR=path;;;restart;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui

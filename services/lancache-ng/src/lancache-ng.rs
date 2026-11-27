@@ -6290,14 +6290,6 @@ mod shared {
             for path in files_in(&d)? {
                 out.push(read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?);
             }
-            for key in [
-                "PDNS_API_KEY",
-                "RECURSOR_API_KEY",
-                "KEA_CTRL_TOKEN",
-                "SNMP_COMMUNITY",
-            ] {
-                out.extend(crate::config::env_set(&crate::config::process_env, key));
-            }
             out.push(tsig_secret(s)?);
             out.retain(|v| v.len() >= 4);
             out.sort_by_key(|v| std::cmp::Reverse(v.len()));
