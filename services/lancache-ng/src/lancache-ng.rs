@@ -269,7 +269,7 @@ mod cachehamster {
     // Why: every state file and order is JSON.
     // From: Issue #871 | PR #2020
     fn json_bytes<T: Serialize + ?Sized>(v: &T) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(v).map_err(|e| e.to_string())
+        serde_json::to_vec_pretty(v).map_err(|e| e.to_string())
     }
 
     // What: replace a file by a private copy of body.
@@ -2186,8 +2186,7 @@ mod cachehamster {
     // Why: the daemon is the one writer; one format.
     // From: Issue #871 | PR #1980
     fn save_jobs(c: &Ctx, list: &[Job]) -> Result<(), String> {
-        let body = serde_json::to_vec_pretty(list).map_err(|e| e.to_string())?;
-        c.save(JOBS_FILE, &body)
+        c.save(JOBS_FILE, &json_bytes(list)?)
     }
 
     // What: u32, little endian, at a byte offset.
@@ -2838,9 +2837,21 @@ mod config {
     // Why: env, forms send true/false, 1/0, yes/no, on/off.
     // From: Issue #1683 | PR #1858
     pub fn parse_bool(raw: &str) -> Option<bool> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Some(true),
-            "false" | "0" | "no" | "off" => Some(false),
+        let word = raw.trim().to_ascii_lowercase();
+        parse_true_false(&word).or(match word.as_str() {
+            "1" | "yes" | "on" => Some(true),
+            "0" | "no" | "off" => Some(false),
+            _ => None,
+        })
+    }
+
+    // What: a bool from exactly true or false.
+    // Why: one reader of those two words, strict or not.
+    // From: Issue #1683 | PR #2020
+    pub fn parse_true_false(raw: &str) -> Option<bool> {
+        match raw {
+            "true" => Some(true),
+            "false" => Some(false),
             _ => None,
         }
     }
@@ -2960,13 +2971,9 @@ mod config {
             let key = &self.key;
             match &self.kind {
                 Kind::Text | Kind::Secret => Ok((Value::Text(raw.to_string()), None)),
-                Kind::Path => {
-                    if Path::new(raw).is_absolute() {
-                        Ok((Value::Text(raw.to_string()), None))
-                    } else {
-                        Err(format!("{key}: path {raw:?} is not absolute"))
-                    }
-                }
+                Kind::Path => checked(Syntax::Path, raw)
+                    .map(|v| (Value::Text(v.to_string()), None))
+                    .map_err(|e| format!("{key}: {e}")),
                 Kind::Bool => parse_bool(raw)
                     .map(|b| (Value::Bool(b), None))
                     .ok_or_else(|| format!("{key}: {raw:?} is no bool")),
@@ -3000,8 +3007,7 @@ mod config {
                         _ if items.len() <= 1 => Value::Text(items.concat()),
                         _ => return Err(format!("{key}: {raw:?} must be one value")),
                     };
-                    let same = value.to_string() == list_items(raw).collect::<Vec<_>>().join(" ");
-                    let note = (!same).then(|| format!("{key}: {raw:?} read as {value}"));
+                    let note = read_note(key, raw, &value.to_string());
                     Ok((value, note))
                 }
                 // What: hosts, addrs: read, not scanned.
@@ -3015,9 +3021,7 @@ mod config {
                                 .map_err(|e| format!("{key}: {e}"))
                         })
                         .collect::<Result<_, _>>()?;
-                    let same = items.join(" ") == list_items(raw).collect::<Vec<_>>().join(" ");
-                    let note =
-                        (!same).then(|| format!("{key}: {raw:?} read as {}", items.join(" ")));
+                    let note = read_note(key, raw, &items.join(" "));
                     Ok((Value::List(items), note))
                 }
                 Kind::Uint { min, max, clamp } => {
@@ -3037,6 +3041,14 @@ mod config {
                 }
             }
         }
+    }
+
+    // What: the note when a value is read as another.
+    // Why: one text for lists read in canonical form.
+    // From: Issue #1683 | PR #2020
+    fn read_note(key: &str, raw: &str, shown: &str) -> Option<String> {
+        let same = shown == list_items(raw).collect::<Vec<_>>().join(" ");
+        (!same).then(|| format!("{key}: {raw:?} read as {shown}"))
     }
 
     // What: non-empty rows of a baked list.
@@ -3289,7 +3301,11 @@ mod config {
             let body = crate::shared::fs::read_if_present(from)
                 .map_err(|e| format!("{}: {e}", from.display()))?
                 .unwrap_or_default();
-            std::fs::write(to, body).map_err(|e| format!("{}: {e}", to.display()))
+            let mode = crate::shared::fs::PRIVATE_MODE;
+            let place = crate::shared::fs::Place::Replace;
+            let owner = crate::shared::fs::Owner::default();
+            crate::shared::fs::write(to, &body, mode, place, owner)
+                .map_err(|e| format!("{}: {e}", to.display()))
         });
         let new = made
             .and_then(|()| write_lines(&copy, updates))
@@ -3640,7 +3656,7 @@ mod config {
                 // From: Issue #1683 | PR #2020
                 None => env_set(&process_env, key).ok_or_else(|| format!("{key} is not set"))?,
             };
-            raw.parse().map_err(|_| format!("{key} is no bool"))
+            parse_true_false(&raw).ok_or_else(|| format!("{key} is no bool"))
         }
 
         // What: value as a narrower number type.
@@ -10020,8 +10036,8 @@ mod shared {
             days: u64,
             key_type: &str,
         ) -> Result<(), String> {
-            let csr = crt.with_extension("csr");
-            let ext = crt.with_extension("ext");
+            let csr = crate::shared::fs::with_suffix(crt, ".csr");
+            let ext = crate::shared::fs::with_suffix(crt, ".ext");
             let san: Vec<String> = sans
                 .iter()
                 .map(|n| match crate::shared::dns::is_ip(n) {
@@ -10033,7 +10049,11 @@ mod shared {
             if !san.is_empty() {
                 body.push_str(&format!("subjectAltName={}\n", san.join(",")));
             }
-            std::fs::write(&ext, body).map_err(|e| format!("{}: {e}", ext.display()))?;
+            let mode = crate::shared::fs::PRIVATE_MODE;
+            let place = crate::shared::fs::Place::Replace;
+            let owner = crate::shared::fs::Owner::default();
+            crate::shared::fs::write(&ext, body.as_bytes(), mode, place, owner)
+                .map_err(|e| format!("{}: {e}", ext.display()))?;
             let request = openssl(&[
                 "req",
                 "-new",
@@ -11936,9 +11956,11 @@ end
         // Why: only this address sends proxy protocol.
         // From: Issue #1683 | PR #2017
         pub fn source(raw: &str, loopback: &str) -> Result<String, String> {
-            let ip: std::net::Ipv4Addr = raw
-                .parse()
-                .map_err(|_| format!("DNSDIST_SOURCE_ADDRESS={raw} is no IPv4 address"))?;
+            let no_v4 = || format!("DNSDIST_SOURCE_ADDRESS={raw} is no IPv4 address");
+            let ip = match crate::shared::dns::parse_ip(raw) {
+                Ok(std::net::IpAddr::V4(ip)) => ip,
+                _ => return Err(no_v4()),
+            };
             if !ip.is_loopback() {
                 return Err(format!(
                     "DNSDIST_SOURCE_ADDRESS={raw} is not in 127.0.0.0/8"
