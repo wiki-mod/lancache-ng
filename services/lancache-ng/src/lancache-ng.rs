@@ -14817,7 +14817,7 @@ mod stack {
             .iter()
             .any(|x| x == service)
         {
-            return Err(format!("{service} cannot be switched here"));
+            return Err(tr("err_service_not_switchable").replace("{service}", service));
         }
         commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)).await?;
         let (grace, limit) = app.limits(&s)?;
