@@ -834,6 +834,7 @@ runtime:
     - UI_ROUTE_PROXY_CERTS_RENEW=/api/proxy/certs/renew
     - UI_ROUTE_STACK_SNAPSHOTS=/api/stack/snapshots
     - UI_ROUTE_STACK_SNAPSHOT_SAVE=/api/stack/snapshots/save
+    - UI_ROUTE_STACK_SNAPSHOT_RESTORE=/api/stack/snapshots/restore
     - UI_ROUTE_WATCHDOG_CHECK=/api/watchdog/check
     - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn

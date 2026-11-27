@@ -3054,16 +3054,20 @@ mod config {
         }
     }
 
-    // What: checked values into the stack .env.
-    // Why: every ui change goes through one write path.
-    // From: Issue #1683 | PR #2017
-    pub fn store(
+    // What: checked sets and drops into the stack .env.
+    // Why: a save and a restore write through one path.
+    // From: Issue #1683 | PR #2020
+    pub fn store_edits(
         path: &Path,
         current: &Settings,
-        updates: &BTreeMap<String, String>,
+        edits: &BTreeMap<String, Option<String>>,
     ) -> Result<(), String> {
-        check_updates(path, current, updates)?;
-        write_lines(path, updates)
+        let set: BTreeMap<String, String> = edits
+            .iter()
+            .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
+            .collect();
+        check_updates(path, current, &set)?;
+        edit_lines(path, edits)
     }
 
     // What: the store checks without a write.
@@ -3746,6 +3750,15 @@ mod dhcp {
             return Ok(None);
         };
         Ok(Some(api.config().await?))
+    }
+
+    // What: set a whole Kea config and keep it.
+    // Why: a stack restore puts Kea back as it ran.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn kea_set(s: &Settings, cfg: Value) -> Result<(), String> {
+        let api = kea_api_in_kea_mode(s)?.ok_or("DHCP_MODE is not kea now")?;
+        api.set_config(cfg.clone()).await?;
+        save_kea(&kea_store(s)?, &cfg)
     }
 
     // What: running Kea config, none if mode is not Kea.
@@ -4670,7 +4683,7 @@ mod dns {
     // What: remove zones a new LAN domain left behind.
     // Why: an old zone would keep answering its names.
     // From: Issue #1683 | PR #1980
-    async fn drop_old_zones(s: &Settings, before: &[String]) {
+    pub(crate) async fn drop_old_zones(s: &Settings, before: &[String]) {
         let read = (hosted_now(s), Role::from_settings(s), peer::own_api(s));
         let (now, role, api) = match read {
             (Ok(now), Ok(role), Ok(api)) => (now, role, api),
@@ -4891,10 +4904,21 @@ mod dns {
             ));
         }
         let rows: Vec<Value> = zone_store(s, zone)?.read(id)?;
+        Ok(restore_zone(s, zone, &rows).await?)
+    }
+
+    // What: write saved rows into a zone, keep, flush.
+    // Why: zone and stack rollback restore one way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn restore_zone(
+        s: &Settings,
+        zone: &str,
+        rows: &[Value],
+    ) -> Result<(), String> {
         let api = peer::own_api(s)?;
-        api.restore(zone, &rows).await?;
+        api.restore(zone, rows).await?;
         snapshot(s, &api, zone).await?;
-        Ok(peer::flush_zone(s, zone).await?)
+        peer::flush_zone(s, zone).await
     }
 
     // What: TSIG key state; the value never leaves.
@@ -8996,12 +9020,13 @@ mod shared {
             Ui,
             Service,
             Time,
+            Snapshot,
         }
 
         // What: every command of the system group.
         // Why: help, errors and the choice read this table.
         // From: Issue #1683 | PR #2020
-        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 9] = [
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 10] = [
             ("status", crate::shared::cli::row(Op::Status, "status")),
             ("docker", crate::shared::cli::row(Op::Docker, "docker")),
             ("plan", crate::shared::cli::row(Op::Plan, "plan")),
@@ -9023,6 +9048,10 @@ mod shared {
                 ),
             ),
             ("time", crate::shared::cli::row(Op::Time, "time")),
+            (
+                "snapshot",
+                crate::shared::cli::row(Op::Snapshot, "snapshot list|save|restore <id>"),
+            ),
         ];
 
         // What: lancache-ng system status: stack as JSON.
@@ -9065,6 +9094,17 @@ mod shared {
                     };
                 }
                 (Some(Op::Apply), []) => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
+                // What: whole-stack states through the ui.
+                // Why: the ui owns settings, Kea and zones.
+                // From: Issue #1683 | PR #2020
+                (Some(Op::Snapshot), ["list"]) => (s.text("UI_ROUTE_STACK_SNAPSHOTS")?, Body::None),
+                (Some(Op::Snapshot), ["save"]) => {
+                    (s.text("UI_ROUTE_STACK_SNAPSHOT_SAVE")?, Body::Form(vec![]))
+                }
+                (Some(Op::Snapshot), ["restore", id]) => (
+                    s.text("UI_ROUTE_STACK_SNAPSHOT_RESTORE")?,
+                    Body::Form(vec![("id".into(), id.to_string())]),
+                ),
                 // What: the clock: unix, local, zone file.
                 // Why: a read; it needs no running ui.
                 // From: Issue #871 | PR #2020
@@ -15074,13 +15114,9 @@ mod stack {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn state_capture(app: &Stack) -> Result<Value, String> {
         let s = app.settings();
-        let keep = |key: &str| {
-            s.spec(key)
-                .is_some_and(|sp| !sp.is_secret() && sp.effect != config::Effect::Container)
-        };
         let settings: BTreeMap<String, String> = config::read_raw(&saved_path(app)?)?
             .into_iter()
-            .filter(|(k, _)| keep(k))
+            .filter(|(k, _)| state_key(&s, k))
             .collect();
         let role = crate::shared::dns::Role::from_settings(&s)?;
         let mut zones = BTreeMap::new();
@@ -15105,6 +15141,69 @@ mod stack {
             "zones": zones,
             "left_out": STATE_LEAVES_OUT,
         }))
+    }
+
+    // What: a settings key a state holds and restores.
+    // Why: secrets and container keys stay as they are.
+    // From: Issue #1683 | PR #2020
+    fn state_key(s: &Settings, key: &str) -> bool {
+        s.spec(key)
+            .is_some_and(|sp| !sp.is_secret() && sp.effect != config::Effect::Container)
+    }
+
+    // What: put the stack back to one saved state.
+    // Why: exactly that state, never a mix; backup first.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn state_restore(app: &Stack, id: &str) -> Result<(bool, Vec<Fault>), String> {
+        let _held = app.change.lock().await;
+        let state: Value = state_store(&app.settings())?.read(id)?;
+        let mut report = vec![Fault::Plain(format!("backup: {}", state_save(app).await?))];
+        let old = app.settings();
+        let path = saved_path(app)?;
+        let want: BTreeMap<String, String> =
+            serde_json::from_value(state["settings"].clone()).map_err(|e| e.to_string())?;
+        let now = config::read_raw(&path)?;
+        let mut edits: BTreeMap<String, Option<String>> = want
+            .iter()
+            .filter(|(k, v)| now.get(*k) != Some(*v))
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect();
+        for key in now
+            .keys()
+            .filter(|k| state_key(&old, k) && !want.contains_key(*k))
+        {
+            edits.insert(key.clone(), None);
+        }
+        report.push(Fault::Plain(format!("settings: {} changed", edits.len())));
+        let zones_before = crate::dns::snapshot_zones(&old)?;
+        edit_and_adopt(app, old, edits).await?;
+        let s = app.settings();
+        crate::dns::drop_old_zones(&s, &zones_before).await;
+        let mut ok = true;
+        // What: the parts after the settings each report.
+        // Why: one failed part stops none; a rerun ends it.
+        // From: Issue #1683 | PR #2020
+        if let Some(cfg) = state.get("kea").filter(|v| !v.is_null()) {
+            match crate::dhcp::kea_set(&s, cfg.clone()).await {
+                Ok(()) => report.push(Fault::Plain("kea: restored".into())),
+                Err(e) => {
+                    ok = false;
+                    report.push(Fault::Plain(format!("kea: {e}")));
+                }
+            }
+        }
+        for (zone, rows) in state["zones"].as_object().into_iter().flatten() {
+            let rows = rows.as_array().cloned().unwrap_or_default();
+            match crate::dns::restore_zone(&s, zone, &rows).await {
+                Ok(()) => report.push(Fault::Plain(format!("zone {zone}: restored"))),
+                Err(e) => {
+                    ok = false;
+                    report.push(Fault::Plain(format!("zone {zone}: {e}")));
+                }
+            }
+        }
+        report.push(Fault::Plain(format!("now: {}", state_save(app).await?)));
+        Ok((ok, report))
     }
 
     // What: keep the state of now as a snapshot.
@@ -15246,13 +15345,27 @@ mod stack {
     // Why: commit_with is the one caller that locks.
     // From: Issue #1683 | PR #1858
     async fn store_and_adopt(app: &Stack, old: Settings, form: Fields) -> Result<(), String> {
+        let edits = changes(&old, form)
+            .into_iter()
+            .map(|(k, v)| (k, Some(v)))
+            .collect();
+        edit_and_adopt(app, old, edits).await
+    }
+
+    // What: write sets and drops, check, then apply.
+    // Why: a save and a restore end the same way.
+    // From: Issue #1683 | PR #2020
+    async fn edit_and_adopt(
+        app: &Stack,
+        old: Settings,
+        updates: BTreeMap<String, Option<String>>,
+    ) -> Result<(), String> {
         let path = saved_path(app)?;
-        let updates = changes(&old, form);
         if updates.is_empty() {
             return Ok(());
         }
         let before = config::read_raw(&path)?;
-        config::store(&path, &old, &updates)?;
+        config::store_edits(&path, &old, &updates)?;
         let new = Settings::load(&process_env, Some(&path))?;
         if let Err(e) = render_check(&new) {
             // What: refused save is logged, not only shown.
@@ -17932,6 +18045,21 @@ mod ui {
         json_reply(rows.map(|r| Some(json!({"snapshots": r}))), "")
     }
 
+    // What: POST UI_ROUTE_STACK_SNAPSHOT_RESTORE id=...
+    // Why: give back the whole state of one snapshot.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stack_snapshot_restore_api(
+        State(app): Shared,
+        Extension(csrf): Extension<Csrf>,
+        Form(form): Form<Fields>,
+    ) -> Page {
+        csrf.check(&form)?;
+        let (ok, report) = crate::stack::state_restore(&app, &field(&form, "id"))
+            .await
+            .map_err(bad_request)?;
+        Ok(axum::Json(json!({"ok": ok, "report": say_all(&report)})).into_response())
+    }
+
     // What: POST UI_ROUTE_STACK_SNAPSHOT_SAVE.
     // Why: keep the state of now before a big change.
     // From: Issue #1683 | PR #2020
@@ -18847,6 +18975,12 @@ mod ui {
                 Post,
                 Api,
                 stack_snapshot_save_api,
+            ),
+            route(
+                "UI_ROUTE_STACK_SNAPSHOT_RESTORE",
+                Post,
+                Api,
+                stack_snapshot_restore_api,
             ),
             route("UI_ROUTE_PROXY_CERTS_RENEW", Post, Api, certs_renew_api),
             route("UI_ROUTE_DOCKER", Get, Api, docker_api),
