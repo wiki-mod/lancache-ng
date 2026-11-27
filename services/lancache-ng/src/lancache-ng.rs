@@ -18480,7 +18480,10 @@ mod watchdog {
     // From: Issue #1683 | PR #1980
     fn healthcheck() -> Result<(), String> {
         let s = Settings::from_process()?;
-        let limit = s.uint("CHECK_INTERVAL")? * s.uint("RESTART_AFTER")?.max(1);
+        let (interval, after) = (s.uint("CHECK_INTERVAL")?, s.uint("RESTART_AFTER")?);
+        let limit = interval
+            .checked_mul(after.max(1))
+            .ok_or("CHECK_INTERVAL times RESTART_AFTER is too big")?;
         let v = report(&s)?
             .ok_or_else(|| format!("{}: missing", s.text_or_empty("WATCHDOG_ALARM_FILE")))?;
         let written = v["written"].as_u64().ok_or("written missing")?;
