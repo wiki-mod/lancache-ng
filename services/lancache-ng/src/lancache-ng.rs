@@ -9753,6 +9753,10 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 ("webserver-address", s.text("PDNS_API_LISTEN")?),
                 ("webserver-port", s.uint("PDNS_AUTH_API_PORT")?.to_string()),
                 ("webserver-allow-from", joined("PDNS_API_ALLOW_FROM")),
+                // What: the web password is the API key.
+                // Why: unset, / and /metrics are open.
+                // From: Issue #1683 | PR #2020
+                ("webserver-password", api_key.to_string()),
                 ("loglevel", s.uint("PDNS_AUTH_LOGLEVEL")?.to_string()),
                 ("guardian", yes(false)),
                 ("daemon", yes(false)),
@@ -10595,6 +10599,10 @@ end
             y += &format!("  port: {}\n  allow_from:\n", u(&which.key("API_PORT"))?);
             y += &yaml_list(&s.list("PDNS_API_ALLOW_FROM"), "    ")?;
             y += &format!("  api_key: \"{api_key}\"\n");
+            // What: the web password is the API key too.
+            // Why: unset, stats and flush answer keyless.
+            // From: Issue #1683 | PR #2020
+            y += &format!("  password: \"{api_key}\"\n");
             // What: query log raises level and drops quiet.
             // Why: the admin follows DNS queries in log.
             // From: Issue #1683 | PR #1980
