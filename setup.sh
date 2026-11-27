@@ -8357,8 +8357,18 @@ cmd_create_logs_for_issue() (
     done
 
     print_step "Known-good-snapshot directory listings"
-    logbundle_named_volume_listing "$install_dir" "$env_file" dns-config-snapshots config-snapshots \
-        "$dest/known-good-snapshots/dns.txt"
+    # What: zone and stack states in the ui data volume
+    # Why: the ui keeps them below UI_DATA_DIR (SOT)
+    # From: Issue #1683 | PR #2020
+    local ui_data snap_key snap_dir
+    ui_data=$(prod_env_default UI_DATA_DIR) || exit $?
+    for snap_key in DNS_SNAPSHOT_DIR STACK_SNAPSHOT_DIR; do
+        snap_dir=$(prod_env_default "$snap_key") || exit $?
+        [[ "$snap_dir" == "$ui_data"/* ]] \
+            || die "$snap_key ($snap_dir) is not below UI_DATA_DIR ($ui_data)."
+        logbundle_named_volume_listing "$install_dir" "$env_file" ui-data "${snap_dir#"$ui_data"/}" \
+            "$dest/known-good-snapshots/${snap_key,,}.txt"
+    done
     # What: Kea snapshots: host path, then named volume
     # Why: pre-v0.3.0 dev stacks used a named volume
     # From: Issue #1683 | PR #1858
@@ -8400,7 +8410,7 @@ EOF
     printf '\n%sAttach this file to your GitHub issue:%s %s\n\n' "${BOLD}" "${RESET}" "$archive"
 )
 
-# What: rolls a Kea or DNS service back to a snapshot
+# What: rolls the stack, Kea or a zone back to a state
 # Why: works when the Admin UI is unreachable
 # From: Issue #1683 | PR #1858
 cmd_reset_to_last_known_good_config() {
