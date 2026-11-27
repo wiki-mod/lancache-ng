@@ -10681,10 +10681,7 @@ end
                 .filter(|d| !lans.contains(&crate::shared::dns::canonical_zone(d)))
                 .map(|d| d.trim_end_matches('.').to_string());
             let id = s.uint("DHCP_SUBNET_ID")?;
-            let kept = existing
-                .and_then(|e| e.pointer("/Dhcp4/subnet4"))
-                .cloned()
-                .unwrap_or_else(|| json!([]));
+            let kept = Value::Array(existing.map_or(&[][..], subnets).to_vec());
             let kept = follow_domain(kept, before.as_deref(), &domain);
             let back = crate::shared::dhcp::ntp_addrs(s)?.join(", ");
             let own = s.text("IP_HTTP")?;
@@ -10731,7 +10728,7 @@ end
                 subnets.push(sn);
             }
             let updates = s.flag("DHCP_DDNS")?;
-            Ok(json!({"Dhcp4": {
+            let mut cfg = json!({"Dhcp4": {
                 "interfaces-config": {
                     "interfaces": s.list("DHCP_PROXY_INTERFACE"),
                     "re-detect": false
@@ -10743,7 +10740,6 @@ end
                 },
                 "control-socket": socket(s)?,
                 "hooks-libraries": [{"library": s.text("KEA_LEASE_CMDS_HOOK")?}],
-                "subnet4": subnets,
                 "dhcp-ddns": {
                     "enable-updates": updates,
                     "server-ip": s.text("KEA_DDNS_ADDRESS")?,
@@ -10759,7 +10755,9 @@ end
                 "ddns-generated-prefix": s.text("KEA_DDNS_GENERATED_PREFIX")?,
                 "ddns-qualifying-suffix": crate::shared::pdns::zone_id(&domain),
                 "loggers": log_rows(s, &["kea-dhcp4", "kea-dhcp4.packets"])?
-            }}))
+            }});
+            set_subnets(&mut cfg, subnets);
+            Ok(cfg)
         }
 
         // What: kea-ctrl-agent.conf with basic-auth login.
