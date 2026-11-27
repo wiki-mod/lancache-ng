@@ -5748,7 +5748,10 @@ mod dns {
         // From: Issue #1683 | PR #2020
         let (host, port, rd) = match target {
             "http" => (s.text("IP_HTTP")?, port, true),
-            "https" => (s.text("IP_HTTPS")?, port, true),
+            "https" => {
+                let ip = crate::shared::dns::https_ip(s)?;
+                (ip.ok_or("HTTPS has no IP of its own")?, port, true)
+            }
             "auth" => (
                 s.text("PDNS_AUTH_ADDRESS")?,
                 s.num::<u16>("PDNS_AUTH_PORT")?,
@@ -12897,6 +12900,9 @@ end
                 "DNSDIST_CONF_FILE",
                 crate::shared::dnsdist_conf::render(s),
             );
+            // What: files for each recursor with an IP.
+            // Why: dns-https waits for it (IP_HTTPS set).
+            // From: Issue #1683 | PR #1980
             for (which, ip_key) in [(Which::Http, "IP_HTTP"), (Which::Https, "IP_HTTPS")] {
                 let Ok(answer) = s.text(ip_key) else { continue };
                 let rpz_key = which.key("RPZ_FILE");
@@ -13177,11 +13183,11 @@ end
         fn wanted_leaves(s: &Settings) -> Result<Vec<(String, Vec<String>)>, String> {
             let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
             let mut want = hosts.certs();
-            // What: default cert: DNS name and IP_HTTPS.
+            // What: default cert: DNS name, HTTPS own IP.
             // Why: no-SNI or by-IP clients get this cert
             // From: Issue #1683 | PR #1980
             let mut names = vec![s.text("DEFAULT_CERT_DNS")?];
-            names.extend(s.text("IP_HTTPS").ok());
+            names.extend(crate::shared::dns::https_ip(s)?);
             want.push((s.text("NGINX_DEFAULT_CERT")?, names));
             Ok(want)
         }
