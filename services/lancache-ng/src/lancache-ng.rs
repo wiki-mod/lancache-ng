@@ -13736,12 +13736,12 @@ mod stack {
     use crate::shared::{apply, docker, render};
     use crate::ui::tr;
     use serde_json::Value;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
     use std::sync::RwLock;
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // What: SOT keys and values of one change.
     // Why: forms, REST and CLI change settings so.
@@ -13782,8 +13782,8 @@ mod stack {
     // From: Issue #1683 | PR #2020
     pub(crate) struct Stack {
         pub(crate) settings: RwLock<Settings>,
-        pub(crate) saved: Option<std::path::PathBuf>,
-        pub(crate) docker: crate::shared::docker::Api,
+        pub(crate) saved: Option<PathBuf>,
+        pub(crate) docker: docker::Api,
         // What: true once every config was rendered.
         // Why: dns and proxy wait for these files.
         // From: Issue #1683 | PR #1858
@@ -14011,7 +14011,7 @@ mod stack {
         let mut stale = Vec::new();
         for part in s.list("NGINX_LINK_PARTS") {
             let dir = conf.join(part);
-            let kept: std::collections::BTreeSet<&std::path::Path> = files
+            let kept: BTreeSet<&Path> = files
                 .iter()
                 .map(|f| f.path.as_path())
                 .filter(|p| p.parent() == Some(dir.as_path()))
@@ -14106,8 +14106,7 @@ mod stack {
                 continue;
             }
             let ex = new.list(exec);
-            let owners: std::collections::BTreeSet<&str> =
-                apply::exec_rows(&ex).map(|(owner, _)| owner).collect();
+            let owners: BTreeSet<&str> = apply::exec_rows(&ex).map(|(owner, _)| owner).collect();
             for owner in owners {
                 match container_of(app, new, owner).await {
                     Ok(name) => {
@@ -14209,10 +14208,10 @@ mod stack {
             .get(&new.text("DNS_SERVICE")?)
             .is_some_and(|n| restarted.contains(n))
         {
-            let until = std::time::Instant::now() + limit;
+            let until = Instant::now() + limit;
             let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
             while let Err(e) = ensure_zones(new).await {
-                if std::time::Instant::now() >= until {
+                if Instant::now() >= until {
                     report.push(format!("dns api: {e}"));
                     break;
                 }
@@ -14269,7 +14268,7 @@ mod stack {
     ) -> Result<Vec<String>, String> {
         let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
         let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
-        let end = std::time::Instant::now() + wait;
+        let end = Instant::now() + wait;
         let mut late = Vec::new();
         for name in names {
             loop {
@@ -14281,7 +14280,7 @@ mod stack {
                 ) {
                     break;
                 }
-                if std::time::Instant::now() >= end {
+                if Instant::now() >= end {
                     late.push(name.clone());
                     break;
                 }
