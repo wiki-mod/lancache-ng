@@ -4366,7 +4366,7 @@ mod dns {
             .map(plain)
             .collect();
         // What: old main stays as extra only on a swap.
-        // Why: a new name renames main domain as before.
+        // Why: a non-extra name renames the main one.
         // From: Issue #1683
         if want != old && lans.iter().skip(1).any(|z| *z == want) {
             extra.push(plain(&old));
@@ -4567,7 +4567,7 @@ mod dns {
     }
 
     // What: A and AAAA addresses whose PTR is missing.
-    // Why: one click adds it; DoMe 23.11.
+    // Why: a host without PTR is not found by address.
     // From: Issue #1683 | PR #2019
     pub(crate) fn missing_ptrs(
         s: &Settings,
@@ -4793,7 +4793,7 @@ mod dns {
         Ok(())
     }
 
-    // What: write one rrset, snapshot the zone, flush caches.
+    // What: write an rrset, snapshot it, flush caches.
     // Why: every LAN record change ends with these steps.
     // From: Issue #1683 | PR #2020
     async fn write_rrset(
@@ -5184,7 +5184,7 @@ mod dns {
         for (zone, serial) in seen.due(&zones) {
             peer::flush_zone(s, &zone).await?;
             // What: NOTIFY to the secondaries right away.
-            // Why: live: pdns alone waited up to 60 s.
+            // Why: pdns alone notifies after up to 60 s.
             // From: Issue #1683 | PR #2019
             if peers {
                 api.notify(&zone).await?;
@@ -5208,7 +5208,7 @@ mod dns {
     }
 
     // What: SETUP_DNS_PROBE_NAME A on the loopback.
-    // Why: compose ran dig; one DNS client now.
+    // Why: the probe uses the stack's own DNS client.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn healthcheck(s: &Settings) -> Result<(), String> {
         let target = format!("{}#{}", s.text("LOOPBACK_BIND_IP")?, s.uint("DNS_PORT")?);
@@ -5486,7 +5486,7 @@ mod dns {
     }
 
     // What: moves local.<domain> records into <domain>.
-    // Why: zones before multi-domain had this extra zone.
+    // Why: an old install still holds this extra zone.
     // From: Issue #1683
     pub(crate) async fn merge_legacy_zone(
         s: &Settings,
@@ -5536,7 +5536,7 @@ mod dns {
     }
 
     // What: NS and A record for the SOA's nameserver.
-    // Why: the SOA named ns1, but no record held that name.
+    // Why: the SOA nameserver needs a record of its name.
     // From: Issue #1683
     pub(crate) async fn ensure_soa_nameserver(
         s: &Settings,
@@ -5684,7 +5684,7 @@ mod dns {
     }
 
     // What: SOA mname and rname from PDNS_DEFAULT_SOA.
-    // Why: a zone made before domain change kept old ns1.
+    // Why: an existing zone keeps the ns1 it was made with.
     // From: Issue #1683 | PR #2017
     pub(crate) async fn ensure_soa_names(
         api: &pdns::Api,
