@@ -12248,20 +12248,31 @@ end
             }
         }
 
+        // What: what an apply would do with one file.
+        // Why: stack and ui compare it; REST shows the word.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+        #[serde(rename_all = "lowercase")]
+        pub enum FileState {
+            New,
+            Same,
+            Changed,
+        }
+
         // What: per file: path, owner and new/changed/same.
         // Why: a dry run shows what an apply would touch.
         // From: Issue #1683 | PR #2020
-        pub fn plan(files: &[File]) -> Result<Vec<(&File, &'static str)>, String> {
+        pub fn plan(files: &[File]) -> Result<Vec<(&File, FileState)>, String> {
             let mut out = Vec::with_capacity(files.len());
             for f in files {
                 let state = if !f.path.exists() {
-                    "new"
+                    FileState::New
                 } else if crate::shared::fs::same_content(&f.path, f.body.as_bytes())
                     .map_err(|e| format!("{}: {e}", f.path.display()))?
                 {
-                    "same"
+                    FileState::Same
                 } else {
-                    "changed"
+                    FileState::Changed
                 };
                 out.push((f, state));
             }
@@ -14203,7 +14214,7 @@ mod stack {
             // What: a new file wakes nobody, as in write.
             // Why: owners read it at their start.
             // From: Issue #1683 | PR #2020
-            if *state == "changed" {
+            if *state == render::FileState::Changed {
                 changes.push(render::change_of(f));
             }
             list.push(json!({"path": f.path, "owner": f.owner, "state": state}));
