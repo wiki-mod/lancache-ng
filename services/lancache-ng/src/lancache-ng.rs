@@ -928,17 +928,17 @@ mod cachehamster {
             // What: no total timeout; public roots stay.
             // Why: body may stream for hours; others pass.
             // From: Issue #871 | PR #2017
-            let mut builder = reqwest::Client::builder()
-                .dns_resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
-                .pool_max_idle_per_host(connections);
+            let mut builder = crate::shared::http::Build::new()
+                .resolver(Arc::new(ToProxy(s.text("CONTAINER_NAME_PROXY")?)))
+                .per_host(connections);
             let ca = crate::shared::render::ca_cert(s)?;
             match crate::shared::fs::read_if_present(&ca)
                 .map_err(|e| format!("{}: {e}", ca.display()))?
             {
                 Some(pem) => {
-                    let cert = reqwest::Certificate::from_pem(&pem)
+                    builder = builder
+                        .trust_also(&pem)
                         .map_err(|e| format!("{}: {e}", ca.display()))?;
-                    builder = builder.tls_certs_merge([cert]);
                 }
                 // What: no CA yet: logged; https then fails
                 // Why: the ui issues it only in HTTPS mode.
@@ -947,9 +947,7 @@ mod cachehamster {
                     eprintln!("cachehamster: no stack CA {}; https fails", ca.display());
                 }
             }
-            let client = builder
-                .build()
-                .map_err(|e| format!("download client: {e}"))?;
+            let client = builder.build("download client")?;
             Ok(Self {
                 client,
                 http: port("PROXY_HTTP_PORT")?,
@@ -7343,12 +7341,11 @@ mod shared {
             // What: a redirect is read, never followed.
             // Why: a page form answers 303 when it is done.
             // From: Issue #1683 | PR #2020
-            let client = reqwest::Client::builder()
-                .unix_socket(std::path::PathBuf::from(&path))
-                .redirect(reqwest::redirect::Policy::none())
+            let client = Build::new()
+                .socket(&path)
+                .no_redirect()
                 .timeout(Duration::from_secs(s.uint("UI_CLI_WRITE_TIMEOUT_SECONDS")?))
-                .build()
-                .map_err(|e| format!("{path}: {e}"))?;
+                .build(&path)?;
             let url = format!("http://ui{route}");
             let req = match &body {
                 Body::Json(v) => client.post(url).json(v),
@@ -7474,17 +7471,104 @@ mod shared {
                 .map_err(|e| format!("{what}: {e}"))
         }
 
+        // What: the one maker of HTTP clients.
+        // Why: socket, CA, redirect, limit in one place.
+        // From: Issue #1683 | PR #2020
+        pub struct Build(reqwest::ClientBuilder);
+
+        impl Build {
+            // What: a maker with the reqwest defaults.
+            // Why: each caller adds only what it needs.
+            // From: Issue #1683 | PR #2020
+            pub fn new() -> Self {
+                Self(reqwest::Client::builder())
+            }
+
+            // What: talk over a unix socket, not TCP.
+            // Why: Docker and the ui CLI listen on sockets.
+            // From: Issue #1683 | PR #2020
+            pub fn socket(self, path: &str) -> Self {
+                Self(self.0.unix_socket(std::path::PathBuf::from(path)))
+            }
+
+            // What: a redirect is an answer; not followed.
+            // Why: engine and ui forms answer 303.
+            // From: Issue #1683 | PR #2020
+            pub fn no_redirect(self) -> Self {
+                Self(self.0.redirect(reqwest::redirect::Policy::none()))
+            }
+
+            // What: total time limit of one request.
+            // Why: a call without limit may hang for ever.
+            // From: Issue #1683 | PR #2020
+            pub fn timeout(self, limit: Duration) -> Self {
+                Self(self.0.timeout(limit))
+            }
+
+            // What: the environment proxy is not used.
+            // Why: health probes go straight to the target.
+            // From: Issue #1683 | PR #2020
+            pub fn no_proxy(self) -> Self {
+                Self(self.0.no_proxy())
+            }
+
+            // What: idle pool time and TCP keepalive.
+            // Why: both come from the SOT.
+            // From: Issue #1683 | PR #2020
+            pub fn keep(self, idle: Duration, alive: Duration) -> Self {
+                Self(self.0.pool_idle_timeout(idle).tcp_keepalive(alive))
+            }
+
+            // What: idle connections kept per host.
+            // Why: a download pool is as wide as its jobs.
+            // From: Issue #1683 | PR #2020
+            pub fn per_host(self, n: usize) -> Self {
+                Self(self.0.pool_max_idle_per_host(n))
+            }
+
+            // What: names resolve through this resolver.
+            // Why: the CDN names go to the proxy container.
+            // From: Issue #1683 | PR #2020
+            pub fn resolver<R: reqwest::dns::Resolve + 'static>(
+                self,
+                r: std::sync::Arc<R>,
+            ) -> Self {
+                Self(self.0.dns_resolver(r))
+            }
+
+            // What: trust this CA besides the public roots.
+            // Why: the stack CA signs the cache certs.
+            // From: Issue #1683 | PR #2020
+            pub fn trust_also(self, pem: &[u8]) -> Result<Self, String> {
+                let ca = reqwest::Certificate::from_pem(pem).map_err(|e| format!("CA: {e}"))?;
+                Ok(Self(self.0.tls_certs_merge([ca])))
+            }
+
+            // What: trust this CA and nothing else.
+            // Why: a probe must not accept other CAs.
+            // From: Issue #1683 | PR #2020
+            pub fn trust_only(self, pem: &[u8]) -> Result<Self, String> {
+                let ca = reqwest::Certificate::from_pem(pem).map_err(|e| format!("CA: {e}"))?;
+                Ok(Self(self.0.tls_certs_only([ca])))
+            }
+
+            // What: the client; an error names its purpose.
+            // Why: one text shape for every failed build.
+            // From: Issue #1683 | PR #2020
+            pub fn build(self, what: &str) -> Result<reqwest::Client, String> {
+                self.0.build().map_err(|e| format!("{what}: {e}"))
+            }
+        }
+
         // What: shared client with SOT timeouts.
         // Why: no request may hang without a limit.
         // From: Issue #1683 | PR #1980
         pub fn client(s: &Settings) -> Result<reqwest::Client, String> {
             let secs = |key: &str| s.uint(key).map(Duration::from_secs);
-            reqwest::Client::builder()
+            Build::new()
                 .timeout(timeout(s)?)
-                .pool_idle_timeout(secs("HTTP_POOL_IDLE_TIMEOUT")?)
-                .tcp_keepalive(secs("HTTP_TCP_KEEPALIVE")?)
-                .build()
-                .map_err(|e| format!("HTTP client: {e}"))
+                .keep(secs("HTTP_POOL_IDLE_TIMEOUT")?, secs("HTTP_TCP_KEEPALIVE")?)
+                .build("HTTP client")
         }
 
         // What: error text with every source cause.
@@ -7508,13 +7592,12 @@ mod shared {
             ca_pem: Option<&[u8]>,
             timeout: Duration,
         ) -> Result<(), String> {
-            let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
+            let mut builder = Build::new().timeout(timeout).no_proxy();
             if url.starts_with("https://") {
                 let pem = ca_pem.ok_or_else(|| format!("{url}: https probe needs the stack CA"))?;
-                let ca = reqwest::Certificate::from_pem(pem).map_err(|e| format!("CA: {e}"))?;
-                builder = builder.tls_certs_only([ca]);
+                builder = builder.trust_only(pem)?;
             }
-            let client = builder.build().map_err(|e| format!("probe client: {e}"))?;
+            let client = builder.build("probe client")?;
             let status = client
                 .get(url)
                 .send()
@@ -8987,7 +9070,6 @@ mod shared {
     pub mod docker {
         use reqwest::Method;
         use serde_json::{Value, json};
-        use std::path::PathBuf;
         use std::time::Duration;
 
         // What: compose label of the project name.
@@ -9516,16 +9598,12 @@ mod shared {
             // From: Issue #1683 | PR #1980
             pub fn new(endpoint: &str, max_body: u64) -> Result<Self, String> {
                 let endpoint = endpoint.trim();
-                let builder =
-                    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+                let builder = crate::shared::http::Build::new().no_redirect();
                 let (builder, base) = match endpoint.strip_prefix("unix://") {
-                    Some(sock) => (
-                        builder.unix_socket(PathBuf::from(sock)),
-                        SOCKET_HOST.to_string(),
-                    ),
+                    Some(sock) => (builder.socket(sock), SOCKET_HOST.to_string()),
                     None => (builder, endpoint.trim_end_matches('/').to_string()),
                 };
-                let client = builder.build().map_err(|e| format!("Docker client: {e}"))?;
+                let client = builder.build("Docker client")?;
                 Ok(Self {
                     client,
                     base,
