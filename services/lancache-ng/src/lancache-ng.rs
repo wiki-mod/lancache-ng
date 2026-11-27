@@ -2906,7 +2906,7 @@ mod config {
             match self {
                 Self::Line => "a line break",
                 Self::Quoted => "a quote, backslash or line break",
-                Self::Template => "a quote or line break",
+                Self::Template => "a quote, line break, $( call or stray backslash",
                 Self::Env => "a character of the stack .env syntax",
                 Self::Nginx => "a line break, ';', '{' or '}'",
                 Self::Path => "a quote, '$' or line break, or is not absolute",
@@ -2923,7 +2923,7 @@ mod config {
         match syntax {
             Syntax::Line => !v.contains(['\n', '\r']),
             Syntax::Quoted => !v.contains(['"', '\\', '\n', '\r']),
-            Syntax::Template => !v.contains(['"', '\n', '\r']),
+            Syntax::Template => template_ok(v),
             Syntax::Env => !v.contains(['\n', '\r', '$', '`', '"', '\'', '\\', '#']),
             Syntax::Nginx => !v.contains(['\n', '\r', ';', '{', '}']),
             Syntax::Path => v.starts_with('/') && !v.contains(['"', '\n', '\r', '$']),
@@ -2934,6 +2934,40 @@ mod config {
                         .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
             }
         }
+    }
+
+    // What: syslog-ng template: text, macros, \n \t \\.
+    // Why: $(env X) reads secrets; a last \ eats the quote.
+    // From: Issue #1683 | PR #2020
+    fn template_ok(v: &str) -> bool {
+        let mut chars = v.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' | '\n' | '\r' => return false,
+                '\\' => match chars.next() {
+                    Some('n' | 't' | '\\') => {}
+                    _ => return false,
+                },
+                '$' => match chars.peek() {
+                    Some('{') => {
+                        chars.next();
+                        let ok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+                        let mut name = 0;
+                        loop {
+                            match chars.next() {
+                                Some('}') if name > 0 => break,
+                                Some(c) if ok(c) => name += 1,
+                                _ => return false,
+                            }
+                        }
+                    }
+                    Some(c) if c.is_ascii_alphanumeric() || *c == '_' => {}
+                    _ => return false,
+                },
+                _ => {}
+            }
+        }
+        true
     }
 
     // What: the value, or an error naming its limit.
@@ -10570,9 +10604,8 @@ mod shared {
                     "SYSLOG_LOG_ROOT and SYSLOG_BUFFER_DIR must be plain absolute paths".into(),
                 );
             }
-            if !crate::config::safe(Syntax::Template, &template) {
-                return Err("SYSLOG_LINE_TEMPLATE holds a quote or line break".into());
-            }
+            crate::config::checked(Syntax::Template, &template)
+                .map_err(|e| format!("SYSLOG_LINE_TEMPLATE: {e}"))?;
             if !crate::config::safe(NAME, &group) {
                 return Err(format!("LOG_READER_GROUP={group} is no group name"));
             }
