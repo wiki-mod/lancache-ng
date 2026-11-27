@@ -14660,6 +14660,9 @@ mod ui {
         Fail(StatusCode::BAD_REQUEST, text.into())
     }
 
+    // What: what a handler returns: response or Fail.
+    // Why: handlers use ? on both kinds of error.
+    // From: Issue #1683 | PR #1980
     pub(crate) type Page = Result<Response, Fail>;
 
     // What: state shared by all handlers.
@@ -14682,6 +14685,9 @@ mod ui {
         }
     }
 
+    // What: the axum state of every handler.
+    // Why: one name for the shared App in signatures.
+    // From: Issue #1683 | PR #1980
     pub(crate) type Shared = State<Arc<App>>;
 
     impl App {
