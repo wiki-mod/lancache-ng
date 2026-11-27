@@ -3969,7 +3969,7 @@ mod dns {
     use crate::shared::task::or_stop;
     use crate::shared::tool;
     use crate::shared::{apply, fs, pdns, recursor_conf, render, secret};
-    use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
+    use crate::stack::{Fields, Stack, apply_all, commit, commit_with, list_change, single_field};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::net::{IpAddr, SocketAddr};
@@ -5134,7 +5134,8 @@ mod dns {
         let auto = s.flag("DNS_SECONDARY_NS_AUTO_REMOVE")?;
         let after = Duration::from_secs(s.uint("DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS")?);
         let fails = s.uint("DNS_SECONDARY_NS_REMOVE_FAILS")?;
-        let (mut ns, mut off) = (s.list("DNS_SECONDARY_NS")?, s.list("DNS_SECONDARY_NS_OFF")?);
+        let (ns, off) = (s.list("DNS_SECONDARY_NS")?, s.list("DNS_SECONDARY_NS_OFF")?);
+        let (mut enter, mut take_out) = (Vec::new(), Vec::new());
         for (name, address) in &peers {
             // What: no aa counts as failure only for an NS.
             // Why: an older secondary syncs but is never NS
@@ -5157,7 +5158,7 @@ mod dns {
                     // From: Issue #1683
                     if aa && enabled && !ns.contains(name) && !off.contains(name) {
                         eprintln!("ui: secondary {name}: entered as NS");
-                        ns.push(name.clone());
+                        enter.push(name.clone());
                     }
                 }
                 Err(e) => {
@@ -5170,22 +5171,46 @@ mod dns {
                     let due = f.count >= fails && f.since.elapsed() > after;
                     if enabled && auto && due && ns.contains(name) {
                         eprintln!("ui: secondary {name}: NS taken out");
-                        ns.retain(|n| n != name);
-                        off.push(name.clone());
+                        take_out.push(name.clone());
                     }
                 }
             }
         }
-        let mut form = Fields::new();
-        for (key, now) in [("DNS_SECONDARY_NS", ns), ("DNS_SECONDARY_NS_OFF", off)] {
-            if now != s.list(key)? {
-                form.insert(key.into(), crate::config::join_items(&now));
-            }
-        }
-        if form.is_empty() {
+        if enter.is_empty() && take_out.is_empty() {
             return Ok(());
         }
-        commit(app, form).await
+        // What: the round's steps meet the lists of now.
+        // Why: a hand change during the round must stay.
+        // From: Issue #1683 | PR #2020
+        commit_with(app, |now| {
+            let (was_ns, was_off) = (
+                now.list("DNS_SECONDARY_NS")?,
+                now.list("DNS_SECONDARY_NS_OFF")?,
+            );
+            let (mut ns, mut off) = (was_ns.clone(), was_off.clone());
+            for name in &enter {
+                if !ns.contains(name) && !off.contains(name) {
+                    ns.push(name.clone());
+                }
+            }
+            for name in &take_out {
+                if ns.contains(name) {
+                    ns.retain(|n| n != name);
+                    off.push(name.clone());
+                }
+            }
+            let mut form = Fields::new();
+            for (key, was, now) in [
+                ("DNS_SECONDARY_NS", was_ns, ns),
+                ("DNS_SECONDARY_NS_OFF", was_off, off),
+            ] {
+                if now != was {
+                    form.insert(key.into(), crate::config::join_items(&now));
+                }
+            }
+            Ok::<_, String>(form)
+        })
+        .await
     }
 
     // What: one secondary gets our zone list.
@@ -14498,6 +14523,10 @@ mod stack {
         // Why: dns and proxy wait for these files.
         // From: Issue #1683 | PR #1858
         pub(crate) rendered: AtomicBool,
+        // What: one settings change or apply at a time.
+        // Why: two saves at once mix their read and write.
+        // From: Issue #1683 | PR #2020
+        pub(crate) change: tokio::sync::Mutex<()>,
     }
 
     impl Stack {
@@ -14551,8 +14580,27 @@ mod stack {
     // Why: one path for every setting change.
     // From: Issue #1683 | PR #1858
     pub(crate) async fn commit(app: &Stack, form: Fields) -> Result<(), String> {
-        let path = saved_path(app)?;
+        commit_with(app, |_| Ok::<_, String>(form)).await
+    }
+
+    // What: a change built from the settings it replaces.
+    // Why: read, change, write under one lock; no loss.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn commit_with<E: From<String>>(
+        app: &Stack,
+        build: impl FnOnce(&Settings) -> Result<Fields, E>,
+    ) -> Result<(), E> {
+        let _held = app.change.lock().await;
         let old = app.settings();
+        let form = build(&old)?;
+        Ok(store_and_adopt(app, old, form).await?)
+    }
+
+    // What: write a change and apply it; lock is held.
+    // Why: commit_with is the one caller that locks.
+    // From: Issue #1683 | PR #1858
+    async fn store_and_adopt(app: &Stack, old: Settings, form: Fields) -> Result<(), String> {
+        let path = saved_path(app)?;
         let updates = changes(&old, form);
         if updates.is_empty() {
             return Ok(());
@@ -14612,6 +14660,7 @@ mod stack {
     // Why: a hand edit or a lost file takes effect.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn apply_now(app: &Stack) -> Result<Vec<String>, String> {
+        let _held = app.change.lock().await;
         let old = app.settings();
         let new = match app.saved.clone() {
             Some(path) => Settings::load(&process_env, Some(&path))?,
@@ -15068,7 +15117,7 @@ mod stack {
                 [("service", service.to_string())],
             ));
         }
-        commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)?).await?;
+        commit_with(app, |s| list_change(s, "SERVICES_STOPPED", service, !run)).await?;
         let (grace, limit) = app.limits(&s)?;
         let name = container_of(app, &s, service).await?;
         let action = if run {
@@ -15105,8 +15154,9 @@ mod ui {
     use crate::shared::{access, apply, docker, fs, http, human, render, secret};
     use crate::stack::Stack;
     use crate::stack::{
-        Fields, apply_all, apply_now, check_change, commit, container_of, exec_in, exec_json,
-        issue_and_reload, list_change, render_now, render_plan, set_wanted, single_field,
+        Fields, apply_all, apply_now, check_change, commit, commit_with, container_of, exec_in,
+        exec_json, issue_and_reload, list_change, render_now, render_plan, set_wanted,
+        single_field,
     };
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
     use axum::extract::{Form, Request, State};
@@ -16074,13 +16124,22 @@ mod ui {
                 Err(format!("{domain:?} is no valid domain entry"))
             }
             DnsOp::DnsAdd => {
-                commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, true)?).await
+                commit_with(&app, |s| {
+                    list_change(s, "CDN_CUSTOM_DOMAINS", &domain, true)
+                })
+                .await
             }
             DnsOp::DnsRemove => {
-                commit(&app, list_change(&s, "CDN_CUSTOM_DOMAINS", &domain, false)?).await
+                commit_with(&app, |s| {
+                    list_change(s, "CDN_CUSTOM_DOMAINS", &domain, false)
+                })
+                .await
             }
             DnsOp::DnsToggle => {
-                commit(&app, list_change(&s, "CDN_DISABLED_DOMAINS", &domain, !on)?).await
+                commit_with(&app, |s| {
+                    list_change(s, "CDN_DISABLED_DOMAINS", &domain, !on)
+                })
+                .await
             }
             DnsOp::AaaaFilter => commit(&app, single_field("DNS_FILTER_AAAA", on)).await,
             DnsOp::QueryLog => commit(&app, single_field("DNS_QUERY_LOG", on)).await,
@@ -16242,18 +16301,15 @@ mod ui {
                 answers_aa(&s, &list[at].1, &crate::shared::dns::lan_zone(&s)?)
                     .await
                     .map_err(bad_request)?;
-                commit(&app, ns_change(&s, &name, Some(true)).map_err(bad_request)?)
+                commit_with(&app, |s| ns_change(s, &name, Some(true)))
                     .await
                     .map_err(bad_request)?;
                 Ok(StatusCode::NO_CONTENT.into_response())
             }
             SecondaryOp::NsRemove => {
-                commit(
-                    &app,
-                    ns_change(&s, &name, Some(false)).map_err(bad_request)?,
-                )
-                .await
-                .map_err(bad_request)?;
+                commit_with(&app, |s| ns_change(s, &name, Some(false)))
+                    .await
+                    .map_err(bad_request)?;
                 Ok(StatusCode::NO_CONTENT.into_response())
             }
             SecondaryOp::Rotate => {
@@ -18329,6 +18385,7 @@ mod ui {
                 settings: RwLock::new(s.clone()),
                 saved,
                 rendered: AtomicBool::new(false),
+                change: tokio::sync::Mutex::new(()),
             },
             tera: templates(&s.text("TEMPLATE_DIR")?)?,
             session_key: secret::key_bytes(&key)?,
