@@ -3111,42 +3111,38 @@ mod config {
         // Why: only uint keys answer; others are errors.
         // From: Issue #1683 | PR #1980
         pub fn uint(&self, key: &str) -> Result<u64, String> {
-            match self.get(key) {
-                Some(Value::Uint(n)) => Ok(*n),
+            let raw = match self.get(key) {
+                Some(Value::Uint(n)) => return Ok(*n),
                 // What: fixed SOT default is text; parse it
                 // Why: keys without schema row load as text
                 // From: Issue #1683 | PR #1980
-                Some(Value::Text(t)) => parse_uint(t).ok_or_else(|| format!("{key} is no number")),
-                Some(_) => Err(format!("{key} is no number")),
+                Some(Value::Text(t)) => t.clone(),
+                Some(_) => return Err(format!("{key} is no number")),
                 // What: a compose-only key reads the env.
                 // Why: same rule as text; one rule per key.
                 // From: Issue #1683 | PR #2020
-                None => match env_set(&process_env, key) {
-                    Some(t) => parse_uint(&t).ok_or_else(|| format!("{key} is no number")),
-                    None => Err(format!("{key} is not set")),
-                },
-            }
+                None => env_set(&process_env, key).ok_or_else(|| format!("{key} is not set"))?,
+            };
+            parse_uint(&raw).ok_or_else(|| format!("{key} is no number"))
         }
 
         // What: value as bool.
         // Why: only bool keys answer; others are errors.
         // From: Issue #1683 | PR #1980
         pub fn flag(&self, key: &str) -> Result<bool, String> {
-            match self.get(key) {
-                Some(Value::Bool(b)) => Ok(*b),
+            let raw = match self.get(key) {
+                Some(Value::Bool(b)) => return Ok(*b),
                 // What: text answers only as true or false.
                 // Why: AG-SEC-001: ALLOW_INSECURE_UI=true.
                 // From: Issue #1683 | PR #2017
-                Some(Value::Text(t)) => t.parse().map_err(|_| format!("{key} is no bool")),
-                Some(_) => Err(format!("{key} is no bool")),
+                Some(Value::Text(t)) => t.clone(),
+                Some(_) => return Err(format!("{key} is no bool")),
                 // What: a compose-only key reads the env.
                 // Why: same rule as text; one rule per key.
                 // From: Issue #1683 | PR #2020
-                None => match env_set(&process_env, key) {
-                    Some(t) => t.parse().map_err(|_| format!("{key} is no bool")),
-                    None => Err(format!("{key} is not set")),
-                },
-            }
+                None => env_set(&process_env, key).ok_or_else(|| format!("{key} is not set"))?,
+            };
+            raw.parse().map_err(|_| format!("{key} is no bool"))
         }
 
         // What: value as a narrower number type.
@@ -3167,16 +3163,15 @@ mod config {
         // Why: an unset optional list means no entries.
         // From: Issue #1683 | PR #1980
         pub fn list(&self, key: &str) -> Vec<String> {
-            match self.get(key) {
-                Some(Value::List(items)) => items.clone(),
-                Some(other) => list_items(&other.to_string()).map(str::to_string).collect(),
+            let raw = match self.get(key) {
+                Some(Value::List(items)) => return items.clone(),
+                Some(other) => other.to_string(),
                 // What: a compose-only key reads the env.
                 // Why: same rule as text; one rule per key.
                 // From: Issue #1683 | PR #2020
-                None => env_set(&process_env, key)
-                    .map(|t| list_items(&t).map(str::to_string).collect())
-                    .unwrap_or_default(),
-            }
+                None => env_set(&process_env, key).unwrap_or_default(),
+            };
+            list_items(&raw).map(str::to_string).collect()
         }
 
         // What: check one raw value for a key.
