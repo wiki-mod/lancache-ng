@@ -13378,9 +13378,14 @@ end
             }
 
             // What: the files, or errors, each text once.
-            // Why: two files may hit the same bad value.
+            // Why: no list leaves with a target outside.
             // From: Issue #1683 | PR #1991
             fn finish(mut self) -> Result<Vec<File>, Vec<String>> {
+                if self.errs.is_empty()
+                    && let Err(e) = confine(self.s, &self.files)
+                {
+                    self.errs.push(e);
+                }
                 let mut seen = std::collections::HashSet::new();
                 self.errs.retain(|e| seen.insert(e.clone()));
                 if self.errs.is_empty() {
