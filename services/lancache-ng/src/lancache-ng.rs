@@ -3318,9 +3318,9 @@ mod dhcp {
     use crate::config::{self, Settings};
     use crate::dns::{chosen_lan_zone, main_domain_fields};
     use crate::shared::dhcp::{Mode as DhcpMode, option_data};
-    use crate::shared::stack::Stack;
     use crate::shared::{docker, fs, http, secret};
-    use crate::ui::{Fields, commit, tr};
+    use crate::stack::{Fields, Stack, commit};
+    use crate::ui::tr;
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -3811,13 +3811,10 @@ mod dns {
     use crate::config::{self, Settings};
     use crate::shared::dns::Role;
     use crate::shared::peer::{self, PeerZone, ZoneState};
-    use crate::shared::stack::Stack;
     use crate::shared::tool;
     use crate::shared::{apply, fs, render, secret};
-    use crate::ui::{
-        Failing, Fields, apply_all, commit, list_change, or_stop, primary_https_ip, single_field,
-        tr,
-    };
+    use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
+    use crate::ui::{Failing, or_stop, primary_https_ip, tr};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -5789,46 +5786,6 @@ mod shared {
     // What: wall-clock time since the Unix epoch.
     // Why: file names, ids and logs need a plain number.
     // From: Issue #1683 | PR #1980
-    pub mod stack {
-        use crate::config::Settings;
-        use std::sync::RwLock;
-        use std::sync::atomic::AtomicBool;
-        use std::time::Duration;
-
-        // What: state of a settings change and apply.
-        // Why: dns and dhcp need no web state to save.
-        // From: Issue #1683 | PR #2020
-        pub(crate) struct Stack {
-            pub(crate) settings: RwLock<Settings>,
-            pub(crate) saved: Option<std::path::PathBuf>,
-            pub(crate) docker: crate::shared::docker::Api,
-            // What: true once every config was rendered.
-            // Why: dns and proxy wait for these files.
-            // From: Issue #1683 | PR #1858
-            pub(crate) rendered: AtomicBool,
-        }
-
-        impl Stack {
-            // What: copy of the current settings.
-            // Why: a handler never sees half an update.
-            // From: Issue #1683 | PR #1858
-            pub(crate) fn settings(&self) -> Settings {
-                match self.settings.read() {
-                    Ok(s) => s.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                }
-            }
-
-            // What: Docker stop grace and call limit.
-            // Why: every wait comes from the SOT.
-            // From: Issue #1683 | PR #1858
-            pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
-                let grace = s.num::<u32>("UI_STOP_GRACE")?;
-                Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
-            }
-        }
-    }
-
     pub mod clock {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13747,24 +13704,626 @@ end
     }
 }
 
+// What: change settings and apply them to the stack.
+// Why: ui, dns and dhcp save one way; no web state.
+// From: Issue #1683 | PR #2020
+mod stack {
+    use crate::config::{self, Settings, process_env};
+    use crate::dhcp::dhcp_stays_off;
+    use crate::dns::{dnssec_chain, ensure_zones};
+    use crate::shared::dhcp::Mode as DhcpMode;
+    use crate::shared::{apply, docker, render};
+    use crate::ui::tr;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    // What: SOT keys and values of one change.
+    // Why: forms, REST and CLI change settings so.
+    // From: Issue #1683 | PR #1980
+    pub(crate) type Fields = BTreeMap<String, String>;
+
+    // What: list setting with one item in or out.
+    // Why: domain add, remove and toggle share it.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
+        let mut items: Vec<String> = s.list(key).into_iter().filter(|x| x != item).collect();
+        if present {
+            items.push(item.to_string());
+        }
+        Fields::from([(key.to_string(), items.join(" "))])
+    }
+
+    // What: a form with exactly one field.
+    // Why: commit takes Fields; a switch saves one key.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn single_field(key: &str, value: impl ToString) -> Fields {
+        Fields::from([(key.to_string(), value.to_string())])
+    }
+
+    // What: all files with secrets and the live chain.
+    // Why: write, plan and preview render one way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn render_now(
+        s: &Settings,
+    ) -> Result<Result<Vec<render::File>, Vec<String>>, String> {
+        let sec = render::secrets(s)?;
+        let chain = dnssec_chain(s).await;
+        Ok(render::all(s, &sec, &chain))
+    }
+
+    // What: state of a settings change and apply.
+    // Why: dns and dhcp need no web state to save.
+    // From: Issue #1683 | PR #2020
+    pub(crate) struct Stack {
+        pub(crate) settings: RwLock<Settings>,
+        pub(crate) saved: Option<std::path::PathBuf>,
+        pub(crate) docker: crate::shared::docker::Api,
+        // What: true once every config was rendered.
+        // Why: dns and proxy wait for these files.
+        // From: Issue #1683 | PR #1858
+        pub(crate) rendered: AtomicBool,
+    }
+
+    impl Stack {
+        // What: copy of the current settings.
+        // Why: a handler never sees half an update.
+        // From: Issue #1683 | PR #1858
+        pub(crate) fn settings(&self) -> Settings {
+            match self.settings.read() {
+                Ok(s) => s.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+
+        // What: Docker stop grace and call limit.
+        // Why: every wait comes from the SOT.
+        // From: Issue #1683 | PR #1858
+        pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
+            let grace = s.num::<u32>("UI_STOP_GRACE")?;
+            Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
+        }
+    }
+
+    // What: keep only real changes of known keys.
+    // Why: an empty secret field means keep it.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn changes(old: &Settings, form: Fields) -> Fields {
+        let mut out = Fields::new();
+        for (key, value) in form {
+            let Some(spec) = old.spec(&key) else { continue };
+            let secret = spec.is_secret();
+            if secret && value.is_empty() {
+                continue;
+            }
+            if old.text(&key).ok().as_deref() != Some(value.as_str()) {
+                out.insert(key, value);
+            }
+        }
+        out
+    }
+
+    // What: save, reload, render, write, apply.
+    // Why: one path for every setting change.
+    // From: Issue #1683 | PR #1858
+    pub(crate) async fn commit(app: &Stack, form: Fields) -> Result<(), String> {
+        let Some(path) = app.saved.clone() else {
+            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
+        };
+        let old = app.settings();
+        let updates = changes(&old, form);
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let before = config::read_raw(&path)?;
+        config::store(&path, &old, &updates)?;
+        let new = Settings::load(&process_env, Some(&path))?;
+        if let Err(e) = render_check(&new) {
+            // What: refused save is logged, not only shown.
+            // Why: the error must leave trace in the logs.
+            // From: Issue #1683 | PR #1991
+            eprintln!("ui: save refused: {e}");
+            // What: only changed keys get their old values.
+            // Why: a whole-file write undoes setup.sh edits
+            // From: Issue #1683 | PR #2017
+            let back: Fields = updates
+                .keys()
+                .map(|k| (k.clone(), before.get(k).cloned().unwrap_or_default()))
+                .collect();
+            config::restore(&path, &back)
+                .map_err(|w| format!("{e}; old values not restored: {w}"))?;
+            return Err(e);
+        }
+        for line in adopt(app, &old, new).await? {
+            eprintln!("ui: apply: {line}");
+        }
+        Ok(())
+    }
+
+    // What: a value that cannot render is not kept.
+    // Why: a bad value must not reach the files.
+    // From: Issue #1683 | PR #1980
+    pub(crate) fn render_check(new: &Settings) -> Result<(), String> {
+        let none = crate::shared::recursor_conf::Chain::default();
+        let sec = render::secrets(new)?;
+        render::all(new, &sec, &none).map_err(|e| e.join("; "))?;
+        Ok(())
+    }
+
+    // What: apply new settings, then make them current.
+    // Why: save and apply-now end the same way.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn adopt(
+        app: &Stack,
+        old: &Settings,
+        new: Settings,
+    ) -> Result<Vec<String>, String> {
+        let lines = apply_all(app, old, &new, true).await?;
+        match app.settings.write() {
+            Ok(mut s) => *s = new,
+            Err(poisoned) => *poisoned.into_inner() = new,
+        }
+        Ok(lines)
+    }
+
+    // What: read the settings file again and apply it.
+    // Why: a hand edit or a lost file takes effect.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn apply_now(app: &Stack) -> Result<Vec<String>, String> {
+        let old = app.settings();
+        let new = match app.saved.clone() {
+            Some(path) => Settings::load(&process_env, Some(&path))?,
+            None => old.clone(),
+        };
+        render_check(&new)?;
+        adopt(app, &old, new).await
+    }
+
+    // What: keys a change would set, if it renders.
+    // Why: config validate and ?dry_run=1 save nothing.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn check_change(app: &Stack, form: Fields) -> Result<Vec<String>, String> {
+        let Some(path) = app.saved.clone() else {
+            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
+        };
+        let old = app.settings();
+        let updates = changes(&old, form);
+        if !updates.is_empty() {
+            render_check(&config::trial(&path, &old, &updates)?)?;
+        }
+        Ok(updates.into_keys().collect())
+    }
+
+    // What: container name of a compose service.
+    // Why: Docker calls need the real name.
+    // From: Issue #1683 | PR #1980
+    pub(crate) async fn container_of(
+        app: &Stack,
+        s: &Settings,
+        service: &str,
+    ) -> Result<String, String> {
+        let list = app.docker.stack(s).await?;
+        let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
+        hit.and_then(docker::name_of)
+            .map(str::to_string)
+            .ok_or_else(|| tr("err_no_container").replace("{service}", service))
+    }
+
+    // What: run a command in a service container.
+    // Why: rc-service and cachehamster go this way.
+    // From: Issue #1683 | PR #1980
+    pub(crate) async fn exec_in(
+        app: &Stack,
+        s: &Settings,
+        service: &str,
+        cmd: &[&str],
+    ) -> Result<(i64, String), String> {
+        let name = container_of(app, s, service).await?;
+        let (_, limit) = app.limits(s)?;
+        app.docker
+            .exec(&name, cmd, limit)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    // What: run a command; read its last JSON line.
+    // Why: cachehamster and watchdog answer in JSON.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn exec_json(
+        app: &Stack,
+        s: &Settings,
+        service: &str,
+        cmd: &[&str],
+    ) -> Result<(i64, Value), String> {
+        let (code, out) = exec_in(app, s, service, cmd).await?;
+        let line = out
+            .lines()
+            .rev()
+            .find(|l| l.starts_with('{'))
+            .unwrap_or_default();
+        let v = serde_json::from_str(line).map_err(|e| format!("{}: {e}: {out}", cmd.join(" ")))?;
+        Ok((code, v))
+    }
+
+    // What: drop proxy render files no longer written.
+    // Why: an old https.conf keeps the SSL server alive.
+    // From: Issue #1683 | PR #2019
+    pub(crate) fn prune_rendered(
+        s: &Settings,
+        files: &[render::File],
+    ) -> Result<Vec<PathBuf>, String> {
+        let stale = stale_rendered(s, files)?;
+        for path in &stale {
+            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        Ok(stale)
+    }
+
+    // What: a proxy reload, tagged with its reason.
+    // Why: prune, plan and new certs ask the same.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn proxy_reload(s: &Settings, why: &str) -> Result<config::Change, String> {
+        Ok(config::Change {
+            key: why.into(),
+            owner: s.text("PROXY_SERVICE")?,
+            effect: config::Effect::Reload,
+        })
+    }
+
+    // What: proxy render files this render no longer has.
+    // Why: prune removes them; the plan lists them.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn stale_rendered(
+        s: &Settings,
+        files: &[render::File],
+    ) -> Result<Vec<PathBuf>, String> {
+        let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
+        let mut stale = Vec::new();
+        for sub in ["conf.d", "stream.d"] {
+            let dir = conf.join(sub);
+            let kept: std::collections::BTreeSet<&std::path::Path> = files
+                .iter()
+                .map(|f| f.path.as_path())
+                .filter(|p| p.parent() == Some(dir.as_path()))
+                .collect();
+            // What: skip a dir this render did not fill.
+            // Why: an empty set must not wipe the dir.
+            // From: Issue #1683 | PR #2019
+            if kept.is_empty() {
+                continue;
+            }
+            let entries = crate::shared::fs::entries_if_present(&dir)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            for path in entries {
+                if path.is_file() && !kept.contains(path.as_path()) {
+                    stale.push(path);
+                }
+            }
+        }
+        Ok(stale)
+    }
+
+    // What: container name per plan owner; others drop out.
+    // Why: an owner without a container has nothing to do.
+    // From: Issue #1683 | PR #2017
+    pub(crate) async fn plan_containers<V>(
+        app: &Stack,
+        s: &Settings,
+        plan: &mut BTreeMap<String, V>,
+    ) -> (BTreeMap<String, String>, Vec<String>) {
+        let (mut names, mut skipped) = (BTreeMap::new(), Vec::new());
+        for owner in plan.keys() {
+            match container_of(app, s, owner).await {
+                Ok(name) => {
+                    names.insert(owner.clone(), name);
+                }
+                Err(e) => skipped.push(format!("{owner}: skipped, {e}")),
+            }
+        }
+        plan.retain(|owner, _| names.contains_key(owner));
+        (names, skipped)
+    }
+
+    // What: render with the live chain, then write.
+    // Why: apply and start share one way to the files.
+    // From: Issue #1683 | PR #2019
+    pub(crate) async fn render_and_write(
+        s: &Settings,
+    ) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
+        let files = render_now(s).await?.map_err(|e| e.join("; "))?;
+        let written = render::write_files(s, &files)?;
+        Ok((files, written))
+    }
+
+    // What: render, write and wake the owners.
+    // Why: only owners with changes are touched.
+    // From: Issue #1683 | PR #1980
+    pub(crate) async fn apply_all(
+        app: &Stack,
+        old: &Settings,
+        new: &Settings,
+        zones: bool,
+    ) -> Result<Vec<String>, String> {
+        let (files, written) = render_and_write(new).await?;
+        let mut changes = old.diff(new);
+        app.rendered.store(true, Ordering::Relaxed);
+        changes.extend(written.iter().cloned());
+        // What: drop proxy render files no longer written.
+        // Why: a left-over https.conf keeps SSL server up.
+        // From: Issue #1683 | PR #2019
+        let removed = prune_rendered(new, &files)?;
+        if !removed.is_empty() {
+            for path in &removed {
+                eprintln!("ui: removed stale {}", path.display());
+            }
+            changes.push(proxy_reload(new, "proxy-prune")?);
+        }
+        // What: PowerDNS steps report, not abort.
+        // Why: pdns starts only after the restart below.
+        // From: Issue #1683 | PR #1980
+        let mut report = Vec::new();
+        // What: a new file runs the commands of its daemon.
+        // Why: snmpd and pdns read their file only at start
+        // From: Issue #1683
+        let (_, limit) = app.limits(new)?;
+        for (file, exec, tag) in [
+            ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
+            ("PDNS_CONF_FILE", "PDNS_RESTART_EXEC", "pdns"),
+            ("DNSDIST_CONF_FILE", "DNSDIST_RESTART_EXEC", "dnsdist"),
+        ] {
+            let path = new.text(file)?;
+            if !written.iter().any(|c| c.key == path) {
+                continue;
+            }
+            let ex = new.list(exec);
+            let owners: std::collections::BTreeSet<&str> = ex
+                .iter()
+                .filter_map(|e| e.split_once(':'))
+                .map(|p| p.0)
+                .collect();
+            for owner in owners {
+                match container_of(app, new, owner).await {
+                    Ok(name) => {
+                        let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
+                        report.push(format!("{owner} {tag}: {r:?}"));
+                    }
+                    Err(e) => report.push(format!("{owner} {tag}: skipped, {e}")),
+                }
+            }
+        }
+        // What: at start zones_at_start owns this step.
+        // Why: dns may not be up yet at that moment.
+        // From: Issue #1683 | PR #1980
+        if zones && let Err(e) = ensure_zones(new).await {
+            report.push(e);
+        }
+        // What: render again once the zones stand.
+        // Why: a new zone has its DS only after ensure.
+        // From: Issue #1683 | PR #2019
+        if zones {
+            match render_and_write(new).await {
+                Ok((_, again)) => changes.extend(again),
+                Err(e) => report.push(e),
+            }
+        }
+        let mut plan = apply::plan(&changes);
+        let (grace, limit) = app.limits(new)?;
+        // What: mode off stops dhcp; a missing one is fine.
+        // Why: compose up may have started it again.
+        // From: Issue #1683 | PR #1980
+        let dhcp = new.text("DHCP_SERVICE")?;
+        if crate::shared::dhcp::off_service(new)?.is_some() {
+            plan.remove(&dhcp);
+            match dhcp_stays_off(app, new).await {
+                Ok(Some(done)) => report.push(format!("{dhcp}: {done}")),
+                Ok(None) => {}
+                Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
+            }
+        }
+        // What: proxy and relay share one dnsmasq daemon.
+        // Why: a mode change keeps the container running.
+        // From: Issue #1683
+        let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
+        if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) {
+            let ex = new.list("DNSMASQ_RESTART_EXEC");
+            match container_of(app, new, &dhcp).await {
+                Ok(name) if !ex.is_empty() => {
+                    let r = apply::reload_exec(&app.docker, &name, &ex, &dhcp, limit).await;
+                    if !matches!(r, apply::Outcome::Failed(_)) {
+                        plan.remove(&dhcp);
+                    }
+                    report.push(format!("{dhcp} dnsmasq: {r:?}"));
+                }
+                Ok(_) => {}
+                Err(e) => report.push(format!("{dhcp} dnsmasq: skipped, {e}")),
+            }
+        }
+        // What: skip an owner that has no container yet.
+        // Why: at stack start it reads new files anyway.
+        // From: Issue #1683 | PR #1980
+        let (names, skipped) = plan_containers(app, new, &mut plan).await;
+        report.extend(skipped);
+        let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
+        let rx = new.list("RELOAD_EXEC");
+        let mut restarted = Vec::new();
+        let mut results = apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await;
+        // What: one more try for owners that got a 409.
+        // Why: compose may recreate a container meanwhile.
+        // From: Issue #1683 | PR #1980
+        if results
+            .iter()
+            .any(|(_, r)| matches!(r, apply::Outcome::Failed(docker::Error::Status(409))))
+        {
+            tokio::time::sleep(limit).await;
+            let again: BTreeMap<_, _> = plan
+                .iter()
+                .filter(|(o, _)| {
+                    results.iter().any(|(x, r)| {
+                        x == *o && matches!(r, apply::Outcome::Failed(docker::Error::Status(409)))
+                    })
+                })
+                .map(|(o, e)| (o.clone(), *e))
+                .collect();
+            let retried = apply::run(&app.docker, &again, &rx, &lookup, grace, limit).await;
+            for (owner, r) in retried {
+                if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
+                    slot.1 = r;
+                }
+            }
+        }
+        for (owner, result) in results {
+            if matches!(result, apply::Outcome::Done(docker::Action::Restart)) {
+                restarted.push(lookup(&owner));
+            }
+            report.push(format!("{owner}: {result:?}"));
+        }
+        for name in wait_healthy(app, new, &restarted, limit).await? {
+            report.push(format!("{name}: not healthy in time"));
+        }
+
+        // What: after a dns restart wait for the pdns API.
+        // Why: a page must not load before pdns runs.
+        // From: Issue #1683 | PR #1980
+        if names
+            .get(&new.text("DNS_SERVICE")?)
+            .is_some_and(|n| restarted.contains(n))
+        {
+            let until = std::time::Instant::now() + limit;
+            let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
+            while let Err(e) = ensure_zones(new).await {
+                if std::time::Instant::now() >= until {
+                    report.push(format!("dns api: {e}"));
+                    break;
+                }
+                tokio::time::sleep(poll).await;
+            }
+        }
+        // What: issue missing certs after the restarts.
+        // Why: many leaves take time; dns must not wait.
+        // From: Issue #1683 | PR #1980
+        report.extend(issue_and_reload(app, new).await?);
+        Ok(report)
+    }
+
+    // What: issue missing certs; reload the proxy.
+    // Why: apply and cert renewal share the step.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn issue_and_reload(
+        app: &Stack,
+        new: &Settings,
+    ) -> Result<Vec<String>, String> {
+        let mut report = Vec::new();
+        let s = new.clone();
+        let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
+            .await
+            .map_err(|e| e.to_string())?;
+        match issued {
+            Ok(0) => {}
+            Ok(n) => {
+                report.push(format!("certs: {n} issued"));
+                let (grace, limit) = app.limits(new)?;
+                let rx = new.list("RELOAD_EXEC");
+                let mut plan = apply::plan(&[proxy_reload(new, "certs")?]);
+                let (names, _) = plan_containers(app, new, &mut plan).await;
+                let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
+                for (owner, result) in
+                    apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
+                {
+                    report.push(format!("{owner}: {result:?}"));
+                }
+            }
+            Err(e) => report.push(format!("certs: {e}")),
+        }
+        Ok(report)
+    }
+
+    // What: wait until restarted containers are healthy.
+    // Why: "done" must mean the service answers again.
+    // From: Issue #1683 | PR #1980
+    pub(crate) async fn wait_healthy(
+        app: &Stack,
+        s: &Settings,
+        names: &[String],
+        limit: Duration,
+    ) -> Result<Vec<String>, String> {
+        let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
+        let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
+        let end = std::time::Instant::now() + wait;
+        let mut late = Vec::new();
+        for name in names {
+            loop {
+                let state = app.docker.inspect(name, limit).await.ok();
+                let health = state.as_ref().map(docker::Health::from_inspect);
+                if matches!(
+                    health,
+                    Some(docker::Health::Healthy | docker::Health::Degraded)
+                ) {
+                    break;
+                }
+                if std::time::Instant::now() >= end {
+                    late.push(name.clone());
+                    break;
+                }
+                tokio::time::sleep(poll).await;
+            }
+        }
+        Ok(late)
+    }
+
+    // What: start or stop a container for the user.
+    // Why: SERVICES_STOPPED is the wish the watchdog obeys.
+    // From: Issue #1683 | PR #1980
+    pub(crate) async fn set_wanted(app: &Stack, service: &str, run: bool) -> Result<(), String> {
+        let s = app.settings();
+        if !s
+            .list("UI_CONTROLLABLE_SERVICES")
+            .iter()
+            .any(|x| x == service)
+        {
+            return Err(format!("{service} cannot be switched here"));
+        }
+        commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)).await?;
+        let (grace, limit) = app.limits(&s)?;
+        let name = container_of(app, &s, service).await?;
+        let action = if run {
+            docker::Action::Start
+        } else {
+            docker::Action::Stop
+        };
+        app.docker
+            .act(&name, action, grace, limit)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 // What: admin ui: settings, pages and actions.
 // Why: owns settings; renders and applies configs.
 // From: Issue #1683 | PR #1858
 mod ui {
-    use crate::config::{self, Settings, process_env};
+    use crate::config::{self, Settings};
     use crate::dhcp::{
         dhcp_probe_cli, dhcp_stays_off, kea_change, kea_snapshots, kea_state, kea_store,
     };
     use crate::dns::{
-        LanDomainEdit, answers_aa, dnssec_chain, drop_old_zones, drop_peer_records, ensure_zones,
+        LanDomainEdit, answers_aa, drop_old_zones, drop_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
         ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
         snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
-    use crate::shared::stack::Stack;
     use crate::shared::{access, apply, docker, fs, http, human, render, secret};
+    use crate::stack::Stack;
+    use crate::stack::{
+        Fields, apply_all, apply_now, check_change, commit, container_of, exec_in, exec_json,
+        issue_and_reload, list_change, proxy_reload, render_now, set_wanted, single_field,
+        stale_rendered,
+    };
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
     use axum::extract::{Form, Request, State};
     use axum::http::{HeaderMap, StatusCode, header};
@@ -13776,7 +14335,7 @@ mod ui {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
@@ -13872,8 +14431,6 @@ mod ui {
     // Why: templates and handlers share one name.
     // From: Issue #1683 | PR #1980
     pub(crate) const CSRF_FIELD: &str = "csrf_token";
-
-    pub(crate) type Fields = BTreeMap<String, String>;
 
     // What: a form field without blanks; empty if missing.
     // Why: one reader for every form handler.
@@ -14286,100 +14843,6 @@ mod ui {
         finish(commit(&app, change).await, &back)
     }
 
-    // What: keep only real changes of known keys.
-    // Why: an empty secret field means keep it.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn changes(old: &Settings, form: Fields) -> Fields {
-        let mut out = Fields::new();
-        for (key, value) in form {
-            let Some(spec) = old.spec(&key) else { continue };
-            let secret = spec.is_secret();
-            if secret && value.is_empty() {
-                continue;
-            }
-            if old.text(&key).ok().as_deref() != Some(value.as_str()) {
-                out.insert(key, value);
-            }
-        }
-        out
-    }
-
-    // What: save, reload, render, write, apply.
-    // Why: one path for every setting change.
-    // From: Issue #1683 | PR #1858
-    pub(crate) async fn commit(app: &Stack, form: Fields) -> Result<(), String> {
-        let Some(path) = app.saved.clone() else {
-            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
-        };
-        let old = app.settings();
-        let updates = changes(&old, form);
-        if updates.is_empty() {
-            return Ok(());
-        }
-        let before = config::read_raw(&path)?;
-        config::store(&path, &old, &updates)?;
-        let new = Settings::load(&process_env, Some(&path))?;
-        if let Err(e) = render_check(&new) {
-            // What: refused save is logged, not only shown.
-            // Why: the error must leave trace in the logs.
-            // From: Issue #1683 | PR #1991
-            eprintln!("ui: save refused: {e}");
-            // What: only changed keys get their old values.
-            // Why: a whole-file write undoes setup.sh edits
-            // From: Issue #1683 | PR #2017
-            let back: Fields = updates
-                .keys()
-                .map(|k| (k.clone(), before.get(k).cloned().unwrap_or_default()))
-                .collect();
-            config::restore(&path, &back)
-                .map_err(|w| format!("{e}; old values not restored: {w}"))?;
-            return Err(e);
-        }
-        for line in adopt(app, &old, new).await? {
-            eprintln!("ui: apply: {line}");
-        }
-        Ok(())
-    }
-
-    // What: a value that cannot render is not kept.
-    // Why: a bad value must not reach the files.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn render_check(new: &Settings) -> Result<(), String> {
-        let none = crate::shared::recursor_conf::Chain::default();
-        let sec = render::secrets(new)?;
-        render::all(new, &sec, &none).map_err(|e| e.join("; "))?;
-        Ok(())
-    }
-
-    // What: apply new settings, then make them current.
-    // Why: save and apply-now end the same way.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn adopt(
-        app: &Stack,
-        old: &Settings,
-        new: Settings,
-    ) -> Result<Vec<String>, String> {
-        let lines = apply_all(app, old, &new, true).await?;
-        match app.settings.write() {
-            Ok(mut s) => *s = new,
-            Err(poisoned) => *poisoned.into_inner() = new,
-        }
-        Ok(lines)
-    }
-
-    // What: read the settings file again and apply it.
-    // Why: a hand edit or a lost file takes effect.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn apply_now(app: &Stack) -> Result<Vec<String>, String> {
-        let old = app.settings();
-        let new = match app.saved.clone() {
-            Some(path) => Settings::load(&process_env, Some(&path))?,
-            None => old.clone(),
-        };
-        render_check(&new)?;
-        adopt(app, &old, new).await
-    }
-
     // What: GET query ?name=&type=&server= as JSON.
     // Why: REST on the query check of the CLI.
     // From: Issue #1683 | PR #2020
@@ -14613,21 +15076,6 @@ mod ui {
         Ok(Vec::new())
     }
 
-    // What: keys a change would set, if it renders.
-    // Why: config validate and ?dry_run=1 save nothing.
-    // From: Issue #1683 | PR #2020
-    pub(crate) fn check_change(app: &Stack, form: Fields) -> Result<Vec<String>, String> {
-        let Some(path) = app.saved.clone() else {
-            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
-        };
-        let old = app.settings();
-        let updates = changes(&old, form);
-        if !updates.is_empty() {
-            render_check(&config::trial(&path, &old, &updates)?)?;
-        }
-        Ok(updates.into_keys().collect())
-    }
-
     // What: logs page.
     // Why: newest lines plus on/off per program.
     // From: Issue #1683 | PR #1980
@@ -14795,24 +15243,6 @@ mod ui {
         );
         ctx.insert("ddns_tsig_key_configured", &secret::tsig_secret(&s).is_ok());
         app.page("domains.html", ctx, &csrf)
-    }
-
-    // What: list setting with one item in or out.
-    // Why: domain add, remove and toggle share it.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn list_change(s: &Settings, key: &str, item: &str, present: bool) -> Fields {
-        let mut items: Vec<String> = s.list(key).into_iter().filter(|x| x != item).collect();
-        if present {
-            items.push(item.to_string());
-        }
-        Fields::from([(key.to_string(), items.join(" "))])
-    }
-
-    // What: a form with exactly one field.
-    // Why: commit takes Fields; a switch saves one key.
-    // From: Issue #1683 | PR #1980
-    pub(crate) fn single_field(key: &str, value: impl ToString) -> Fields {
-        Fields::from([(key.to_string(), value.to_string())])
     }
 
     // What: one DNS page form, chosen by its SOT key.
@@ -15699,57 +16129,6 @@ mod ui {
         }
     }
 
-    // What: container name of a compose service.
-    // Why: Docker calls need the real name.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn container_of(
-        app: &Stack,
-        s: &Settings,
-        service: &str,
-    ) -> Result<String, String> {
-        let list = app.docker.stack(s).await?;
-        let hit = list.iter().find(|c| docker::service_of(c) == Some(service));
-        hit.and_then(docker::name_of)
-            .map(str::to_string)
-            .ok_or_else(|| tr("err_no_container").replace("{service}", service))
-    }
-
-    // What: run a command in a service container.
-    // Why: rc-service and cachehamster go this way.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn exec_in(
-        app: &Stack,
-        s: &Settings,
-        service: &str,
-        cmd: &[&str],
-    ) -> Result<(i64, String), String> {
-        let name = container_of(app, s, service).await?;
-        let (_, limit) = app.limits(s)?;
-        app.docker
-            .exec(&name, cmd, limit)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    // What: run a command; read its last JSON line.
-    // Why: cachehamster and watchdog answer in JSON.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn exec_json(
-        app: &Stack,
-        s: &Settings,
-        service: &str,
-        cmd: &[&str],
-    ) -> Result<(i64, Value), String> {
-        let (code, out) = exec_in(app, s, service, cmd).await?;
-        let line = out
-            .lines()
-            .rev()
-            .find(|l| l.starts_with('{'))
-            .unwrap_or_default();
-        let v = serde_json::from_str(line).map_err(|e| format!("{}: {e}: {out}", cmd.join(" ")))?;
-        Ok((code, v))
-    }
-
     // What: restart or reload one program.
     // Why: only through OpenRC; only listed ones.
     // From: Issue #1683 | PR #1980
@@ -15975,107 +16354,6 @@ mod ui {
         Ok(axum::Json(v).into_response())
     }
 
-    // What: drop proxy render files no longer written.
-    // Why: an old https.conf keeps the SSL server alive.
-    // From: Issue #1683 | PR #2019
-    pub(crate) fn prune_rendered(
-        s: &Settings,
-        files: &[render::File],
-    ) -> Result<Vec<PathBuf>, String> {
-        let stale = stale_rendered(s, files)?;
-        for path in &stale {
-            std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        }
-        Ok(stale)
-    }
-
-    // What: a proxy reload, tagged with its reason.
-    // Why: prune, plan and new certs ask the same.
-    // From: Issue #1683 | PR #2020
-    pub(crate) fn proxy_reload(s: &Settings, why: &str) -> Result<config::Change, String> {
-        Ok(config::Change {
-            key: why.into(),
-            owner: s.text("PROXY_SERVICE")?,
-            effect: config::Effect::Reload,
-        })
-    }
-
-    // What: proxy render files this render no longer has.
-    // Why: prune removes them; the plan lists them.
-    // From: Issue #1683 | PR #2020
-    pub(crate) fn stale_rendered(
-        s: &Settings,
-        files: &[render::File],
-    ) -> Result<Vec<PathBuf>, String> {
-        let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
-        let mut stale = Vec::new();
-        for sub in ["conf.d", "stream.d"] {
-            let dir = conf.join(sub);
-            let kept: std::collections::BTreeSet<&std::path::Path> = files
-                .iter()
-                .map(|f| f.path.as_path())
-                .filter(|p| p.parent() == Some(dir.as_path()))
-                .collect();
-            // What: skip a dir this render did not fill.
-            // Why: an empty set must not wipe the dir.
-            // From: Issue #1683 | PR #2019
-            if kept.is_empty() {
-                continue;
-            }
-            let entries = crate::shared::fs::entries_if_present(&dir)
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
-            for path in entries {
-                if path.is_file() && !kept.contains(path.as_path()) {
-                    stale.push(path);
-                }
-            }
-        }
-        Ok(stale)
-    }
-
-    // What: container name per plan owner; others drop out.
-    // Why: an owner without a container has nothing to do.
-    // From: Issue #1683 | PR #2017
-    pub(crate) async fn plan_containers<V>(
-        app: &Stack,
-        s: &Settings,
-        plan: &mut BTreeMap<String, V>,
-    ) -> (BTreeMap<String, String>, Vec<String>) {
-        let (mut names, mut skipped) = (BTreeMap::new(), Vec::new());
-        for owner in plan.keys() {
-            match container_of(app, s, owner).await {
-                Ok(name) => {
-                    names.insert(owner.clone(), name);
-                }
-                Err(e) => skipped.push(format!("{owner}: skipped, {e}")),
-            }
-        }
-        plan.retain(|owner, _| names.contains_key(owner));
-        (names, skipped)
-    }
-
-    // What: render with the live chain, then write.
-    // Why: apply and start share one way to the files.
-    // From: Issue #1683 | PR #2019
-    pub(crate) async fn render_and_write(
-        s: &Settings,
-    ) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
-        let files = render_now(s).await?.map_err(|e| e.join("; "))?;
-        let written = render::write_files(s, &files)?;
-        Ok((files, written))
-    }
-
-    // What: all files with secrets and the live chain.
-    // Why: write, plan and preview render one way.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn render_now(
-        s: &Settings,
-    ) -> Result<Result<Vec<render::File>, Vec<String>>, String> {
-        let sec = render::secrets(s)?;
-        let chain = dnssec_chain(s).await;
-        Ok(render::all(s, &sec, &chain))
-    }
-
     // What: rendered bodies of an owner or one path.
     // Why: shows a config before it is written.
     // From: Issue #1683 | PR #2020
@@ -16137,208 +16415,6 @@ mod ui {
         Ok(json!({"files": list, "stale": stale, "owners": owners, "errors": []}))
     }
 
-    // What: render, write and wake the owners.
-    // Why: only owners with changes are touched.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn apply_all(
-        app: &Stack,
-        old: &Settings,
-        new: &Settings,
-        zones: bool,
-    ) -> Result<Vec<String>, String> {
-        let (files, written) = render_and_write(new).await?;
-        let mut changes = old.diff(new);
-        app.rendered.store(true, Ordering::Relaxed);
-        changes.extend(written.iter().cloned());
-        // What: drop proxy render files no longer written.
-        // Why: a left-over https.conf keeps SSL server up.
-        // From: Issue #1683 | PR #2019
-        let removed = prune_rendered(new, &files)?;
-        if !removed.is_empty() {
-            for path in &removed {
-                eprintln!("ui: removed stale {}", path.display());
-            }
-            changes.push(proxy_reload(new, "proxy-prune")?);
-        }
-        // What: PowerDNS steps report, not abort.
-        // Why: pdns starts only after the restart below.
-        // From: Issue #1683 | PR #1980
-        let mut report = Vec::new();
-        // What: a new file runs the commands of its daemon.
-        // Why: snmpd and pdns read their file only at start
-        // From: Issue #1683
-        let (_, limit) = app.limits(new)?;
-        for (file, exec, tag) in [
-            ("SNMPD_CONF_FILE", "SNMPD_RELOAD_EXEC", "snmpd"),
-            ("PDNS_CONF_FILE", "PDNS_RESTART_EXEC", "pdns"),
-            ("DNSDIST_CONF_FILE", "DNSDIST_RESTART_EXEC", "dnsdist"),
-        ] {
-            let path = new.text(file)?;
-            if !written.iter().any(|c| c.key == path) {
-                continue;
-            }
-            let ex = new.list(exec);
-            let owners: std::collections::BTreeSet<&str> = ex
-                .iter()
-                .filter_map(|e| e.split_once(':'))
-                .map(|p| p.0)
-                .collect();
-            for owner in owners {
-                match container_of(app, new, owner).await {
-                    Ok(name) => {
-                        let r = apply::reload_exec(&app.docker, &name, &ex, owner, limit).await;
-                        report.push(format!("{owner} {tag}: {r:?}"));
-                    }
-                    Err(e) => report.push(format!("{owner} {tag}: skipped, {e}")),
-                }
-            }
-        }
-        // What: at start zones_at_start owns this step.
-        // Why: dns may not be up yet at that moment.
-        // From: Issue #1683 | PR #1980
-        if zones && let Err(e) = ensure_zones(new).await {
-            report.push(e);
-        }
-        // What: render again once the zones stand.
-        // Why: a new zone has its DS only after ensure.
-        // From: Issue #1683 | PR #2019
-        if zones {
-            match render_and_write(new).await {
-                Ok((_, again)) => changes.extend(again),
-                Err(e) => report.push(e),
-            }
-        }
-        let mut plan = apply::plan(&changes);
-        let (grace, limit) = app.limits(new)?;
-        // What: mode off stops dhcp; a missing one is fine.
-        // Why: compose up may have started it again.
-        // From: Issue #1683 | PR #1980
-        let dhcp = new.text("DHCP_SERVICE")?;
-        if crate::shared::dhcp::off_service(new)?.is_some() {
-            plan.remove(&dhcp);
-            match dhcp_stays_off(app, new).await {
-                Ok(Some(done)) => report.push(format!("{dhcp}: {done}")),
-                Ok(None) => {}
-                Err(e) => report.push(format!("{dhcp}: mode off, {e}")),
-            }
-        }
-        // What: proxy and relay share one dnsmasq daemon.
-        // Why: a mode change keeps the container running.
-        // From: Issue #1683
-        let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
-        if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) {
-            let ex = new.list("DNSMASQ_RESTART_EXEC");
-            match container_of(app, new, &dhcp).await {
-                Ok(name) if !ex.is_empty() => {
-                    let r = apply::reload_exec(&app.docker, &name, &ex, &dhcp, limit).await;
-                    if !matches!(r, apply::Outcome::Failed(_)) {
-                        plan.remove(&dhcp);
-                    }
-                    report.push(format!("{dhcp} dnsmasq: {r:?}"));
-                }
-                Ok(_) => {}
-                Err(e) => report.push(format!("{dhcp} dnsmasq: skipped, {e}")),
-            }
-        }
-        // What: skip an owner that has no container yet.
-        // Why: at stack start it reads new files anyway.
-        // From: Issue #1683 | PR #1980
-        let (names, skipped) = plan_containers(app, new, &mut plan).await;
-        report.extend(skipped);
-        let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-        let rx = new.list("RELOAD_EXEC");
-        let mut restarted = Vec::new();
-        let mut results = apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await;
-        // What: one more try for owners that got a 409.
-        // Why: compose may recreate a container meanwhile.
-        // From: Issue #1683 | PR #1980
-        if results
-            .iter()
-            .any(|(_, r)| matches!(r, apply::Outcome::Failed(docker::Error::Status(409))))
-        {
-            tokio::time::sleep(limit).await;
-            let again: BTreeMap<_, _> = plan
-                .iter()
-                .filter(|(o, _)| {
-                    results.iter().any(|(x, r)| {
-                        x == *o && matches!(r, apply::Outcome::Failed(docker::Error::Status(409)))
-                    })
-                })
-                .map(|(o, e)| (o.clone(), *e))
-                .collect();
-            let retried = apply::run(&app.docker, &again, &rx, &lookup, grace, limit).await;
-            for (owner, r) in retried {
-                if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
-                    slot.1 = r;
-                }
-            }
-        }
-        for (owner, result) in results {
-            if matches!(result, apply::Outcome::Done(docker::Action::Restart)) {
-                restarted.push(lookup(&owner));
-            }
-            report.push(format!("{owner}: {result:?}"));
-        }
-        for name in wait_healthy(app, new, &restarted, limit).await? {
-            report.push(format!("{name}: not healthy in time"));
-        }
-
-        // What: after a dns restart wait for the pdns API.
-        // Why: a page must not load before pdns runs.
-        // From: Issue #1683 | PR #1980
-        if names
-            .get(&new.text("DNS_SERVICE")?)
-            .is_some_and(|n| restarted.contains(n))
-        {
-            let until = std::time::Instant::now() + limit;
-            let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
-            while let Err(e) = ensure_zones(new).await {
-                if std::time::Instant::now() >= until {
-                    report.push(format!("dns api: {e}"));
-                    break;
-                }
-                tokio::time::sleep(poll).await;
-            }
-        }
-        // What: issue missing certs after the restarts.
-        // Why: many leaves take time; dns must not wait.
-        // From: Issue #1683 | PR #1980
-        report.extend(issue_and_reload(app, new).await?);
-        Ok(report)
-    }
-
-    // What: issue missing certs; reload the proxy.
-    // Why: apply and cert renewal share the step.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn issue_and_reload(
-        app: &Stack,
-        new: &Settings,
-    ) -> Result<Vec<String>, String> {
-        let mut report = Vec::new();
-        let s = new.clone();
-        let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
-            .await
-            .map_err(|e| e.to_string())?;
-        match issued {
-            Ok(0) => {}
-            Ok(n) => {
-                report.push(format!("certs: {n} issued"));
-                let (grace, limit) = app.limits(new)?;
-                let rx = new.list("RELOAD_EXEC");
-                let mut plan = apply::plan(&[proxy_reload(new, "certs")?]);
-                let (names, _) = plan_containers(app, new, &mut plan).await;
-                let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-                for (owner, result) in
-                    apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
-                {
-                    report.push(format!("{owner}: {result:?}"));
-                }
-            }
-            Err(e) => report.push(format!("certs: {e}")),
-        }
-        Ok(report)
-    }
-
     // What: GET UI_ROUTE_PROXY_CERTS: CA and leaves.
     // Why: REST reads what the CLI reads.
     // From: Issue #1683 | PR #2020
@@ -16360,65 +16436,6 @@ mod ui {
         let report = issue_and_reload(&app, &s).await?;
         let v = json!({"renewed": dropped, "report": report, "certs": render::cert_list(&s)?});
         Ok(axum::Json(v).into_response())
-    }
-
-    // What: wait until restarted containers are healthy.
-    // Why: "done" must mean the service answers again.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn wait_healthy(
-        app: &Stack,
-        s: &Settings,
-        names: &[String],
-        limit: Duration,
-    ) -> Result<Vec<String>, String> {
-        let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
-        let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
-        let end = std::time::Instant::now() + wait;
-        let mut late = Vec::new();
-        for name in names {
-            loop {
-                let state = app.docker.inspect(name, limit).await.ok();
-                let health = state.as_ref().map(docker::Health::from_inspect);
-                if matches!(
-                    health,
-                    Some(docker::Health::Healthy | docker::Health::Degraded)
-                ) {
-                    break;
-                }
-                if std::time::Instant::now() >= end {
-                    late.push(name.clone());
-                    break;
-                }
-                tokio::time::sleep(poll).await;
-            }
-        }
-        Ok(late)
-    }
-
-    // What: start or stop a container for the user.
-    // Why: SERVICES_STOPPED is the wish the watchdog obeys.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn set_wanted(app: &Stack, service: &str, run: bool) -> Result<(), String> {
-        let s = app.settings();
-        if !s
-            .list("UI_CONTROLLABLE_SERVICES")
-            .iter()
-            .any(|x| x == service)
-        {
-            return Err(format!("{service} cannot be switched here"));
-        }
-        commit(app, list_change(&s, "SERVICES_STOPPED", service, !run)).await?;
-        let (grace, limit) = app.limits(&s)?;
-        let name = container_of(app, &s, service).await?;
-        let action = if run {
-            docker::Action::Start
-        } else {
-            docker::Action::Stop
-        };
-        app.docker
-            .act(&name, action, grace, limit)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     // What: HTTPS IP when HTTPS runs on its own LAN IP.
