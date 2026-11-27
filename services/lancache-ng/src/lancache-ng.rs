@@ -9585,7 +9585,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: bind the TSIG key to every existing zone.
-        // Why: zones of older versions lacked it.
+        // Why: an existing zone may lack the key binding.
         // From: Issue #1683 | PR #1858
         pub async fn ensure_tsig(s: &Settings, key: &str) -> Result<(), String> {
             let api = own_api(s)?;
@@ -9613,7 +9613,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 port,
             )];
             // What: no removal; the primary's check prunes.
-            // Why: this list is from setup; may be older.
+            // Why: this list is from setup, maybe stale.
             // From: Issue #1683
             match_zones(&own_api(s)?, &zones, &masters, key, false, "secondary").await
         }
@@ -9662,7 +9662,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: port 53 if the primary answers aa there.
-        // Why: an older primary has recursor on DNS_PORT.
+        // Why: a primary may run its recursor on DNS_PORT.
         // From: Issue #1683
         pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
             let fallback = s.uint("PDNS_AUTH_PORT")?;
@@ -9811,7 +9811,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: an auth pdns API client for one base URL.
-        // Why: every auth node shares the key and the client.
+        // Why: all auth nodes share the key and client.
         // From: Issue #1683 | PR #2020
         fn pdns_api(s: &Settings, url: &str) -> Result<crate::shared::pdns::Api, String> {
             let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
@@ -10026,7 +10026,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 lua += &format!("addNTA(\"{z}\")\n");
             }
             // What: a top zone is anchored by its own DS.
-            // Why: .lan, .local then validate (POC 25.11.)
+            // Why: .lan and .local then validate.
             // From: Issue #1683 | PR #2019
             for (zone, ds) in &chain.anchors {
                 let name = zone.trim_end_matches('.');
@@ -10171,7 +10171,7 @@ end
             let auth = crate::shared::pdns_conf::auth_endpoint(s)?;
             let mut zones = crate::shared::dns::managed_zones(s)?;
             // What: the top zones go to pdns too.
-            // Why: else root copy denies them (POC case d).
+            // Why: else the root copy denies them.
             // From: Issue #1683 | PR #2019
             for (zone, _) in &chain.anchors {
                 crate::config::add_once(&mut zones, zone);
@@ -10400,7 +10400,7 @@ end
             let lo = s.text("LOOPBACK_BIND_IP")?;
             let source = source_of(s)?;
             // What: peers pass the ACL besides the clients.
-            // Why: NOTIFY and AXFR now reach port 53 too.
+            // Why: NOTIFY and AXFR reach port 53 too.
             // From: Issue #1683
             let peers = match crate::shared::dns::Role::from_settings(s)? {
                 crate::shared::dns::Role::Primary => crate::shared::pdns_conf::secondary_ips(s),
@@ -10821,6 +10821,9 @@ end
         use crate::config::Settings;
         use crate::shared::dhcp::Mode;
 
+        // What: the text of one dnsmasq.conf in progress.
+        // Why: rows go in only through the checked methods.
+        // From: Issue #1683 | PR #1980
         struct Conf(String);
 
         impl Conf {
@@ -10891,7 +10894,7 @@ end
         }
 
         // What: proxy range; empty start = own LAN IP.
-        // Why: 10.0.0.0 default missed the real LAN.
+        // Why: a fixed range start may miss the real LAN.
         // From: Issue #1683 | PR #1991
         fn proxy_range(s: &Settings) -> Result<String, String> {
             let start = s.text_or_empty("DHCP_SUBNET_START");
