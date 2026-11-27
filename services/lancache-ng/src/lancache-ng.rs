@@ -3444,7 +3444,7 @@ mod dhcp {
     // From: Issue #1683 | PR #1980
     fn kea_subnets(cfg: &Value) -> (Vec<Value>, Vec<Value>) {
         let (mut subnets, mut reservations) = (Vec::new(), Vec::new());
-        for sn in cfg["Dhcp4"]["subnet4"].as_array().into_iter().flatten() {
+        for sn in crate::shared::kea_conf::subnets(cfg) {
             for r in sn["reservations"].as_array().into_iter().flatten() {
                 reservations.push(json!({
                     "subnet_id": sn["id"], "mac": r["hw-address"],
@@ -3677,12 +3677,9 @@ mod dhcp {
         if let Some(top) = cfg.as_object_mut() {
             top.remove("hash");
         }
-        let mut subnets = cfg["Dhcp4"]["subnet4"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let mut subnets = crate::shared::kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
-        cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
+        crate::shared::kea_conf::set_subnets(&mut cfg, subnets);
         api.set_config(cfg.clone()).await?;
         let store = kea_store(s)?;
         store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
@@ -10604,6 +10601,22 @@ end
         // From: Issue #1683 | PR #2017
         pub fn pool_text(start: &str, end: &str) -> String {
             format!("{start} - {end}")
+        }
+
+        // What: the subnet list of a Kea config; none: empty.
+        // Why: one reader of where Kea keeps its subnets.
+        // From: Issue #1683 | PR #2020
+        pub fn subnets(cfg: &Value) -> &[Value] {
+            cfg["Dhcp4"]["subnet4"]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice)
+        }
+
+        // What: put a subnet list into a Kea config.
+        // Why: the writer of the place subnets reads.
+        // From: Issue #1683 | PR #2020
+        pub fn set_subnets(cfg: &mut Value, subnets: Vec<Value>) {
+            cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
         }
 
         // What: start and end of a pool text, as pool_text wrote.
