@@ -9662,7 +9662,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: port 53 if the primary answers aa there.
-        // Why: before dnsdist the recursor held port 53.
+        // Why: up to v0.4.0 the recursor held port 53.
         // From: Issue #1683
         pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
             let fallback = s.uint("PDNS_AUTH_PORT")?;
@@ -13674,7 +13674,7 @@ end
             let mut total = 0;
             for row in text.lines() {
                 let cols: Vec<&str> = row.split(';').collect();
-                // What: dst.file rows or the d_store row.
+                // What: old dst.file rows or d_store row.
                 // Why: syslog-ng 4 shows only d_store row.
                 // From: Issue #1683
                 let store = match cols.first() {
