@@ -364,7 +364,7 @@ mod cachehamster {
     // What: seal and store a session.
     // Why: single writer of the token file.
     // From: Issue #871 | PR #1980
-    fn store_session(c: &Ctx, session: &Session) -> Result<(), String> {
+    fn save_session(c: &Ctx, session: &Session) -> Result<(), String> {
         let plain = json_bytes(session)?;
         c.save(
             TOKEN_FILE,
@@ -518,7 +518,7 @@ mod cachehamster {
                 refresh_token: token,
                 access_token: field(&r, "access_token").unwrap_or_default(),
             };
-            store_session(c, &session)?;
+            save_session(c, &session)?;
             delete_file(&c.path(PENDING_FILE))?;
             return Ok(json!({"state": "done", "account": session.account}));
         }
@@ -3157,7 +3157,7 @@ mod config {
     // What: checked sets and drops into the stack .env.
     // Why: a save and a restore write through one path.
     // From: Issue #1683 | PR #2020
-    pub fn store_edits(
+    pub fn save_edits(
         path: &Path,
         current: &Settings,
         edits: &BTreeMap<String, Option<String>>,
@@ -5422,7 +5422,7 @@ mod dns {
     // What: saves secondaries as name@address rows.
     // Why: one SOT key holds the whole list.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn store_secondaries(
+    pub(crate) async fn save_secondaries(
         app: &Stack,
         list: &[(String, String)],
     ) -> Result<(), String> {
@@ -14734,13 +14734,13 @@ end
             get.args(g.sources.iter().map(|x| &x.oid));
             let text = String::from_utf8_lossy(&crate::shared::tool::run(&mut get)?).into_owned();
             let values: Vec<String> = text.lines().map(number_or_unknown).collect();
-            store(s, g, &values)
+            save_row(s, g, &values)
         }
 
         // What: write one sample row into the RRD.
         // Why: SNMP and Docker stats share the files.
         // From: Issue #1683 | PR #1980
-        pub fn store(s: &Settings, g: &Graph, values: &[String]) -> Result<(), String> {
+        pub fn save_row(s: &Settings, g: &Graph, values: &[String]) -> Result<(), String> {
             ensure(s, g)?;
             if values.len() != g.sources.len() {
                 let (got, want) = (values.len(), g.sources.len());
@@ -15622,7 +15622,7 @@ mod stack {
         let _held = app.change.lock().await;
         let old = app.settings();
         let form = build(&old)?;
-        store_and_adopt(app, old, form).await?;
+        save_and_adopt(app, old, form).await?;
         state_after(&app.settings()).await;
         Ok(())
     }
@@ -15630,7 +15630,7 @@ mod stack {
     // What: write a change and apply it; lock is held.
     // Why: commit_with is the one caller that locks.
     // From: Issue #1683 | PR #1858
-    async fn store_and_adopt(app: &Stack, old: Settings, form: Fields) -> Result<(), String> {
+    async fn save_and_adopt(app: &Stack, old: Settings, form: Fields) -> Result<(), String> {
         let edits = changes(&old, form)
             .into_iter()
             .map(|(k, v)| (k, Some(v)))
@@ -15651,7 +15651,7 @@ mod stack {
             return Ok(());
         }
         let before = config::read_raw(&path)?;
-        config::store_edits(&path, &old, &updates)?;
+        config::save_edits(&path, &old, &updates)?;
         let new = Settings::load(&process_env, Some(&path))?;
         if let Err(e) = render_check(&new) {
             // What: refused save is logged, not only shown.
@@ -16176,8 +16176,8 @@ mod ui {
     use crate::dns::{
         LanDomainEdit, answers_aa, commit_and_prune, delete_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
-        ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch, snapshot_list,
-        snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
+        ptr, record, rollback, rotate_tsig, save_secondaries, secondary_health, secondary_watch,
+        snapshot_list, snapshot_zones, valid_peer_name, zone_snapshots,
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
@@ -17296,7 +17296,7 @@ mod ui {
         }
         list.retain(|(n, _)| *n != r.name);
         list.push((r.name.clone(), address));
-        store_secondaries(&app, &list).await?;
+        save_secondaries(&app, &list).await?;
         Ok(axum::Json(peer_kit(&app.settings())?).into_response())
     }
 
@@ -17386,7 +17386,7 @@ mod ui {
                         .map_err(bad_request)?;
                 }
                 list[at].1 = a.address;
-                store_secondaries(&app, &list).await.map_err(bad_request)?;
+                save_secondaries(&app, &list).await.map_err(bad_request)?;
                 Ok(StatusCode::NO_CONTENT.into_response())
             }
             SecondaryOp::Health => {
@@ -17765,13 +17765,13 @@ mod ui {
     // What: stores one RRD row off the async threads.
     // Why: rrdtool blocks; an error joins the list.
     // From: Issue #1683 | PR #2017
-    pub(crate) async fn store_row(
+    pub(crate) async fn save_row(
         s: &Settings,
         graph: crate::shared::rrd::Graph,
         row: Vec<String>,
     ) -> Result<(), String> {
         let s = s.clone();
-        let put = move || crate::shared::rrd::store(&s, &graph, &row);
+        let put = move || crate::shared::rrd::save_row(&s, &graph, &row);
         tokio::task::spawn_blocking(put)
             .await
             .map_err(|e| e.to_string())?
@@ -17816,7 +17816,7 @@ mod ui {
                     .iter()
                     .map(|x| crate::shared::rrd::docker_value(&v, &x.oid))
                     .collect();
-                errs.extend(store_row(s, g.clone(), vals).await.err());
+                errs.extend(save_row(s, g.clone(), vals).await.err());
             }
         }
         errs
@@ -17981,7 +17981,7 @@ mod ui {
                         .unwrap_or_else(|| crate::shared::rrd::UNKNOWN.into())
                 })
                 .collect();
-            errs.extend(store_row(s, g, row).await.err());
+            errs.extend(save_row(s, g, row).await.err());
         }
         errs
     }
