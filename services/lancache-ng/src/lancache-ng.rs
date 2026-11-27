@@ -16332,13 +16332,13 @@ mod ui {
         s.text_or_empty("UI_AUTH_PASSWORD_HASH")
     }
 
-    // What: Basic auth only when a hash is set.
-    // Why: the test stack runs without a password.
+    // What: Basic auth; no hash needs ALLOW_INSECURE_UI.
+    // Why: AG-SEC-001 holds at each login, not at start.
     // From: Issue #1683 | PR #1858
     pub(crate) async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
         let hash = password_hash(s);
         if hash.is_empty() {
-            return true;
+            return s.flag("ALLOW_INSECURE_UI").unwrap_or(false);
         }
         let Some((user, pass)) = basic_credentials(headers) else {
             return false;
