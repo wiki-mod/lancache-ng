@@ -9787,6 +9787,15 @@ mod shared {
             let buffer = s.text("SYSLOG_BUFFER_DIR")?;
             let bytes = s.uint("SYSLOG_BUFFER_BYTES")?;
             let transport = s.text("SYSLOG_FWD_TRANSPORT")?;
+            // What: values inside quotes of a destination.
+            // Why: a quote would end the string.
+            // From: Issue #1683 | PR #2020
+            for v in [buffer.as_str(), transport.as_str()] {
+                crate::config::checked(Syntax::Quoted, v)?;
+            }
+            for t in targets {
+                crate::config::checked(Syntax::Quoted, &t.host)?;
+            }
             Ok(targets
             .iter()
             .enumerate()
@@ -9847,6 +9856,15 @@ mod shared {
             if let Some(bad) = muted.iter().find(|m| !crate::config::safe(NAME, m)) {
                 return Err(format!("SYSLOG_MUTED entry {bad:?} is no plain name"));
             }
+            // What: a setting that must be one bare word.
+            // Why: perm and transport stand unquoted.
+            // From: Issue #1683 | PR #2020
+            let word = |key: &str| -> Result<String, String> {
+                let v = s.text(key)?;
+                crate::config::checked(Syntax::Name(""), &v)
+                    .map(str::to_string)
+                    .map_err(|e| format!("{key}: {e}"))
+            };
             let skip = if muted.is_empty() {
                 String::new()
             } else {
@@ -9860,10 +9878,10 @@ filter f_named {{ program("^[A-Za-z0-9_-]+$" type(pcre)){skip}; }};
 destination {STORE} {{ file("{root}/${{PROGRAM}}/${{YEAR}}${{MONTH}}${{DAY}}.log" template("{template}")); }};
 log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 "#,
-                fperm = s.text("SYSLOG_FILE_PERM")?,
-                dperm = s.text("SYSLOG_DIR_PERM")?,
+                fperm = word("SYSLOG_FILE_PERM")?,
+                dperm = word("SYSLOG_DIR_PERM")?,
                 reap = s.uint("SYSLOG_TIME_REAP")?,
-                inp = s.text("SYSLOG_IN_TRANSPORT")?,
+                inp = word("SYSLOG_IN_TRANSPORT")?,
                 port = s.uint("LANCACHE_LOG_PORT")?,
             );
             out.push_str(&forward_block(s, &targets(s)?, "s_docker")?);
@@ -9875,7 +9893,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     // Why: statistics and alarms read SNMP values.
     // From: Issue #1683 | PR #1980
     pub mod snmp {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
 
         // What: one extend command (custom OID).
         // Why: stack counters beside the stock MIBs.
@@ -9904,11 +9922,21 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             extends: &[Extend],
             matches: &[LogMatch],
         ) -> Result<String, String> {
-            let community = s.text("SNMP_COMMUNITY")?;
+            // What: a value that stays on its snmpd line.
+            // Why: a line break would start a directive.
+            // From: Issue #1683 | PR #1980
+            let text = |key: &str| -> Result<String, String> {
+                let v = s.text(key).map_err(|e| e.to_string())?;
+                crate::config::checked(Syntax::Line, &v)
+                    .map(str::to_string)
+                    .map_err(|e| format!("{key}: {e}"))
+            };
+            let line = |v: &str| crate::config::checked(Syntax::Line, v).map(str::to_string);
+            let community = text("SNMP_COMMUNITY")?;
             let mut out = format!(
                 "agentAddress {}\nrocommunity {community} {}\nincludeAllDisks {}%\nload {} {} {}\n",
-                s.text("SNMP_LISTEN")?,
-                s.text("SNMP_ALLOW_FROM")?,
+                text("SNMP_LISTEN")?,
+                text("SNMP_ALLOW_FROM")?,
                 s.uint("SNMP_DISK_MIN_FREE_PERCENT")?,
                 s.uint("SNMP_LOAD_1")?,
                 s.uint("SNMP_LOAD_5")?,
@@ -9917,20 +9945,21 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             if s.flag("SNMP_AGENTX")? {
                 out += &format!(
                     "master agentx\nagentXSocket {}\n",
-                    s.text("SNMP_AGENTX_SOCKET")?
+                    text("SNMP_AGENTX_SOCKET")?
                 );
             }
             for e in extends {
-                out += &format!("extend {} {}\n", e.name, e.command);
+                out += &format!("extend {} {}\n", line(&e.name)?, line(&e.command)?);
             }
             let every = s.uint("SNMP_LOGMATCH_INTERVAL")?;
             for m in matches {
-                out += &format!("logmatch {} {} {every} {}\n", m.name, m.file, m.regex);
+                let (name, file, regex) = (line(&m.name)?, line(&m.file)?, line(&m.regex)?);
+                out += &format!("logmatch {name} {file} {every} {regex}\n");
             }
             if s.flag("SNMP_TRAPS")? {
                 out += &format!(
                     "trap2sink {} {community}\ndefaultMonitors yes\nlinkUpDownNotifications yes\n",
-                    s.text("SNMP_TRAP_SINK")?
+                    text("SNMP_TRAP_SINK")?
                 );
             }
             Ok(out)
@@ -10999,7 +11028,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     // Why: two recursors: HTTP mode and HTTPS mode.
     // From: Issue #1683 | PR #1980
     pub mod recursor_conf {
-        use crate::config::Settings;
+        use crate::config::{Settings, Syntax};
 
         // What: live DNSSEC state of the own zones.
         // Why: render stays pure; pdns holds the keys.
@@ -11306,7 +11335,14 @@ end
             chain: &Chain,
         ) -> Result<String, String> {
             let u = |k: &str| s.uint(k).map(|v| v.to_string());
-            let auth = crate::shared::pdns_conf::auth_endpoint(s)?;
+            // What: a value inside double quotes.
+            // Why: a quote or line break ends the string.
+            // From: Issue #1683 | PR #2020
+            let q = |v: String| -> Result<String, String> {
+                crate::config::checked(Syntax::Quoted, &v).map(str::to_string)
+            };
+            let auth = q(crate::shared::pdns_conf::auth_endpoint(s)?)?;
+            let (api_key, lua_file) = (q(api_key.to_string())?, q(lua_file.to_string())?);
             let mut zones = crate::shared::dns::managed_zones(s)?;
             // What: the top zones go to pdns too.
             // Why: else the root copy denies them.
@@ -11342,7 +11378,7 @@ end
             let aaaa = if s.flag("DNS_FILTER_AAAA")? {
                 format!(
                     "  lua_dns_script: \"{}\"\n",
-                    s.text("RECURSOR_AAAA_LUA_FILE")?
+                    q(s.text("RECURSOR_AAAA_LUA_FILE")?)?
                 )
             } else {
                 String::new()
@@ -11350,7 +11386,7 @@ end
             let snmp = if s.flag("SNMP_AGENTX")? {
                 format!(
                     "snmp:\n  agent: true\n  daemon_socket: \"{}\"\n",
-                    s.text("SNMP_AGENTX_SOCKET")?
+                    q(s.text("SNMP_AGENTX_SOCKET")?)?
                 )
             } else {
                 String::new()
@@ -11382,7 +11418,7 @@ end
                 "recursor:\n  serve_rfc1918: {}\n",
                 s.flag("DNS_LOCAL_REVERSE_ZONES")?
             );
-            y += &format!("  socket_dir: \"{}\"\n", s.text("RECURSOR_RUN_DIR")?);
+            y += &format!("  socket_dir: \"{}\"\n", q(s.text("RECURSOR_RUN_DIR")?)?);
             y += &format!("  forward_zones:\n{local}{recurse}");
             y += &format!("  lua_config_file: \"{lua_file}\"\n{aaaa}");
             y += &format!(
@@ -11413,7 +11449,7 @@ end
             y += &format!("  servfail_ttl: {}\n", u("RECURSOR_SERVFAIL_TTL")?);
             y += &format!(
                 "webservice:\n  webserver: true\n  address: \"{}\"\n",
-                s.text("PDNS_API_LISTEN")?
+                q(s.text("PDNS_API_LISTEN")?)?
             );
             y += &format!("  port: {}\n  allow_from:\n", u(&which.key("API_PORT"))?);
             y += &yaml_list(&s.list("PDNS_API_ALLOW_FROM")?, "    ")?;
@@ -12453,19 +12489,31 @@ end
                 other => return Err(format!("PROXY_SECURITY_MODE {other} is not lazy/strict")),
             };
             let lo = s.text("LOOPBACK_BIND_IP")?;
+            // What: values that stand in nginx statements.
+            // Why: ; braces or line break end a statement.
+            // From: Issue #1683 | PR #2020
+            let cidrs = s.list("PROXY_ALLOWED_CLIENT_CIDRS")?;
+            let acl = s.text("NGINX_CLIENT_ACL_FILE")?;
+            for v in cidrs
+                .iter()
+                .map(String::as_str)
+                .chain([lo.as_str(), acl.as_str()])
+            {
+                crate::config::checked(Syntax::Nginx, v)?;
+            }
             let at = |k: &str| -> Result<String, String> {
                 Ok(crate::shared::dns::host_port(&lo, s.uint(k)?))
             };
             Ok(Plan {
                 strict,
-                cidrs: s.list("PROXY_ALLOWED_CLIENT_CIDRS")?,
+                cidrs,
                 refuse: at("NGINX_DISCARD_PORT")?,
                 refuse_relay: at("NGINX_REFUSE_RELAY_PORT")?,
                 origin: format!(
                     "$ssl_preread_server_name:{}",
                     s.uint("NGINX_ORIGIN_HTTPS_PORT")?
                 ),
-                acl: s.text("NGINX_CLIENT_ACL_FILE")?,
+                acl,
                 timeouts: format!(
                     "    proxy_connect_timeout {}s;\n    proxy_timeout {}s;\n",
                     s.uint("NGINX_UPSTREAM_CONNECT_TIMEOUT")?,
