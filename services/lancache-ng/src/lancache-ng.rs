@@ -14009,8 +14009,8 @@ mod stack {
     ) -> Result<Vec<PathBuf>, String> {
         let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
         let mut stale = Vec::new();
-        for sub in ["conf.d", "stream.d"] {
-            let dir = conf.join(sub);
+        for part in s.list("NGINX_LINK_PARTS") {
+            let dir = conf.join(part);
             let kept: std::collections::BTreeSet<&std::path::Path> = files
                 .iter()
                 .map(|f| f.path.as_path())
