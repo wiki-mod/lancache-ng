@@ -9674,14 +9674,14 @@ mod shared {
         // From: Issue #1683 | PR #1980
         pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
             if !crt.is_file() {
-                return Err("file missing".into());
+                return Err(format!("{}: file missing", crt.display()));
             }
             Command::new("openssl")
                 .args(["x509", "-noout", "-checkend", &within.to_string(), "-in"])
                 .arg(crt)
                 .output()
                 .map(|o| o.status.success())
-                .map_err(|e| format!("openssl: {e}"))
+                .map_err(|e| format!("{}: openssl: {e}", crt.display()))
         }
 
         // What: one certificate: end, days, renew flag.
@@ -9691,12 +9691,22 @@ mod shared {
             let file = crt.display().to_string();
             match expiry(crt) {
                 Err(_) if !crt.is_file() => serde_json::json!({
-                    "file": file, "present": false, "renew": true, "error": "file missing"}),
+                    "file": file, "present": false, "renew": true,
+                    "error": format!("{file}: file missing")}),
                 Err(e) => serde_json::json!({
-                    "file": file, "present": true, "renew": true, "error": e}),
-                Ok((day, n)) => serde_json::json!({
-                    "file": file, "present": true, "until": day, "days_left": n,
-                    "renew": !valid_for(crt, within).unwrap_or(false)}),
+                    "file": file, "present": true, "renew": true,
+                    "error": format!("{file}: {e}")}),
+                // What: a failed expiry test asks renewal.
+                // Why: an unknown state must not pass.
+                // From: Issue #1683 | PR #2020
+                Ok((day, n)) => match valid_for(crt, within) {
+                    Ok(ok) => serde_json::json!({
+                        "file": file, "present": true, "until": day,
+                        "days_left": n, "renew": !ok}),
+                    Err(e) => serde_json::json!({
+                        "file": file, "present": true, "until": day,
+                        "days_left": n, "renew": true, "error": e}),
+                },
             }
         }
 
