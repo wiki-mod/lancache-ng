@@ -7115,7 +7115,14 @@ mod shared {
         // Why: one owner of the record type of an address.
         // From: Issue #1683 | PR #2017
         pub fn address_kind(address: &str) -> &'static str {
-            if address.contains(':') { "AAAA" } else { "A" }
+            if is_ipv6_text(address) { "AAAA" } else { "A" }
+        }
+
+        // What: true if a host text is an IPv6 form (has ':').
+        // Why: one owner of the v6 test; names have no colon.
+        // From: Issue #1683 | PR #2020
+        pub fn is_ipv6_text(host: &str) -> bool {
+            host.contains(':')
         }
 
         // What: host and port of host, host:port, [v6]:port
@@ -7148,7 +7155,7 @@ mod shared {
         // Why: bare, nobody sees where its port starts.
         // From: Issue #1683 | PR #2017
         pub fn host_port(host: &str, port: impl std::fmt::Display) -> String {
-            if host.contains(':') {
+            if is_ipv6_text(host) {
                 format!("[{host}]:{port}")
             } else {
                 format!("{host}:{port}")
@@ -8688,7 +8695,7 @@ mod shared {
                 // What: ip-protocol(6) for an IPv6 address.
                 // Why: syslog-ng defaults to IPv4 only.
                 // From: Issue #1683 | PR #2020
-                let proto = if t.host.parse::<std::net::Ipv6Addr>().is_ok() {
+                let proto = if crate::shared::dns::is_ipv6_text(&t.host) {
                     " ip-protocol(6)"
                 } else {
                     ""
@@ -12263,7 +12270,7 @@ end
         // Why: the probe reads the raw reply packet.
         // From: Issue #1683 | PR #1980
         fn ask(host: &str, port: u64, wait: Duration) -> std::io::Result<[u8; PACKET]> {
-            let sock = crate::shared::dns::udp_for(host.contains(':'))?;
+            let sock = crate::shared::dns::udp_for(crate::shared::dns::is_ipv6_text(host))?;
             sock.set_read_timeout(Some(wait))?;
             let mut req = [0u8; PACKET];
             req[0] = REQUEST_HEAD;
