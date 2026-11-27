@@ -15308,7 +15308,7 @@ mod ui {
             .filter(|p| !is_on(p))
             .collect();
         let targets = form.get("SYSLOG_FORWARD").cloned().unwrap_or_default();
-        let targets: Vec<&str> = targets.split_whitespace().collect();
+        let targets: Vec<&str> = config::list_items(&targets).collect();
         let mut change = Fields::new();
         change.insert("SYSLOG_MUTED".into(), muted.join(" "));
         change.insert("SYSLOG_FORWARD".into(), targets.join(" "));
