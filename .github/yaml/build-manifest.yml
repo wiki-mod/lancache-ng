@@ -1983,7 +1983,7 @@ runtime:
     - SERVICES_PROGRAM=text;;;fixed;ui
     - DHCP_SUBNET=net;;;reload;dhcp
     - DHCP_SUBNET_ID=uint;1;4294967294;reload;dhcp
-    - DHCP_SUBNET_START=text?;;;reload;dhcp
+    - DHCP_SUBNET_START=ip?;;;reload;dhcp
     - DNS_EXTRA_LAN_DOMAINS=list?;;;reload;dns
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
@@ -2015,7 +2015,7 @@ runtime:
     - DNS_UPSTREAM_SERVERS=addrs?;;;reload;dns
     - DNS_UPSTREAM_UNSIGNED_ZONES=list?;;;reload;dns
     - DNS_UPSTREAM_ZONES=list?;;;reload;dns
-    - DNS_XFR_PRIMARY=text?;;;restart;dns
+    - DNS_XFR_PRIMARY=ip?;;;restart;dns
     - DOCKER_ENDPOINT=text;;;container;services
     - DOCKER_TIMEOUT=uint;1;600;live;services
     - HTTPS_ENABLED=bool;;;reload;proxy

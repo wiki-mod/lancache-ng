@@ -1187,7 +1187,7 @@ mod cachehamster {
                     c.s.uint("STEAM_CLIENT_OS_TYPE")?,
                     c.s.uint("STEAM_CHAT_MODE")?,
                 ],
-                cdn_host: c.s.text("STEAM_CDN_HOST")?,
+                cdn_host: crate::shared::dns::parse_name(&c.s.text("STEAM_CDN_HOST")?)?,
                 max_body: http::max_body(&c.s)?,
                 branch: c.s.text("STEAM_BRANCH")?,
                 os: c.s.text("STEAM_OS")?,
@@ -10491,13 +10491,10 @@ mod shared {
                 .chain(s.list("SYSLOG_FORWARD")?)
                 .map(|t| {
                     let need = || format!("syslog target {t:?} needs host:port");
-                    let (host, port) =
-                        crate::shared::dns::split_host_port(&t).map_err(|_| need())?;
+                    let (host, port) = crate::shared::dns::parse_endpoint(&t, true)
+                        .map_err(|e| format!("syslog target: {e}"))?;
                     let port = port.ok_or_else(need)?;
-                    Ok(Target {
-                        host: host.to_string(),
-                        port,
-                    })
+                    Ok(Target { host, port })
                 })
                 .collect()
         }
@@ -11239,8 +11236,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
     pub mod chrony {
         use crate::config::{Settings, Syntax};
 
-        // What: host, IP, CIDR or path characters only.
-        // Why: values go into a config file.
+        // What: path characters of the drift file.
+        // Why: the path goes into a config file.
         // From: Issue #1683 | PR #1980
         const HOSTISH: Syntax = Syntax::Name(".:/-_");
 
@@ -11248,20 +11245,23 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: upstream needed; only SOT CIDRs may ask.
         // From: Issue #1683 | PR #1980
         pub fn render(s: &Settings) -> Result<String, String> {
-            let upstream = s.list("NTP_UPSTREAM_SERVERS")?;
+            // What: each upstream is read: a name or an IP.
+            // Why: chrony takes no port; nothing else.
+            // From: Issue #1683 | PR #2020
+            let upstream: Vec<String> = s
+                .list("NTP_UPSTREAM_SERVERS")?
+                .iter()
+                .map(|v| match crate::shared::dns::parse_endpoint(v, true)? {
+                    (host, None) => Ok(host),
+                    (_, Some(_)) => Err(format!("NTP_UPSTREAM_SERVERS: {v:?} takes no port")),
+                })
+                .collect::<Result<_, String>>()?;
             if upstream.is_empty() {
                 return Err("NTP_UPSTREAM_SERVERS is empty; NTP never runs alone".into());
             }
             let allowed = s.list("NTP_ALLOWED_CLIENT_CIDRS")?;
             let drift = s.text("NTP_DRIFT_FILE")?;
             let makestep = s.text("NTP_MAKESTEP")?;
-            if let Some(bad) = upstream
-                .iter()
-                .chain(&allowed)
-                .find(|v| !crate::config::safe(HOSTISH, v))
-            {
-                return Err(format!("NTP value {bad:?} has unsafe characters"));
-            }
             if !drift.starts_with('/') || !crate::config::safe(HOSTISH, &drift) {
                 return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
             }
