@@ -3851,7 +3851,7 @@ mod dns {
     use crate::shared::tool;
     use crate::shared::{apply, fs, pdns, recursor_conf, render, secret};
     use crate::stack::{Fields, Stack, apply_all, commit, list_change, single_field};
-    use crate::ui::{Failing, or_stop, primary_https_ip, tr};
+    use crate::ui::{or_stop, primary_https_ip, tr};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::net::{IpAddr, SocketAddr};
@@ -4954,6 +4954,14 @@ mod dns {
         let ours = peer::own_api(s)?.zones().await?;
         let theirs = peer::zones_at(s, address).await?;
         peer::peer_zones(s, &ours, &theirs)
+    }
+
+    // What: failed checks of one secondary in a row.
+    // Why: NS removal needs time and count both.
+    // From: Issue #1683
+    pub(crate) struct Failing {
+        since: Instant,
+        count: u64,
     }
 
     // What: check every secondary; again after a wait.
@@ -15629,14 +15637,6 @@ mod ui {
                 Ok(axum::Json(secondary_health(&s, &list[at].1).await).into_response())
             }
         }
-    }
-
-    // What: failed checks of one secondary in a row.
-    // Why: NS removal needs time and count both.
-    // From: Issue #1683
-    pub(crate) struct Failing {
-        pub(crate) since: std::time::Instant,
-        pub(crate) count: u64,
     }
 
     // What: zone serial overview with the page label.
