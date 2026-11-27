@@ -955,7 +955,7 @@ mod cachehamster {
             .client
             .get(url.clone())
             .header(reqwest::header::RANGE, "bytes=0-0")
-            .timeout(Duration::from_secs(c.s.uint("HTTP_CLIENT_TIMEOUT")?))
+            .timeout(http::timeout(&c.s)?)
             .send()
             .await
             .map_err(|e| format!("{url}: {e}"))?;
@@ -1087,7 +1087,7 @@ mod cachehamster {
                 dir: c.dir.clone(),
                 bind: c.bind.clone(),
                 api: c.api.clone(),
-                limit: Duration::from_secs(c.s.uint("HTTP_CLIENT_TIMEOUT")?),
+                limit: http::timeout(&c.s)?,
                 heartbeat: Duration::from_secs(c.s.uint("STEAM_HEARTBEAT_DEFAULT")?),
                 manifest_api: c.s.uint("STEAM_MANIFEST_API_VERSION")?,
                 cell: c.s.uint("STEAM_CELL_ID")?.to_string(),
@@ -6528,13 +6528,20 @@ mod shared {
             Ok(serde_json::json!({"done": name, "answer": v}))
         }
 
+        // What: the request limit of the shared client.
+        // Why: every HTTP call waits the same SOT time.
+        // From: Issue #1683 | PR #2020
+        pub fn timeout(s: &Settings) -> Result<Duration, String> {
+            s.uint("HTTP_CLIENT_TIMEOUT").map(Duration::from_secs)
+        }
+
         // What: shared client with SOT timeouts.
         // Why: no request may hang without a limit.
         // From: Issue #1683 | PR #1980
         pub fn client(s: &Settings) -> Result<reqwest::Client, String> {
             let secs = |key: &str| s.uint(key).map(Duration::from_secs);
             reqwest::Client::builder()
-                .timeout(secs("HTTP_CLIENT_TIMEOUT")?)
+                .timeout(timeout(s)?)
                 .pool_idle_timeout(secs("HTTP_POOL_IDLE_TIMEOUT")?)
                 .tcp_keepalive(secs("HTTP_TCP_KEEPALIVE")?)
                 .build()
@@ -17348,7 +17355,7 @@ mod ui {
             s.uint("UI_PORT")?,
             s.text("UI_ROUTE_HEALTH")?
         );
-        let limit = Duration::from_secs(s.uint("HTTP_CLIENT_TIMEOUT")?);
+        let limit = http::timeout(s)?;
         http::probe(&url, None, limit).await
     }
 
