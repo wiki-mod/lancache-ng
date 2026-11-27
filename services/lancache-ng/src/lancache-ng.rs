@@ -7473,10 +7473,7 @@ mod shared {
                 .await
                 .map_err(|e| format!("{path}: is the ui running? {}", error_chain(&e)))?;
             let status = resp.status();
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| format!("{path}: {}", error_chain(&e)))?;
+            let text = read_text(resp, max_body(s)?, &path).await?;
             if !status.is_success() && !status.is_redirection() {
                 return Err(format!("ui {}: {text}", status.as_u16()));
             }
