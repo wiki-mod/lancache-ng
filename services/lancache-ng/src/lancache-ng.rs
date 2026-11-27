@@ -385,6 +385,7 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     async fn steam_api(
         client: &reqwest::Client,
+        max: u64,
         api: &str,
         method: &str,
         req: Req<'_>,
@@ -408,7 +409,7 @@ mod cachehamster {
         if !status.is_success() {
             return Err(format!("{method}: HTTP {status}, eresult {eresult}"));
         }
-        let body: Value = resp.json().await.map_err(|e| format!("{method}: {e}"))?;
+        let body: Value = http::read_json(resp, max, method).await?;
         Ok(body.get("response").cloned().unwrap_or(Value::Null))
     }
 
@@ -474,6 +475,7 @@ mod cachehamster {
         let platform = c.s.uint("STEAM_AUTH_PLATFORM_TYPE")?.to_string();
         let r = steam_api(
             client,
+            http::max_body(&c.s)?,
             &c.api,
             "IAuthenticationService/BeginAuthSessionViaQR",
             Req::Post(&[
@@ -506,6 +508,7 @@ mod cachehamster {
         };
         let r = steam_api(
             client,
+            http::max_body(&c.s)?,
             &c.api,
             "IAuthenticationService/PollAuthSessionStatus",
             Req::Post(&[("client_id", &p.client_id), ("request_id", &p.request_id)]),
@@ -562,6 +565,7 @@ mod cachehamster {
         }
         let r = steam_api(
             client,
+            http::max_body(&c.s)?,
             &c.api,
             "IAuthenticationService/GenerateAccessTokenForApp",
             Req::Post(&[
@@ -582,6 +586,7 @@ mod cachehamster {
         let token = access_token(c, client, &s).await?;
         let r = steam_api(
             client,
+            http::max_body(&c.s)?,
             &c.api,
             "IPlayerService/GetOwnedGames",
             Req::Get(&[
@@ -1103,6 +1108,7 @@ mod cachehamster {
         // From: Issue #871 | PR #1980
         logon: [u64; 4],
         cdn_host: String,
+        max_body: u64,
         branch: String,
         os: String,
         // What: the shared client with the SOT timeouts.
@@ -1131,6 +1137,7 @@ mod cachehamster {
                     c.s.uint("STEAM_CHAT_MODE")?,
                 ],
                 cdn_host: c.s.text("STEAM_CDN_HOST")?,
+                max_body: http::max_body(&c.s)?,
                 branch: c.s.text("STEAM_BRANCH")?,
                 os: c.s.text("STEAM_OS")?,
                 web: http::client(&c.s)?,
@@ -1472,6 +1479,7 @@ mod cachehamster {
     async fn cm_list(cfg: &SteamCfg, client: &reqwest::Client) -> Result<Vec<String>, String> {
         let list = steam_api(
             client,
+            cfg.max_body,
             &cfg.api,
             "ISteamDirectory/GetCMList",
             Req::Get(&[("cellid", cfg.cell.as_str())]),
@@ -1877,7 +1885,7 @@ mod cachehamster {
                 skipped.push(format!("depot {depot}: HTTP {}", resp.status()));
                 continue;
             }
-            let body = resp.bytes().await.map_err(|e| format!("{url}: {e}"))?;
+            let body = http::read_body(resp, cfg.max_body, &url).await?;
             for (sha, n) in chunks_of(&body)? {
                 urls.push(format!("http://{}/depot/{depot}/chunk/{sha}", cfg.cdn_host));
                 size += n;
@@ -3814,6 +3822,7 @@ mod dhcp {
         let token = secret::get(s, "KEA_CTRL_TOKEN")?;
         Ok(kea::Api::new(
             http::client(s)?,
+            http::max_body(s)?,
             &url,
             &s.text("KEA_CTRL_USER")?,
             &token,
@@ -7375,6 +7384,62 @@ mod shared {
             s.uint("HTTP_CLIENT_TIMEOUT").map(Duration::from_secs)
         }
 
+        // What: the most bytes one read answer may have.
+        // Why: a far end must not fill the memory.
+        // From: Issue #1683 | PR #2020
+        pub fn max_body(s: &Settings) -> Result<u64, String> {
+            s.uint("HTTP_RESPONSE_MAX_BYTES")
+        }
+
+        // What: a whole answer body, at most max bytes.
+        // Why: one reader; streams are counted, not read.
+        // From: Issue #1683 | PR #2020
+        pub async fn read_body(
+            resp: reqwest::Response,
+            max: u64,
+            what: &str,
+        ) -> Result<Vec<u8>, String> {
+            let over = |n: u64| format!("{what}: answer of {n} bytes or more, limit {max}");
+            if let Some(n) = resp.content_length().filter(|n| *n > max) {
+                return Err(over(n));
+            }
+            let mut out = Vec::new();
+            let mut body = resp.bytes_stream();
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk.map_err(|e| format!("{what}: {}", error_chain(&e)))?;
+                let n = (out.len() + chunk.len()) as u64;
+                if n > max {
+                    return Err(over(n));
+                }
+                out.extend_from_slice(&chunk);
+            }
+            Ok(out)
+        }
+
+        // What: a whole answer as UTF-8 text.
+        // Why: one reader with the size limit.
+        // From: Issue #1683 | PR #2020
+        pub async fn read_text(
+            resp: reqwest::Response,
+            max: u64,
+            what: &str,
+        ) -> Result<String, String> {
+            String::from_utf8(read_body(resp, max, what).await?)
+                .map_err(|_| format!("{what}: answer is no UTF-8 text"))
+        }
+
+        // What: a whole answer as JSON of type T.
+        // Why: one reader with the size limit.
+        // From: Issue #1683 | PR #2020
+        pub async fn read_json<T: serde::de::DeserializeOwned>(
+            resp: reqwest::Response,
+            max: u64,
+            what: &str,
+        ) -> Result<T, String> {
+            serde_json::from_slice(&read_body(resp, max, what).await?)
+                .map_err(|e| format!("{what}: {e}"))
+        }
+
         // What: shared client with SOT timeouts.
         // Why: no request may hang without a limit.
         // From: Issue #1683 | PR #1980
@@ -7483,6 +7548,7 @@ mod shared {
             client: reqwest::Client,
             base: String,
             key: String,
+            max_body: u64,
         }
 
         impl Api {
@@ -7551,11 +7617,12 @@ mod shared {
             // What: a client for one server base URL.
             // Why: auth and recursor share this code.
             // From: Issue #1683 | PR #1980
-            pub fn new(client: reqwest::Client, base: &str, key: &str) -> Self {
+            pub fn new(client: reqwest::Client, max_body: u64, base: &str, key: &str) -> Self {
                 Self {
                     client,
                     base: base.trim_end_matches('/').to_string(),
                     key: key.to_string(),
+                    max_body,
                 }
             }
 
@@ -7581,7 +7648,7 @@ mod shared {
                     .await
                     .map_err(|e| format!("{url}: {}", super::http::error_chain(&e)))?;
                 let status = resp.status();
-                let text = resp.text().await.map_err(|e| format!("{url}: {e}"))?;
+                let text = super::http::read_text(resp, self.max_body, &url).await?;
                 Ok((url, status, text))
             }
 
@@ -9095,7 +9162,10 @@ mod shared {
         // Why: ui, CLI and watchdog reach one engine.
         // From: Issue #1683 | PR #2020
         pub fn client(s: &crate::config::Settings) -> Result<Api, String> {
-            Api::new(&s.text("DOCKER_ENDPOINT")?)
+            Api::new(
+                &s.text("DOCKER_ENDPOINT")?,
+                crate::shared::http::max_body(s)?,
+            )
         }
 
         // What: every service container with its inspect.
@@ -9386,6 +9456,7 @@ mod shared {
         pub struct Api {
             client: reqwest::Client,
             base: String,
+            max_body: u64,
         }
 
         // What: the Id of an answer; what names the call.
@@ -9409,7 +9480,7 @@ mod shared {
             // What: client for a socket path or URL.
             // Why: no redirects; engine never sends one.
             // From: Issue #1683 | PR #1980
-            pub fn new(endpoint: &str) -> Result<Self, String> {
+            pub fn new(endpoint: &str, max_body: u64) -> Result<Self, String> {
                 let endpoint = endpoint.trim();
                 let builder =
                     reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
@@ -9421,7 +9492,11 @@ mod shared {
                     None => (builder, endpoint.trim_end_matches('/').to_string()),
                 };
                 let client = builder.build().map_err(|e| format!("Docker client: {e}"))?;
-                Ok(Self { client, base })
+                Ok(Self {
+                    client,
+                    base,
+                    max_body,
+                })
             }
 
             // What: one request; 2xx and 304 count as ok.
@@ -9453,7 +9528,9 @@ mod shared {
                 if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
                     return Err(Error::Status(status.as_u16()));
                 }
-                resp.bytes().await.map(|b| b.to_vec()).map_err(fail)
+                crate::shared::http::read_body(resp, self.max_body, path)
+                    .await
+                    .map_err(Error::Transport)
             }
 
             // What: GET a path; the answer as JSON.
@@ -10979,9 +11056,10 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         pub fn recursor_apis(s: &Settings) -> Result<Vec<crate::shared::pdns::Api>, String> {
             let key = crate::shared::secret::get(s, "RECURSOR_API_KEY")?;
             let client = crate::shared::http::client(s)?;
+            let max = crate::shared::http::max_body(s)?;
             Ok(s.list("RECURSOR_API_URLS")?
                 .iter()
-                .map(|url| crate::shared::pdns::Api::new(client.clone(), url, &key))
+                .map(|url| crate::shared::pdns::Api::new(client.clone(), max, url, &key))
                 .collect())
         }
 
@@ -11080,6 +11158,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let key = crate::shared::secret::get(s, "PDNS_API_KEY")?;
             Ok(crate::shared::pdns::Api::new(
                 crate::shared::http::client(s)?,
+                crate::shared::http::max_body(s)?,
                 url,
                 &key,
             ))
@@ -12275,7 +12354,8 @@ end
                 .await
                 .map_err(|e| format!("{url}: {e}"))?;
             let resp = resp.error_for_status().map_err(|e| format!("{url}: {e}"))?;
-            let body = resp.text().await.map_err(|e| format!("{url}: {e}"))?;
+            let max = crate::shared::http::max_body(s)?;
+            let body = crate::shared::http::read_text(resp, max, &url).await?;
             stub_status(&body).ok_or_else(|| format!("{url}: no stub_status text"))
         }
 
@@ -14245,18 +14325,26 @@ end
             url: String,
             user: String,
             token: String,
+            max_body: u64,
         }
 
         impl Api {
             // What: client for one agent URL and its login.
             // Why: the agent asks for basic auth (G2).
             // From: Issue #1683 | PR #1985
-            pub fn new(client: reqwest::Client, url: &str, user: &str, token: &str) -> Self {
+            pub fn new(
+                client: reqwest::Client,
+                max_body: u64,
+                url: &str,
+                user: &str,
+                token: &str,
+            ) -> Self {
                 Api {
                     client,
                     url: url.into(),
                     user: user.into(),
                     token: token.into(),
+                    max_body,
                 }
             }
 
@@ -14281,7 +14369,9 @@ end
                     .send()
                     .await
                     .map_err(|e| fail(crate::shared::http::error_chain(&e)))?;
-                let all: Value = reply.json().await.map_err(|e| fail(e.to_string()))?;
+                let all: Value = crate::shared::http::read_json(reply, self.max_body, &self.url)
+                    .await
+                    .map_err(fail)?;
                 let answer = match all.get(0) {
                     Some(first) => first.clone(),
                     None => all,

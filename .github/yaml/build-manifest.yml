@@ -597,6 +597,10 @@ runtime:
     # Why: one shared client builder reads them.
     # From: Issue #1683 | PR #2020
     - HTTP_CLIENT_TIMEOUT=10
+    # What: most bytes of one answer read into memory.
+    # Why: a far end must not fill the memory (F-139).
+    # From: Issue #1683 | PR #2020
+    - HTTP_RESPONSE_MAX_BYTES=268435456
     - HTTP_POOL_IDLE_TIMEOUT=90
     - HTTP_TCP_KEEPALIVE=60
     # What: timeout of an older health probe.
@@ -2022,6 +2026,7 @@ runtime:
     - HTTPS_ENABLED=bool;;;reload;proxy
     - CACHE_MAX_GB=uint;1;1048576;reload;proxy
     - HTTP_CLIENT_TIMEOUT=uint;1;600;live;services
+    - HTTP_RESPONSE_MAX_BYTES=uint;1048576;4294967296;live;services
     - HTTP_POOL_IDLE_TIMEOUT=uint;1;3600;live;services
     - HTTP_TCP_KEEPALIVE=uint;1;3600;live;services
     - IP_HTTP=ip;;;recreate;proxy services
