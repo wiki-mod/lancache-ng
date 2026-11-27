@@ -5980,6 +5980,11 @@ mod dns {
 // Why: one owner per behaviour for every role.
 // From: Issue #1683 | PR #2020
 mod shared {
+    // What: code of the built-in, fallback language.
+    // Why: the ui fills gaps with it; the CLI asks it.
+    // From: Issue #1683 | PR #2020
+    pub const FALLBACK_LANG: &str = "en";
+
     // What: an error as a text key and values, no language.
     // Why: the ui picks the language at its border.
     // From: Issue #1683 | PR #2020
@@ -6770,6 +6775,10 @@ mod shared {
                 Body::Form(f) => client.post(url).form(f),
                 Body::None => client.get(url),
             };
+            // What: the CLI asks for the built-in language.
+            // Why: the CLI is English; pages pick theirs.
+            // From: Issue #1683 | PR #2020
+            let req = req.header(reqwest::header::ACCEPT_LANGUAGE, super::FALLBACK_LANG);
             let resp = req
                 .send()
                 .await
@@ -15089,10 +15098,10 @@ mod ui {
         primary_https_ip, ptr, record, rollback, rotate_tsig, secondary_health, secondary_watch,
         snapshot_list, snapshot_zones, store_secondaries, valid_peer_name, zone_snapshots,
     };
-    use crate::shared::Fault;
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
     use crate::shared::task::or_stop;
+    use crate::shared::{FALLBACK_LANG, Fault};
     use crate::shared::{access, apply, docker, fs, http, human, render, secret};
     use crate::stack::Stack;
     use crate::stack::{
@@ -17655,11 +17664,6 @@ mod ui {
     // Why: English is the fallback; the ui always starts.
     // From: Issue #1683 | PR #2020
     const BUILT_IN_EN: &str = include_str!("../../ui/src/lang/en.json");
-
-    // What: code of the fallback language.
-    // Why: the built-in file is the English one.
-    // From: Issue #1683 | PR #2020
-    const FALLBACK_LANG: &str = "en";
 
     // What: texts at start; English fills every gap.
     // Why: a missing folder or key must not stop the ui.
