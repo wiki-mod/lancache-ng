@@ -6043,7 +6043,14 @@ mod shared {
             // Why: one rule for watchdog light and readers.
             // From: Issue #1683 | PR #2020
             pub fn pct(&self) -> u64 {
-                self.used().saturating_mul(100) / self.total.max(1)
+                crate::shared::human::pct(self.used(), self.total)
+            }
+
+            // What: percent of the disk still free.
+            // Why: the watchdog disk check reads it here.
+            // From: Issue #1683 | PR #2020
+            pub fn free_pct(&self) -> u64 {
+                crate::shared::human::pct(self.free, self.total)
             }
         }
 
@@ -12562,6 +12569,20 @@ end
     pub mod human {
         const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
 
+        // What: bytes of n GiB; None when it overflows.
+        // Why: cache and log sizes are set in whole GiB.
+        // From: Issue #1683 | PR #2020
+        pub fn gib_bytes(n: u64) -> Option<u64> {
+            n.checked_mul(1 << 30)
+        }
+
+        // What: part as a whole percent of whole.
+        // Why: disk, cache and conntrack use one rule.
+        // From: Issue #1683 | PR #2020
+        pub fn pct(part: u64, whole: u64) -> u64 {
+            part.saturating_mul(100) / whole.max(1)
+        }
+
         // What: 1536 becomes "1.5 KiB".
         // Why: whole numbers only; one decimal is enough.
         // From: Issue #1683 | PR #1980
@@ -13358,12 +13379,10 @@ end
             s: &crate::config::Settings,
             used: Option<u64>,
         ) -> Result<serde_json::Value, String> {
-            let max = s
-                .uint("CACHE_MAX_GB")?
-                .checked_shl(30)
+            let max = crate::shared::human::gib_bytes(s.uint("CACHE_MAX_GB")?)
                 .ok_or("CACHE_MAX_GB is too big")?;
             let sp = cache_space(s)?;
-            let pct = used.map(|u| (u.saturating_mul(100) / max.max(1)).min(100));
+            let pct = used.map(|u| crate::shared::human::pct(u, max).min(100));
             Ok(serde_json::json!({
                 "used_bytes": used, "max_bytes": max, "pct_of_max": pct,
                 "reachable_bytes": reachable(s, max, used.unwrap_or(u64::MAX))?,
@@ -16525,8 +16544,7 @@ mod ui {
             .trim()
             .parse()
             .map_err(|_| tr("err_no_gib").replace("{x}", text))?;
-        n.checked_shl(30)
-            .ok_or_else(|| format!("{text:?} is too big"))
+        crate::shared::human::gib_bytes(n).ok_or_else(|| format!("{text:?} is too big"))
     }
 
     // What: refuse a bigger cache without room.
@@ -17711,19 +17729,30 @@ mod watchdog {
     }
 
     impl Memory {
+        // What: drop restarts older than the window.
+        // Why: limit check and report count one way.
+        // From: Issue #1683 | PR #2020
+        fn recent(&mut self, s: &Settings, name: &str) -> Result<usize, String> {
+            let window = s.uint("WATCHDOG_RESTART_WINDOW")?;
+            let now = clock::unix_secs();
+            let times = self.restarts.entry(name.to_string()).or_default();
+            times.retain(|t| now.saturating_sub(*t) <= window);
+            Ok(times.len())
+        }
+
         // What: may this container restart now.
         // Why: at most LIMIT restarts per WINDOW.
         // From: Issue #1683 | PR #1980
         fn restart_allowed(&mut self, s: &Settings, name: &str) -> Result<bool, String> {
             let max = s.uint("WATCHDOG_RESTART_LIMIT")?;
-            let window = s.uint("WATCHDOG_RESTART_WINDOW")?;
-            let now = clock::unix_secs();
-            let times = self.restarts.entry(name.to_string()).or_default();
-            times.retain(|t| now.saturating_sub(*t) <= window);
-            if times.len() as u64 >= max {
+            if self.recent(s, name)? as u64 >= max {
                 return Ok(false);
             }
-            times.push_back(now);
+            let now = clock::unix_secs();
+            self.restarts
+                .entry(name.to_string())
+                .or_default()
+                .push_back(now);
             Ok(true)
         }
     }
@@ -17791,21 +17820,15 @@ mod watchdog {
     // What: miss streak and recent restarts per row.
     // Why: the state lives only in this loop.
     // From: Issue #1683 | PR #2020
-    fn heal_state(s: &Settings, f: &mut Findings, m: &Memory) -> Result<(), String> {
+    fn heal_state(s: &Settings, f: &mut Findings, m: &mut Memory) -> Result<(), String> {
         let (max, window) = (
             s.uint("WATCHDOG_RESTART_LIMIT")?,
             s.uint("WATCHDOG_RESTART_WINDOW")?,
         );
-        let now = clock::unix_secs();
         for row in &mut f.containers {
             let name = row["name"].as_str().unwrap_or_default().to_string();
-            let recent = m.restarts.get(&name).map_or(0, |t| {
-                t.iter()
-                    .filter(|t| now.saturating_sub(**t) <= window)
-                    .count()
-            });
             row["failed_checks"] = m.streak.get(&name).copied().unwrap_or(0).into();
-            row["restarts"] = recent.into();
+            row["restarts"] = m.recent(s, &name)?.into();
         }
         f.heal = serde_json::json!({
             "restart_after": s.uint("RESTART_AFTER")?,
@@ -17827,7 +17850,14 @@ mod watchdog {
     // What: the tidy steps the CLI and REST offer.
     // Why: one list for the command and the route.
     // From: Issue #1683 | PR #2020
-    pub(crate) const TIDY_STEPS: [&str; 3] = ["purge-cache", "prune-logs", "pack-logs"];
+    pub(crate) const TIDY_STEPS: [&str; 3] = [PURGE, PRUNE, PACK];
+
+    // What: CLI names of the three tidy steps.
+    // Why: list, dispatch and answers read these.
+    // From: Issue #1683 | PR #2020
+    const PURGE: &str = "purge-cache";
+    const PRUNE: &str = "prune-logs";
+    const PACK: &str = "pack-logs";
 
     // What: what one tidy step picked and did.
     // Why: round, CLI and REST read one answer.
@@ -17878,7 +17908,7 @@ mod watchdog {
         }
         let all = tidy::files(&tidy::cache_root(s)?);
         let (pick, _) = tidy::older(all, s.uint("CACHE_VALID_DAYS")?, now);
-        let mut t = picked(s, "purge-cache", when, &pick)?;
+        let mut t = picked(s, PURGE, when, &pick)?;
         if when != When::Dry {
             t.errors = tidy::remove(&pick).1;
             eprintln!(
@@ -17909,12 +17939,13 @@ mod watchdog {
             return Ok(None);
         }
         let root = log_root(s)?;
-        let budget = s.uint("SYSLOG_MAX_GB")?.saturating_mul(1 << 30);
+        let budget = crate::shared::human::gib_bytes(s.uint("SYSLOG_MAX_GB")?)
+            .ok_or("SYSLOG_MAX_GB is too big")?;
         let days = s.uint("SYSLOG_RETENTION_DAYS")?;
         let (mut pick, rest) = tidy::older(tidy::files(&root), days, now);
         let (more, mut size) = tidy::over_budget(rest, budget, now);
         pick.extend(more);
-        let mut t = picked(s, "prune-logs", when, &pick)?;
+        let mut t = picked(s, PRUNE, when, &pick)?;
         if when != When::Dry {
             let (freed, errs) = tidy::remove(&pick);
             // What: bytes of failed removals stay counted.
@@ -17939,7 +17970,7 @@ mod watchdog {
     // From: Issue #1683 | PR #1980
     fn pack_logs(s: &Settings, now: u64, when: When) -> Result<Option<Tidied>, String> {
         let pick = tidy::closed(&log_root(s)?, now);
-        let mut t = picked(s, "pack-logs", when, &pick)?;
+        let mut t = picked(s, PACK, when, &pick)?;
         if when != When::Dry {
             t.errors = tidy::pack(&pick, s.uint("SYSLOG_XZ_PRESET")?);
         }
@@ -17952,9 +17983,9 @@ mod watchdog {
     fn tidy_now(s: &Settings, step: &str, dry: bool) -> Result<Tidied, String> {
         let (now, when) = (clock::unix_secs(), if dry { When::Dry } else { When::Now });
         let done = match step {
-            "purge-cache" => purge_cache(s, now, when)?,
-            "prune-logs" => prune_logs(s, now, when)?,
-            "pack-logs" => pack_logs(s, now, when)?,
+            PURGE => purge_cache(s, now, when)?,
+            PRUNE => prune_logs(s, now, when)?,
+            PACK => pack_logs(s, now, when)?,
             _ => return Err(format!("{step}: steps: {}", TIDY_STEPS.join(" "))),
         };
         let mut t = done.ok_or("step did not run")?;
@@ -18024,7 +18055,7 @@ mod watchdog {
                 Err(e) => f.crit(&path, e.to_string()),
                 Ok(sp) if sp.total == 0 => f.warn(&path, "reports size 0"),
                 Ok(sp) => {
-                    let free = sp.free.saturating_mul(100) / sp.total;
+                    let free = sp.free_pct();
                     if free < min {
                         f.crit(&path, format!("{free}% free, minimum {min}%"));
                     }
@@ -18038,7 +18069,7 @@ mod watchdog {
     // Why: a full table drops new connections.
     // From: Issue #1683 | PR #1985
     fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
-        let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join("nf_conntrack");
+        let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join(s.text("CONNTRACK_STAT_FILE")?);
         let Ok(stat) = std::fs::read_to_string(&path) else {
             return Ok(());
         };
@@ -18054,7 +18085,7 @@ mod watchdog {
             .trim()
             .parse()
             .map_err(|e| format!("{max_file}: {e}"))?;
-        let pct = used.saturating_mul(100) / max.max(1);
+        let pct = crate::shared::human::pct(used, max);
         let warn = s.uint("WATCHDOG_CONNTRACK_WARN_PCT")?;
         if pct >= warn {
             f.warn("conntrack", format!("{pct}% used ({used} of {max})"));
@@ -18254,7 +18285,7 @@ mod watchdog {
                 }
                 return Ok(());
             }
-            // What: last alarm report as JSON on stdout
+            // What: last alarm report as JSON on stdout.
             // Why: the CLI reads what the ui and REST show.
             // From: Issue #1683 | PR #2020
             Some("alarms") => {

@@ -1879,10 +1879,11 @@ runtime:
     # Why: an unreadable or empty file is skipped.
     # From: Issue #871
     - CACHEHAMSTER_BIND_FILES=@HOST_MACHINE_ID_FILE@ /sys/class/dmi/id/product_uuid /sys/class/dmi/id/board_serial
-    # What: conntrack table size file and the warn level.
+    # What: conntrack max file, stat file, warn level.
     # Why: a full table drops new connections.
     # From: Issue #1683 | PR #2020
     - CONNTRACK_MAX_FILE=/proc/sys/net/netfilter/nf_conntrack_max
+    - CONNTRACK_STAT_FILE=nf_conntrack
     - WATCHDOG_CONNTRACK_WARN_PCT=80
     # What: ui stop grace and the mode of rendered files.
     # Why: the ui stops containers and writes files so.
@@ -2203,6 +2204,7 @@ runtime:
     - HOST_MACHINE_ID_FILE=path;;;container;services
     - CACHEHAMSTER_BIND_FILES=list;;;restart;services
     - CONNTRACK_MAX_FILE=path;;;live;services
+    - CONNTRACK_STAT_FILE=text;;;live;services
     - WATCHDOG_CONNTRACK_WARN_PCT=uint;1;100;live;services
     - CHECK_INTERVAL=uint;5;3600;live;services
     - SERVICES_STOPPED=list?;;;live;services
