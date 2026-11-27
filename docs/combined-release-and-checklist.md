@@ -874,7 +874,7 @@ before (or has no baseline) and is unhealthy now.
   (`result-gate`).
 - The `setup.sh` DHCP activation preflight (`run_kea_dhcp_activation_preflight`)
   has no CI check.
-- Two writers of the one settings file (`config::store`, the `setup.sh` env
+- Two writers of the one settings file (`config::save_edits`, the `setup.sh` env
   writers under `with_env_lock`) and the merge of the old ui settings file:
   section 10.6, row "One settings file", is live only.
 - `setup.sh` refusing an optional DHCP key that the render fills when empty

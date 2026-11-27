@@ -460,7 +460,7 @@ not reachable:
 - `kea` lists the snapshots in `KEA_CONFIG_SNAPSHOT_DIR` on the host and
   applies the chosen one through the Kea control agent (`config-test`,
   `config-set`, `config-write`).
-- `dns` runs the rollback through `lancache-ui` in the `ui` container.
+- `dns` runs the rollback through `lancache-ng ui` in the `ui` container.
   PowerDNS keeps snapshots per zone, so `<zone>` is required; without it the
   command lists the zones that have snapshots.
 

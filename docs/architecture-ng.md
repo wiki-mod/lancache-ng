@@ -8,11 +8,11 @@ Dockerfiles and compose files name keys, never values.
 
 | Container | Programs | Started by |
 | --- | --- | --- |
-| `services` | lancache-watchdog, lancache-cachehamster, syslog-ng, chronyd, snmpd | OpenRC |
+| `services` | lancache-watchdog (`lancache-ng watchdog`), lancache-cachehamster (`lancache-ng cachehamster daemon`), syslog-ng, chronyd, snmpd | OpenRC |
 | `proxy` | nginx, snmpd | OpenRC |
-| `dns` | dnsdist, PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
+| `dns` | dnsdist, PowerDNS auth, recursor `dns-http`, recursor `dns-https`, lancache-dns (`lancache-ng dns`), snmpd | OpenRC |
 | `dhcp` | Kea (dhcp4, ctrl-agent, ddns) or dnsmasq | OpenRC, runlevel = `DHCP_MODE` |
-| `ui` | lancache-ui, snmpd | OpenRC |
+| `ui` | lancache-ui (`lancache-ng ui`), snmpd | OpenRC |
 
 The program list of each image is the SOT field `processes`. Each row is
 `[runlevel:]name=command,arg,...`. The Dockerfile turns every row into an
@@ -54,11 +54,11 @@ Healthchecks:
 
 | Container | Check |
 | --- | --- |
-| `services` | `lancache-watchdog healthcheck`: the alarm file is newer than `CHECK_INTERVAL × RESTART_AFTER` |
+| `services` | `lancache-ng watchdog healthcheck`: the alarm file is newer than `CHECK_INTERVAL × RESTART_AFTER` |
 | `proxy` | HTTP request to `PROXY_HEALTH_PATH` |
-| `dns` | DNS query for `SETUP_DNS_PROBE_NAME`; any reply counts, so a dead upstream does not restart DNS |
+| `dns` | `lancache-ng dns healthcheck`: DNS query for `SETUP_DNS_PROBE_NAME`; any reply counts, so a dead upstream does not restart DNS |
 | `dhcp` | No crashed OpenRC service |
-| `ui` | `lancache-ui healthcheck` |
+| `ui` | `lancache-ng ui healthcheck` |
 
 ## Configuration flow
 
@@ -67,7 +67,7 @@ Healthchecks:
    mounted at `STACK_ENV_DIR`). `setup.sh` writes the same file; both hold a
    flock of `<file>.lock` while they write. An optional `<file>.local`
    (`.env.local`) beside it overrides single keys; nothing writes it, and the
-   ui refuses to save a key it sets (`config::read_file`, `config::store`).
+   ui refuses to save a key it sets (`config::read_file`, `config::save_edits`).
    Precedence per key: `.env.local`, then `.env` (an empty value means the SOT
    default), then the container env, then the SOT default in
    `build-manifest.yml`. A file value with `$` is a Compose expression; the
@@ -118,7 +118,7 @@ be switched per service in the ui; the ui re-renders the syslog-ng config.
 
 ## Pre-caching
 
-`lancache-cachehamster` runs in `services`. It logs in to Steam by QR
+`lancache-cachehamster` (`lancache-ng cachehamster daemon`) runs in `services`. It logs in to Steam by QR
 code, keeps a job queue (now, later, at a time) and downloads through the
 proxy so the cache fills. The ui starts jobs through it.
 

@@ -327,7 +327,7 @@ appliance spoofs.
   arbitrary clients.
 - **Zone/record rollback**: known-good snapshots are listed and restored by the
   `ui` (`rollback`; route `/domains/zone-rollback` behind the UI
-  authentication and CSRF check, and the CLI `lancache-ui zone-snapshots` /
+  authentication and CSRF check, and the CLI `lancache-ng ui zone-snapshots` /
   `zone-rollback`). Rollback is always operator-selected, never automatic on
   startup. It is therefore only as protected as the Admin UI itself (T3).
 - The PowerDNS API key is a shared secret resolved by `secret::resolve`: the
