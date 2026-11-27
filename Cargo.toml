@@ -31,6 +31,10 @@ dhcproto = "*"
 flate2 = "*"
 futures-util = "*"
 hex = "*"
+# What: jiff for local time from a TZif file.
+# Why: the host zone file is TZif; std has no zones.
+# From: Issue #871 | PR #2020
+jiff = { version = "*", default-features = false, features = ["std", "alloc"] }
 qrcode = { version = "*", default-features = false, features = ["svg"] }
 rand = "*"
 # What: reqwest without default features, on rustls.

@@ -703,9 +703,10 @@ mod cachehamster {
     // From: Issue #871 | PR #2020
     fn limits(c: &Ctx) -> Result<Value, String> {
         let text = c.s.text("CACHEHAMSTER_WINDOW")?;
+        let zone = c.s.text("LOCALTIME_FILE")?;
         Ok(json!({
             "window": text,
-            "in_window": in_window(window(&text)?),
+            "in_window": in_window(window(&text)?, Path::new(&zone))?,
             "max_mbit": c.s.uint("CACHEHAMSTER_MAX_MBIT")?,
             "queues": c.s.uint("CACHEHAMSTER_QUEUES")?,
             "connections": c.s.uint("CACHEHAMSTER_CONCURRENCY")?,
@@ -831,21 +832,18 @@ mod cachehamster {
     }
 
     // What: is the local time inside the window.
-    // Why: the container clock follows TZ; date reads it.
+    // Why: the window is local time of the host zone.
     // From: Issue #871 | PR #1980
-    fn in_window((from, to): (u32, u32)) -> bool {
+    fn in_window((from, to): (u32, u32), zone_file: &Path) -> Result<bool, String> {
         if to.abs_diff(from) == 1440 || from == to {
-            return true;
+            return Ok(true);
         }
-        let now = crate::shared::tool::run(std::process::Command::new("date").arg("+%H:%M"))
-            .ok()
-            .and_then(|out| String::from_utf8(out).ok())
-            .and_then(|t| minutes(&t));
-        match now {
-            Some(n) if from < to => (from..to).contains(&n),
-            Some(n) => n >= from || n < to,
-            None => true,
-        }
+        let n = clock::local_minutes(zone_file)?;
+        Ok(if from < to {
+            (from..to).contains(&n)
+        } else {
+            n >= from || n < to
+        })
     }
 
     // What: true when a waiting job may start now.
@@ -2088,6 +2086,7 @@ mod cachehamster {
         rate: Arc<AtomicU64>,
         running: BTreeMap<String, tokio::task::JoinHandle<State>>,
         window: (u32, u32),
+        zone: PathBuf,
     }
 
     impl Runner {
@@ -2113,10 +2112,17 @@ mod cachehamster {
                     }
                 }
             }
+            // What: a clock error keeps the window shut.
+            // Why: never download outside the set hours.
+            // From: Issue #871 | PR #2020
+            let open = in_window(self.window, &self.zone).unwrap_or_else(|e| {
+                eprintln!("cachehamster: clock: {e}; window stays shut");
+                false
+            });
             // What: outside window jobs pause as waiting.
             // Why: they start again when the window opens.
             // From: Issue #871 | PR #1980
-            if !in_window(self.window) {
+            if !open {
                 for (id, h) in std::mem::take(&mut self.running) {
                     h.abort();
                     if let Some(j) = list.iter_mut().find(|j| j.id == id) {
@@ -2227,6 +2233,7 @@ mod cachehamster {
             rate: Arc::new(AtomicU64::new(0)),
             running: BTreeMap::new(),
             window,
+            zone: PathBuf::from(c.s.text("LOCALTIME_FILE")?),
         };
         let mut last = clock::unix_secs();
         let mut shown = (0usize, 0u64);
@@ -5969,6 +5976,48 @@ mod shared {
         pub fn unix_secs() -> u64 {
             secs_of(SystemTime::now()).unwrap_or(0)
         }
+
+        // What: the time now in the zone of a TZif file.
+        // Why: the host zone is mounted; std has no zones.
+        // From: Issue #871 | PR #2020
+        pub fn local(zone_file: &std::path::Path) -> Result<jiff::ZonedDateTime, String> {
+            let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", zone_file.display());
+            let tz = match crate::shared::fs::read_if_present(zone_file) {
+                Ok(Some(data)) => {
+                    jiff::tz::TimeZone::tzif("localtime", &data).map_err(|e| fail(&e))?
+                }
+                // What: no zone file means UTC.
+                // Why: a container without it runs UTC.
+                // From: Issue #871 | PR #2020
+                Ok(None) => jiff::tz::TimeZone::UTC,
+                Err(e) => return Err(fail(&e)),
+            };
+            Ok(jiff::Timestamp::now().to_zoned_datetime(tz))
+        }
+
+        // What: local minutes since midnight.
+        // Why: daily windows compare HH:MM.
+        // From: Issue #871 | PR #2020
+        pub fn local_minutes(zone_file: &std::path::Path) -> Result<u32, String> {
+            let z = local(zone_file)?;
+            let m = i32::from(z.hour()) * 60 + i32::from(z.minute());
+            u32::try_from(m).map_err(|e| e.to_string())
+        }
+
+        // What: the clock as JSON: unix, local, offset.
+        // Why: CLI and REST show the time services use.
+        // From: Issue #871 | PR #2020
+        pub fn report(s: &crate::config::Settings) -> Result<serde_json::Value, String> {
+            let file = s.text("LOCALTIME_FILE")?;
+            let z = local(std::path::Path::new(&file))?;
+            Ok(serde_json::json!({
+                "unix": z.timestamp().as_second(),
+                "local": z.to_string(),
+                "offset_seconds": z.offset().seconds(),
+                "zone_file": file,
+                "zone_file_present": std::path::Path::new(&file).is_file(),
+            }))
+        }
     }
 
     // What: safe file writes, ownership and disk space.
@@ -8406,6 +8455,13 @@ mod shared {
                     };
                 }
                 ["apply"] => (s.text("UI_ROUTE_APPLY")?, Body::Form(vec![])),
+                // What: the clock: unix, local, zone file.
+                // Why: a read; it needs no running ui.
+                // From: Issue #871 | PR #2020
+                ["time"] => {
+                    println!("{}", crate::shared::clock::report(&s)?);
+                    return Ok(());
+                }
                 // What: Docker engine check; rc 1 on fail.
                 // Why: a read; it needs no running ui.
                 // From: Issue #1683 | PR #2020
@@ -16587,6 +16643,24 @@ mod ui {
         json_reply(r.map(Some), "")
     }
 
+    // What: GET UI_ROUTE_SYSTEM_TIME: the services clock.
+    // Why: the window runs there; REST runs its CLI.
+    // From: Issue #871 | PR #2020
+    pub(crate) async fn system_time_api(State(app): Shared) -> Response {
+        let s = app.settings();
+        let r = async {
+            let rows = s.list("SYSTEM_TIME_EXEC")?;
+            let (svc, cmd) = apply::exec_rows(&rows)
+                .next()
+                .ok_or("SYSTEM_TIME_EXEC has no service:command row")?;
+            match exec_json(&app, &s, svc, &cmd).await? {
+                (0, v) => Ok(v),
+                (code, v) => Err(format!("{} exit {code}: {v}", cmd.join(" "))),
+            }
+        };
+        json_reply(r.await.map(Some), "")
+    }
+
     // What: program values into RRD each step.
     // Why: PowerDNS, nginx, Kea and chrony give values.
     // From: Issue #1683 | PR #1980
@@ -17825,6 +17899,7 @@ mod ui {
             route("UI_ROUTE_PROXY_STATUS", Get, Api, proxy_status_api),
             route("UI_ROUTE_NTP", Get, Api, ntp_api),
             route("UI_ROUTE_NTP_TRACKING", Get, Api, ntp_tracking_api),
+            route("UI_ROUTE_SYSTEM_TIME", Get, Api, system_time_api),
             route("UI_ROUTE_PROXY_LOG", Get, Api, proxy_log_api),
             route("UI_ROUTE_SECRETS", Get, Api, secrets_api),
             route("UI_ROUTE_CACHE", Get, Api, cache_api),

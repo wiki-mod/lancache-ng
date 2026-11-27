@@ -811,6 +811,7 @@ runtime:
     - UI_ROUTE_PROXY_STATUS=/api/proxy-status
     - UI_ROUTE_NTP=/api/ntp
     - UI_ROUTE_NTP_TRACKING=/api/ntp/tracking
+    - UI_ROUTE_SYSTEM_TIME=/api/system/time
     - UI_ROUTE_DNS_RECORDS=/api/dns/records
     - UI_ROUTE_DNS_TSIG=/api/dns/tsig
     - UI_ROUTE_DNS_SOA_PROBE=/api/dns/soa-probe
@@ -1618,6 +1619,10 @@ runtime:
     # Why: the statistics show stratum and offset.
     # From: Issue #1683 | PR #2017
     - CHRONY_TRACKING_EXEC=services:chronyc+-c+tracking
+    # What: the command that reads the services clock.
+    # Why: the cachehamster window runs on that clock.
+    # From: Issue #871 | PR #2020
+    - SYSTEM_TIME_EXEC=services:@SERVICES_PROGRAM@+system+time
     # What: snmpd reload per container on a new snmpd.conf.
     # Why: one file, several snmpd; HUP rereads it.
     # From: Issue #1683
@@ -1923,6 +1928,7 @@ runtime:
     - NTP_AUTO_DHCP=bool;;;reload;dhcp
     - CACHEHAMSTER_CONCURRENCY=uint;1;1024;restart;services
     - CACHEHAMSTER_DATA_DIR=path;;;container;services
+    - LOCALTIME_FILE=path;;;container;services
     - CACHEHAMSTER_POLL_INTERVAL=uint;1;3600;live;services
     - CACHEHAMSTER_PROGRAM=text;;;live;ui
     - CACHEHAMSTER_QUEUES=uint;1;64;restart;services
@@ -2088,6 +2094,7 @@ runtime:
     - DNSDIST_RESTART_EXEC=list;;;live;ui
     - DNSMASQ_RESTART_EXEC=list;;;live;ui
     - CHRONY_TRACKING_EXEC=list;;;live;ui
+    - SYSTEM_TIME_EXEC=list;;;live;ui
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp
