@@ -13483,6 +13483,28 @@ end
             got.map_or_else(|| UNKNOWN.into(), |n| n.to_string())
         }
 
+        // What: rx and tx bytes of /proc/net/dev text.
+        // Why: the host graph sums the interfaces kept.
+        // From: Issue #1683 | PR #2020
+        pub fn host_net(text: &str, skip: &[String]) -> (u64, u64) {
+            let (mut rx, mut tx) = (0u64, 0u64);
+            for line in text.lines() {
+                let Some((name, rest)) = line.split_once(':') else {
+                    continue;
+                };
+                if skip.iter().any(|p| name.trim().starts_with(p.as_str())) {
+                    continue;
+                }
+                let n: Vec<u64> = rest
+                    .split_whitespace()
+                    .filter_map(|w| w.parse().ok())
+                    .collect();
+                rx = rx.saturating_add(n.first().copied().unwrap_or(0));
+                tx = tx.saturating_add(n.get(8).copied().unwrap_or(0));
+            }
+            (rx, tx)
+        }
+
         // What: RRD file of one graph.
         // Why: one file per graph under STATS_DIR.
         // From: Issue #1683 | PR #1980
@@ -16364,22 +16386,7 @@ mod ui {
             && let Ok(file) = s.text("HOST_NET_DEV_FILE")
             && let Ok(text) = fs::read_text(Path::new(&file))
         {
-            let skip = s.list("STATS_HOST_IF_SKIP");
-            let (mut rx, mut tx) = (0u64, 0u64);
-            for line in text.lines() {
-                let Some((name, rest)) = line.split_once(':') else {
-                    continue;
-                };
-                if skip.iter().any(|p| name.trim().starts_with(p.as_str())) {
-                    continue;
-                }
-                let n: Vec<u64> = rest
-                    .split_whitespace()
-                    .filter_map(|w| w.parse().ok())
-                    .collect();
-                rx = rx.saturating_add(n.first().copied().unwrap_or(0));
-                tx = tx.saturating_add(n.get(8).copied().unwrap_or(0));
-            }
+            let (rx, tx) = crate::shared::rrd::host_net(&text, &s.list("STATS_HOST_IF_SKIP"));
             out.insert("host:rx".into(), rx.to_string());
             out.insert("host:tx".into(), tx.to_string());
         }
