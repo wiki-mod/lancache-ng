@@ -8267,7 +8267,7 @@ mod shared {
         }
 
         // What: "addr/len" in its one written form.
-        // Why: 10.0.0.1/8 and 10.0.0.0/8 are one network.
+        // Why: 192.0.2.1/24 and 192.0.2.0/24 are one net.
         // From: Issue #1683 | PR #2020
         pub fn canonical_net(text: &str) -> Result<String, String> {
             parse_net(text).map(|(net, len)| format!("{net}/{len}"))
