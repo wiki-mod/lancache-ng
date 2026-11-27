@@ -4676,6 +4676,37 @@ mod dns {
         peer::ensure_tsig(s, &key).await
     }
 
+    // What: settings with the cache domains of the primary.
+    // Why: its own and off lists decide the RPZ here too.
+    // From: Issue #1683 | PR #2020
+    async fn with_primary_cdn(s: &Settings, zones: &[String]) -> Settings {
+        let read = async {
+            let setup = s.list("DNS_SECONDARY_ZONES")?;
+            let Some(zone) = zones.first().or(setup.first()) else {
+                return Ok(None);
+            };
+            let api = peer::api_at(s, &s.text("DNS_XFR_PRIMARY")?)?;
+            let values = api.metadata(zone, peer::CDN_META).await?;
+            let Some((custom, off)) = peer::cdn_from_meta(&values) else {
+                return Ok(None);
+            };
+            s.with("CDN_CUSTOM_DOMAINS", &config::join_items(&custom))?
+                .with("CDN_DISABLED_DOMAINS", &config::join_items(&off))
+                .map(Some)
+        };
+        // What: no answer keeps the lists this host has.
+        // Why: a primary that is down keeps the RPZ whole.
+        // From: Issue #1683 | PR #2020
+        match read.await {
+            Ok(Some(new)) => new,
+            Ok(None) => s.clone(),
+            Err(e) => {
+                eprintln!("lancache-dns: cache domains of the primary: {e}");
+                s.clone()
+            }
+        }
+    }
+
     // What: one round towards the wanted state.
     // Why: same input changes nothing; a failure retries.
     // From: Issue #1683 | PR #2020
@@ -4688,6 +4719,7 @@ mod dns {
             Ok(zones) => zones.keys().cloned().collect(),
             Err(_) => s.list("DNS_SECONDARY_ZONES")?,
         };
+        let s = &with_primary_cdn(s, &names).await;
         if write_for(s, &names)? {
             done.reload_due = true;
         }
@@ -6222,6 +6254,13 @@ mod dns {
         };
         let tops = own_tops(s)?;
         let hosted = hosted_zones(s, &tops)?;
+        // What: cache domain edits, for the secondaries.
+        // Why: each follow round of a secondary reads them.
+        // From: Issue #1683 | PR #2020
+        let cdn = peer::cdn_meta(
+            &s.list("CDN_CUSTOM_DOMAINS")?,
+            &s.list("CDN_DISABLED_DOMAINS")?,
+        );
         for zone in &hosted {
             let id = pdns::zone_id(zone);
             if !have.contains(&id) {
@@ -6232,6 +6271,7 @@ mod dns {
                 .await?;
             api.set_metadata(&id, "TSIG-ALLOW-DNSUPDATE", &signed)
                 .await?;
+            api.set_metadata(&id, peer::CDN_META, &cdn).await?;
         }
         for lan in crate::shared::dns::lan_domains(s)? {
             merge_legacy_zone(s, &api, &have, &lan).await?;
@@ -8227,6 +8267,20 @@ mod shared {
                 let path = zone_sub(zone, &format!("metadata/{kind}"));
                 let body = json!({"kind": kind, "metadata": values});
                 self.send(Method::PUT, &path, Some(body)).await
+            }
+
+            // What: values of a metadata kind of a zone.
+            // Why: a secondary reads what the primary sets.
+            // From: Issue #1683 | PR #2020
+            pub async fn metadata(&self, zone: &str, kind: &str) -> Result<Vec<String>, String> {
+                let path = zone_sub(zone, &format!("metadata/{kind}"));
+                let v: Value = self.fetch_json(&path, &format!("metadata {kind}")).await?;
+                Ok(v["metadata"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect())
             }
 
             // What: primary address of one secondary zone.
@@ -11533,6 +11587,46 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 .iter()
                 .map(|url| crate::shared::pdns::Api::new(client.clone(), max, url, &key))
                 .collect())
+        }
+
+        // What: metadata kind of the cache domain edits.
+        // Why: the primary publishes, secondaries read it.
+        // From: Issue #1683 | PR #2020
+        pub const CDN_META: &str = "X-LANCACHE-CDN";
+
+        // What: first value of the CDN_META list.
+        // Why: an empty answer then means: never published.
+        // From: Issue #1683 | PR #2020
+        const CDN_META_HEAD: &str = "v1";
+
+        // What: own and off cache domains as values.
+        // Why: one pdns metadata list holds both lists.
+        // From: Issue #1683 | PR #2020
+        pub fn cdn_meta(custom: &[String], off: &[String]) -> Vec<String> {
+            let rows = |tag: &str, list: &[String]| -> Vec<String> {
+                list.iter().map(|d| format!("{tag} {d}")).collect()
+            };
+            let mut out = vec![CDN_META_HEAD.to_string()];
+            out.extend(rows("custom", custom));
+            out.extend(rows("off", off));
+            out
+        }
+
+        // What: both lists of CDN_META; none: unpublished.
+        // Why: reverses cdn_meta; an old primary has none.
+        // From: Issue #1683 | PR #2020
+        pub fn cdn_from_meta(values: &[String]) -> Option<(Vec<String>, Vec<String>)> {
+            if values.first().map(String::as_str) != Some(CDN_META_HEAD) {
+                return None;
+            }
+            let pick = |tag: &str| -> Vec<String> {
+                values
+                    .iter()
+                    .filter_map(|v| v.strip_prefix(tag)?.strip_prefix(' '))
+                    .map(str::to_string)
+                    .collect()
+            };
+            Some((pick("custom"), pick("off")))
         }
 
         // What: serial each zone was last flushed at.
