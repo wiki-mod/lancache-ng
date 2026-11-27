@@ -6680,6 +6680,26 @@ mod shared {
                 self.call(method, path, body).await.map(drop)
             }
 
+            // What: GET a path and read its answer as JSON.
+            // Why: every read names what it parsed on error.
+            // From: Issue #1683 | PR #2020
+            async fn get_json<T: serde::de::DeserializeOwned>(
+                &self,
+                path: &str,
+                what: &str,
+            ) -> Result<T, String> {
+                let text = self.call(Method::GET, path, None).await?;
+                serde_json::from_str(&text).map_err(|e| format!("{what}: {e}"))
+            }
+
+            // What: the JSON document of one zone.
+            // Why: rrsets and the signing check read the same.
+            // From: Issue #1683 | PR #2020
+            async fn zone_doc(&self, zone: &str) -> Result<Value, String> {
+                self.get_json(&zone_path(zone), &format!("zone {zone}"))
+                    .await
+            }
+
             // What: PATCH a list of rrset changes.
             // Why: soa-edit-api raises the serial once.
             // From: Issue #1683 | PR #1980
@@ -6717,9 +6737,7 @@ mod shared {
             // Why: snapshots and lists read them.
             // From: Issue #1683 | PR #1980
             pub async fn rrsets(&self, zone: &str) -> Result<Vec<Value>, String> {
-                let text = self.call(Method::GET, &zone_path(zone), None).await?;
-                let v: Value =
-                    serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
+                let v = self.zone_doc(zone).await?;
                 Ok(v["rrsets"].as_array().cloned().unwrap_or_default())
             }
 
@@ -6865,8 +6883,7 @@ mod shared {
             // Why: sync state compares primary, secondary.
             // From: Issue #1683 | PR #1980
             pub async fn zones(&self) -> Result<Vec<Zone>, String> {
-                let text = self.call(Method::GET, "/zones", None).await?;
-                serde_json::from_str(&text).map_err(|e| format!("zone list: {e}"))
+                self.get_json("/zones", "zone list").await
             }
 
             // What: send NOTIFY to all secondaries now.
@@ -6907,9 +6924,7 @@ mod shared {
             // Why: the dashboard shows query counts.
             // From: Issue #1683 | PR #1980
             pub async fn statistics(&self) -> Result<Vec<(String, String)>, String> {
-                let text = self.call(Method::GET, "/statistics", None).await?;
-                let rows: Vec<Value> =
-                    serde_json::from_str(&text).map_err(|e| format!("statistics: {e}"))?;
+                let rows: Vec<Value> = self.get_json("/statistics", "statistics").await?;
                 Ok(rows
                     .iter()
                     .filter_map(|r| Some((r["name"].as_str()?.into(), r["value"].as_str()?.into())))
@@ -6928,9 +6943,7 @@ mod shared {
             // Why: a new key each apply breaks every anchor
             // From: Issue #1683 | PR #2019
             pub async fn secure(&self, zone: &str) -> Result<(), String> {
-                let text = self.call(Method::GET, &zone_path(zone), None).await?;
-                let v: Value =
-                    serde_json::from_str(&text).map_err(|e| format!("zone {zone}: {e}"))?;
+                let v = self.zone_doc(zone).await?;
                 if v["dnssec"].as_bool() == Some(true) {
                     return Ok(());
                 }
@@ -6946,9 +6959,7 @@ mod shared {
             // From: Issue #1683 | PR #2019
             pub async fn ds(&self, zone: &str) -> Result<Vec<String>, String> {
                 let path = format!("{}/cryptokeys", zone_path(zone));
-                let text = self.call(Method::GET, &path, None).await?;
-                let keys: Vec<Value> =
-                    serde_json::from_str(&text).map_err(|e| format!("keys of {zone}: {e}"))?;
+                let keys: Vec<Value> = self.get_json(&path, &format!("keys of {zone}")).await?;
                 Ok(keys
                     .iter()
                     .filter(|k| k["active"].as_bool() == Some(true))
