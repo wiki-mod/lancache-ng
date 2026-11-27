@@ -43,11 +43,29 @@ mod cachehamster {
     // Why: the daemon owns jobs; commands drop inbox files.
     // From: Issue #871 | PR #1980
     const KEY_FILE: &str = "session.key";
+    // What: name of the sealed session token file.
+    // Why: the token is never stored as plain text.
+    // From: Issue #1683 | PR #2020
     const TOKEN_FILE: &str = "session.sealed";
+    // What: name of the machine binding file.
+    // Why: it holds the features the key was frozen on.
+    // From: Issue #1683 | PR #2020
     const BIND_FILE: &str = "session.bind";
+    // What: name of the pending QR login file.
+    // Why: login-poll reads it across processes.
+    // From: Issue #1683 | PR #2020
     const PENDING_FILE: &str = "login.pending";
+    // What: name of the job list file.
+    // Why: the daemon is its only writer.
+    // From: Issue #1683 | PR #2020
     const JOBS_FILE: &str = "jobs.json";
+    // What: name of the folder of queued orders.
+    // Why: commands drop files here, the daemon takes them.
+    // From: Issue #1683 | PR #2020
     const INBOX_DIR: &str = "inbox";
+    // What: name of the folder of saved depot lists.
+    // Why: the library shows cache use without a login.
+    // From: Issue #1683 | PR #2020
     const DEPOTS_DIR: &str = "depots";
 
     // What: path part of every Steam depot URL.
@@ -76,6 +94,9 @@ mod cachehamster {
         At(u64),
     }
 
+    // What: methods of the start time When.
+    // Why: one place maps a start time to its word.
+    // From: Issue #1683 | PR #2020
     impl When {
         // What: the command word of a start time.
         // Why: add takes now, later or at:UNIX.
@@ -181,6 +202,9 @@ mod cachehamster {
         state: State,
     }
 
+    // What: methods of a prefill Job.
+    // Why: state and history change in one place.
+    // From: Issue #1683 | PR #2020
     impl Job {
         // What: set the state; log it if it changed.
         // Why: one place keeps state and history in step.
@@ -253,6 +277,9 @@ mod cachehamster {
         bind: Vec<String>,
     }
 
+    // What: methods of the command context Ctx.
+    // Why: every command loads settings and paths alike.
+    // From: Issue #1683 | PR #2020
     impl Ctx {
         // What: settings, data folder, API base, bind list.
         // Why: every part of the service reads them once.
@@ -819,6 +846,9 @@ mod cachehamster {
         bytes_per_sec: u64,
     }
 
+    // What: methods of the bandwidth limiter Pace.
+    // Why: each file books its time through wait.
+    // From: Issue #1683 | PR #2020
     impl Pace {
         // What: each file books its time after last one.
         // Why: idle time must not build up credit.
@@ -906,6 +936,9 @@ mod cachehamster {
     // From: Issue #871 | PR #2017
     struct ToProxy(String);
 
+    // What: name resolution of the download client.
+    // Why: reqwest asks this trait for every host.
+    // From: Issue #1683 | PR #2020
     impl reqwest::dns::Resolve for ToProxy {
         // What: answers every name with the proxy.
         // Why: reqwest asks this, not the system DNS.
@@ -934,6 +967,9 @@ mod cachehamster {
         https: u16,
     }
 
+    // What: methods of the download path Dl.
+    // Why: client and URL rules sit with the type.
+    // From: Issue #1683 | PR #2020
     impl Dl {
         // What: client to proxy container; trusts our CA.
         // Why: a direct client saves the docker-proxy load.
@@ -1130,6 +1166,9 @@ mod cachehamster {
         web: reqwest::Client,
     }
 
+    // What: methods of the Steam settings SteamCfg.
+    // Why: the SOT values are read in one load.
+    // From: Issue #1683 | PR #2020
     impl SteamCfg {
         // What: the Steam values of the SOT, read once.
         // Why: a missing key fails before any login.
@@ -1173,6 +1212,9 @@ mod cachehamster {
         Node(Kv),
     }
 
+    // What: methods of the KeyValues tree Kv.
+    // Why: callers walk the tree without a match.
+    // From: Issue #1683 | PR #2020
     impl Kv {
         // What: the value of a key, case ignored.
         // Why: Steam writes key names in mixed case.
@@ -1334,6 +1376,9 @@ mod cachehamster {
     #[derive(Default)]
     struct PbOut(Vec<u8>);
 
+    // What: methods of the protobuf writer PbOut.
+    // Why: each field type has its own encoder.
+    // From: Issue #1683 | PR #2020
     impl PbOut {
         // What: appends a base-128 varint.
         // Why: tags and integers use this encoding.
@@ -1451,15 +1496,45 @@ mod cachehamster {
     // Why: values from Steam's enums_clientserver.proto.
     // From: Issue #871 | PR #1980
     const EMSG_MULTI: u32 = 1;
+    // What: EMsg of a service method answer.
+    // Why: the CM sends it for a job reply.
+    // From: Issue #1683 | PR #2020
     const EMSG_SERVICE_RESPONSE: u32 = 147;
+    // What: EMsg of a service method call.
+    // Why: the CM runs it for a named job.
+    // From: Issue #1683 | PR #2020
     const EMSG_SERVICE_CALL: u32 = 151;
+    // What: EMsg of the heartbeat.
+    // Why: the CM drops a silent session.
+    // From: Issue #1683 | PR #2020
     const EMSG_HEARTBEAT: u32 = 703;
+    // What: EMsg of the logon answer.
+    // Why: its eresult says if the login holds.
+    // From: Issue #1683 | PR #2020
     const EMSG_LOGON_RESPONSE: u32 = 751;
+    // What: EMsg of a logoff notice.
+    // Why: it names why Steam ended the session.
+    // From: Issue #1683 | PR #2020
     const EMSG_LOGGED_OFF: u32 = 757;
+    // What: EMsg of the logon request.
+    // Why: it opens the session with the token.
+    // From: Issue #1683 | PR #2020
     const EMSG_LOGON: u32 = 5514;
+    // What: EMsg of the PICS info request.
+    // Why: it asks for the app KeyValues.
+    // From: Issue #1683 | PR #2020
     const EMSG_PICS_INFO_REQUEST: u32 = 8903;
+    // What: EMsg of the PICS info answer.
+    // Why: it carries the app KeyValues.
+    // From: Issue #1683 | PR #2020
     const EMSG_PICS_INFO_RESPONSE: u32 = 8904;
+    // What: EMsg of the PICS token request.
+    // Why: owned apps need an access token.
+    // From: Issue #1683 | PR #2020
     const EMSG_PICS_TOKEN_REQUEST: u32 = 8905;
+    // What: EMsg of the PICS token answer.
+    // Why: it carries the token of an app.
+    // From: Issue #1683 | PR #2020
     const EMSG_PICS_TOKEN_RESPONSE: u32 = 8906;
     // What: protobuf flag of the message number.
     // Why: every CM message sent here is protobuf.
@@ -1522,6 +1597,9 @@ mod cachehamster {
         limit: Duration,
     }
 
+    // What: methods of the CM session Cm.
+    // Why: login, send and wait share one socket.
+    // From: Issue #1683 | PR #2020
     impl Cm {
         // What: log in with the sealed QR session token.
         // Why: Steam takes refresh token as access_token.
@@ -1803,6 +1881,9 @@ mod cachehamster {
     // From: Issue #871 | PR #1858
     fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
         use std::io::Read as _;
+        // What: magic number of a manifest payload.
+        // Why: a manifest without it is no manifest.
+        // From: Issue #1683 | PR #2020
         const PAYLOAD_MAGIC: u32 = 0x71F6_17D0;
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped))
             .map_err(|e| format!("manifest zip: {e}"))?;
@@ -2120,6 +2201,9 @@ mod cachehamster {
         zone: PathBuf,
     }
 
+    // What: methods of the daemon round Runner.
+    // Why: one pass moves the job list on.
+    // From: Issue #1683 | PR #2020
     impl Runner {
         // What: one pass: inbox, finished, window, due jobs
         // Why: the job file is saved after every pass.
@@ -2610,6 +2694,9 @@ mod config {
         Addrs,
     }
 
+    // What: methods of the setting kind Kind.
+    // Why: the schema word and the kind agree.
+    // From: Issue #1683 | PR #2020
     impl Kind {
         // What: schema word of kind text.
         // Why: the schema row and the schema output agree.
@@ -2736,6 +2823,9 @@ mod config {
         List(Vec<String>),
     }
 
+    // What: text form of a checked Value.
+    // Why: revision and diff compare this text.
+    // From: Issue #1683 | PR #2020
     impl fmt::Display for Value {
         // What: canonical text of a value.
         // Why: revision and diff compare this text.
@@ -2806,6 +2896,9 @@ mod config {
         Name(&'static str),
     }
 
+    // What: methods of the syntax Syntax.
+    // Why: each syntax names what it cannot carry.
+    // From: Issue #1683 | PR #2020
     impl Syntax {
         // What: how a check failure names its syntax.
         // Why: the error says what the value cannot carry.
@@ -2887,6 +2980,9 @@ mod config {
         raw.parse().ok()
     }
 
+    // What: methods of the effect Effect.
+    // Why: the SOT word and the effect agree.
+    // From: Issue #1683 | PR #2020
     impl Effect {
         // What: every effect with its SOT word.
         // Why: parse and word read one table.
@@ -2928,6 +3024,9 @@ mod config {
         }
     }
 
+    // What: methods of the schema row Spec.
+    // Why: parse and check sit with the row.
+    // From: Issue #1683 | PR #2020
     impl Spec {
         // What: true for a row of kind secret.
         // Why: one owner of test; pages hide such values.
@@ -3417,6 +3516,9 @@ mod config {
         pub warnings: Vec<String>,
     }
 
+    // What: methods of the checked Settings.
+    // Why: every typed read goes through them.
+    // From: Issue #1683 | PR #2020
     impl Settings {
         // What: settings of this process and its saved file
         // Why: ui, watchdog and cachehamster start alike.
@@ -6587,6 +6689,9 @@ mod shared {
         Lead(String, Box<Fault>),
     }
 
+    // What: methods of the failure Fault.
+    // Why: a key and values build one failure.
+    // From: Issue #1683 | PR #2020
     impl Fault {
         // What: a failure with a language text and values.
         // Why: the text has {name} places the values fill.
@@ -6610,6 +6715,9 @@ mod shared {
     // Why: ? keeps working on the String errors.
     // From: Issue #1683 | PR #2020
     impl From<String> for Fault {
+        // What: a String as a plain Fault.
+        // Why: ? works on the text errors.
+        // From: Issue #1683 | PR #2020
         fn from(text: String) -> Self {
             Self::Plain(text)
         }
@@ -6619,6 +6727,9 @@ mod shared {
     // Why: ok_or("text")? works in these functions.
     // From: Issue #1683 | PR #2020
     impl From<&str> for Fault {
+        // What: a str as a plain Fault.
+        // Why: ok_or("text")? works in these functions.
+        // From: Issue #1683 | PR #2020
         fn from(text: &str) -> Self {
             Self::Plain(text.to_string())
         }
@@ -6628,6 +6739,9 @@ mod shared {
     // Why: only the ui knows the language texts.
     // From: Issue #1683 | PR #2020
     impl std::fmt::Display for Fault {
+        // What: the text of a Fault.
+        // Why: logs show the key and the values.
+        // From: Issue #1683 | PR #2020
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::Plain(text) => f.write_str(text),
@@ -7092,6 +7206,9 @@ mod shared {
             pub free: u64,
         }
 
+        // What: methods of the disk space Space.
+        // Why: every use figure of a disk is one rule.
+        // From: Issue #1683 | PR #2020
         impl Space {
             // What: bytes in use: total minus free.
             // Why: one rule for every use figure of a disk.
@@ -7607,6 +7724,9 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub struct Build(reqwest::ClientBuilder);
 
+        // What: methods of the client maker Build.
+        // Why: each option is one chained call.
+        // From: Issue #1683 | PR #2020
         impl Build {
             // What: a maker with the reqwest defaults.
             // Why: each caller adds only what it needs.
@@ -7799,6 +7919,9 @@ mod shared {
             max_body: u64,
         }
 
+        // What: the first methods of the pdns Api.
+        // Why: one client holds base, key and limit.
+        // From: Issue #1683 | PR #2020
         impl Api {
             // What: the API base URL, never the key.
             // Why: reports name the server they asked.
@@ -7861,6 +7984,9 @@ mod shared {
             }
         }
 
+        // What: the request methods of the pdns Api.
+        // Why: each PowerDNS call goes through request.
+        // From: Issue #1683 | PR #2020
         impl Api {
             // What: a client for one server base URL.
             // Why: auth and recursor share this code.
@@ -8303,6 +8429,9 @@ mod shared {
             Secondary,
         }
 
+        // What: methods of the replication Role.
+        // Why: one reader of the role setting.
+        // From: Issue #1683 | PR #2020
         impl Role {
             // What: role from DNS_REPLICATION_ROLE.
             // Why: an unknown word is an error.
@@ -8651,6 +8780,9 @@ mod shared {
             pub serial: Option<u32>,
         }
 
+        // What: methods of the SOA answer Soa.
+        // Why: aa and rcode say if a server holds a zone.
+        // From: Issue #1683 | PR #2020
         impl Soa {
             // What: true for an aa answer without an error.
             // Why: only such server holds the zone itself.
@@ -8760,6 +8892,9 @@ mod shared {
         // Why: the CLI takes A, AAAA, SOA ... as words.
         // From: Issue #1683 | PR #2020
         pub fn qtype(word: &str) -> Result<u16, String> {
+            // What: record type names and numbers.
+            // Why: the CLI takes names, the wire numbers.
+            // From: Issue #1683 | PR #2020
             const TYPES: [(&str, u16); 13] = [
                 ("A", TYPE_A),
                 ("NS", TYPE_NS),
@@ -9076,6 +9211,9 @@ mod shared {
             DnsmasqRelay,
         }
 
+        // What: methods of the DHCP Mode.
+        // Why: a word and a mode map both ways.
+        // From: Issue #1683 | PR #2020
         impl Mode {
             // What: mode from DHCP_MODE.
             // Why: an unknown word is an error.
@@ -9142,18 +9280,30 @@ mod shared {
             name: "routers",
             code: 3,
         };
+        // What: option 6, DNS servers.
+        // Why: one named option for render and ui.
+        // From: Issue #1683 | PR #2020
         pub const DNS_SERVERS: Managed = Managed {
             name: "domain-name-servers",
             code: 6,
         };
+        // What: option 15, domain name.
+        // Why: one named option for render and ui.
+        // From: Issue #1683 | PR #2020
         pub const DOMAIN_NAME: Managed = Managed {
             name: "domain-name",
             code: 15,
         };
+        // What: option 42, NTP servers.
+        // Why: one named option for render and ui.
+        // From: Issue #1683 | PR #2020
         pub const NTP_SERVERS: Managed = Managed {
             name: "ntp-servers",
             code: 42,
         };
+        // What: option 119, domain search.
+        // Why: one named option for render and ui.
+        // From: Issue #1683 | PR #2020
         pub const DOMAIN_SEARCH: Managed = Managed {
             name: "domain-search",
             code: 119,
@@ -9263,6 +9413,9 @@ mod shared {
             Stop,
         }
 
+        // What: methods of the container Wish.
+        // Why: a word and a wish map both ways.
+        // From: Issue #1683 | PR #2020
         impl Wish {
             // What: the wish of a boolean: true runs.
             // Why: set_wanted and the CLI pass run or not.
@@ -9311,6 +9464,9 @@ mod shared {
             Unknown(String),
         }
 
+        // What: methods of the container Health.
+        // Why: state, word and colour have one rule.
+        // From: Issue #1683 | PR #2020
         impl Health {
             // What: read docker inspect State.
             // Why: newest check output DEGRADED: refines ok
@@ -9425,6 +9581,9 @@ mod shared {
             pub mode_off: bool,
         }
 
+        // What: methods of the stack Member.
+        // Why: user and mode decide if it is wanted.
+        // From: Issue #1683 | PR #2020
         impl Member {
             // What: false if user or DHCP off stopped it.
             // Why: one wanted rule for bar and watchdog.
@@ -9708,6 +9867,9 @@ mod shared {
             Decode(String),
         }
 
+        // What: text of a Docker API Error.
+        // Why: logs and the ui show one text.
+        // From: Issue #1683 | PR #2020
         impl std::fmt::Display for Error {
             // What: readable text of an API error.
             // Why: shown in logs and the ui.
@@ -9759,6 +9921,9 @@ mod shared {
             serde_json::from_slice(bytes).map_err(|e| Error::Decode(e.to_string()))
         }
 
+        // What: the request methods of the Docker Api.
+        // Why: every engine call goes through call.
+        // From: Issue #1683 | PR #2020
         impl Api {
             // What: client for a socket path or URL.
             // Why: no redirects; engine never sends one.
@@ -10465,6 +10630,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             !name.is_empty() && name.bytes().all(|b| b.is_ascii_digit())
         }
 
+        // What: methods of the snapshot Store.
+        // Why: a store saves, lists, reads, prunes.
+        // From: Issue #1683 | PR #2020
         impl Store {
             // What: the file that holds snapshot id.
             // Why: flat file, or one dir per id with name.
@@ -10562,6 +10730,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: fixed by RFC 2131.
         // From: Issue #1683 | PR #1980
         const CLIENT_PORT: u16 = 68;
+        // What: DHCP server port.
+        // Why: fixed by RFC 2131.
+        // From: Issue #1683 | PR #2020
         const SERVER_PORT: u16 = 67;
 
         // What: largest UDP payload.
@@ -10599,6 +10770,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             pub error: Option<String>,
         }
 
+        // What: constructors of the probe Report.
+        // Why: most exits differ only in two fields.
+        // From: Issue #1683 | PR #2020
         impl Report {
             // What: a report with offers and a lease text.
             // Why: most exits differ only in these.
@@ -11124,6 +11298,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Error,
         }
 
+        // What: the word of a ZoneState.
+        // Why: pages map the word to label and colour.
+        // From: Issue #1683 | PR #2020
         impl ZoneState {
             // What: the word of state in answers and logs.
             // Why: page maps this word to label, colour.
@@ -11171,7 +11348,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         pub fn zone_state(z: &PeerZone) -> ZoneState {
             use std::cmp::Ordering;
             // What: no primary serial is the state Error.
-            // Why: CodeQL read a None in a tuple as unused.
+            // Why: no primary serial gives no sync state.
             // From: Issue #1683 | PR #2020
             let Some(p) = z.primary else {
                 return ZoneState::Error;
@@ -11288,7 +11465,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: port 53 if the primary answers aa there.
-        // Why: up to v0.4.0 the recursor held port 53.
+        // Why: an old primary has the recursor on port 53.
         // From: Issue #1683 | PR #2017
         pub async fn primary_xfr_port(s: &Settings, zone: Option<&String>) -> Result<u64, String> {
             let fallback = s.uint("PDNS_AUTH_PORT")?;
@@ -11352,6 +11529,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         #[derive(Default)]
         pub struct Flushed(Option<BTreeMap<String, u32>>);
 
+        // What: methods of the zone memory Flushed.
+        // Why: one rule for the ui and the dns helper.
+        // From: Issue #1683 | PR #2020
         impl Flushed {
             // What: zones whose serial moved since flush.
             // Why: at start pdns NOTIFY already wiped them.
@@ -11528,6 +11708,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             Https,
         }
 
+        // What: methods of the recursor Which.
+        // Why: a key name is built from the mode.
+        // From: Issue #1683 | PR #2020
         impl Which {
             // What: SOT key RECURSOR_<MODE>_<name>, in full
             // Why: ci.sh bakes only keys the source names.
@@ -12114,9 +12297,21 @@ end
         // Why: Kea accepts only these; not tunable.
         // From: Issue #1683 | PR #1980
         const SOCKET_KIND: &str = "unix";
+        // What: Kea lease database type.
+        // Why: Kea accepts only this value here.
+        // From: Issue #1683 | PR #2020
         const LEASE_BACKEND: &str = "memfile";
+        // What: Kea NCR protocol.
+        // Why: Kea D2 takes only UDP here.
+        // From: Issue #1683 | PR #2020
         const NCR_PROTOCOL: &str = "UDP";
+        // What: Kea NCR format.
+        // Why: Kea D2 takes only JSON here.
+        // From: Issue #1683 | PR #2020
         const NCR_FORMAT: &str = "JSON";
+        // What: Kea log output.
+        // Why: all Kea loggers write to stdout.
+        // From: Issue #1683 | PR #2020
         const LOG_OUTPUT: &str = "stdout";
 
         // What: one Kea logger row per given name.
@@ -12489,6 +12684,9 @@ end
         // From: Issue #1683 | PR #1980
         struct Conf(String);
 
+        // What: methods of the dnsmasq Conf.
+        // Why: rows go in only through checked methods.
+        // From: Issue #1683 | PR #2020
         impl Conf {
             // What: appends one row; refuses a line break.
             // Why: a line break would start a new row.
@@ -12751,6 +12949,9 @@ end
             except: BTreeSet<String>,
         }
 
+        // What: methods of the suffix list Psl.
+        // Why: parse, root and TLD test share the rules.
+        // From: Issue #1683 | PR #2020
         impl Psl {
             // What: read the PSL text format.
             // Why: publicsuffix.org rows: x, *.x, !x.
@@ -12856,6 +13057,9 @@ end
             hex::encode(&sum[..16])
         }
 
+        // What: methods of the cache hosts Hosts.
+        // Why: keys and certs come from one grouping.
+        // From: Issue #1683 | PR #2020
         impl Hosts {
             // What: (server name key, cert name) pairs.
             // Why: feeds the cert map and the allow map.
@@ -13365,6 +13569,9 @@ end
             errs: Vec<String>,
         }
 
+        // What: methods of the render collector Out.
+        // Why: every bad value is named, nothing half done.
+        // From: Issue #1683 | PR #2020
         impl<'a> Out<'a> {
             // What: an empty collector for one render run.
             // Why: all and dns_only start the same way.
@@ -13999,7 +14206,13 @@ end
         // Why: RFC 4330 first byte; rest stays zero.
         // From: Issue #1683 | PR #1980
         const REQUEST_HEAD: u8 = 0x23;
+        // What: size of an NTP packet.
+        // Why: RFC 4330: 48 bytes.
+        // From: Issue #1683 | PR #2020
         const PACKET: usize = 48;
+        // What: NTP server mode.
+        // Why: RFC 4330: a server answers in mode 4.
+        // From: Issue #1683 | PR #2020
         const MODE_SERVER: u8 = 4;
 
         // What: sends one NTP request, returns the reply.
@@ -14364,6 +14577,9 @@ end
             pub hit_pct: f64,
         }
 
+        // What: methods of the log Stats.
+        // Why: each entry counts into the totals.
+        // From: Issue #1683 | PR #2020
         impl Stats {
             // What: adds one log entry to the totals.
             // Why: EXPIRED is fetched anew, so a miss.
@@ -14645,6 +14861,9 @@ end
         // Why: Kea docs: 0 success, 3 empty answer.
         // From: Issue #1683 | PR #1980
         const RESULT_OK: i64 = 0;
+        // What: Kea result code of an empty answer.
+        // Why: Kea docs: 3 means nothing found.
+        // From: Issue #1683 | PR #2020
         const RESULT_EMPTY: i64 = 3;
 
         // What: one control agent address.
@@ -14658,6 +14877,9 @@ end
             max_body: u64,
         }
 
+        // What: methods of the Kea Api.
+        // Why: each Kea command goes through command.
+        // From: Issue #1683 | PR #2020
         impl Api {
             // What: client for one agent URL and its login.
             // Why: the agent asks for basic auth (G2).
@@ -15610,6 +15832,9 @@ end
         }
     }
 
+    // What: tests of the shared building blocks.
+    // Why: they pin the SOA and dnsdist behaviour.
+    // From: Issue #1683 | PR #2020
     #[cfg(test)]
     mod tests {
         use super::dns::{address_kind, soa_query, soa_reply};
