@@ -3768,10 +3768,10 @@ mod dhcp {
                 kea_edit(s, |l| {
                     let sn = subnet_mut(l, *subnet)?;
                     let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
-                    let same = |o: &Value| o["code"].as_u64() == Some(u64::from(*code));
+                    let same = |o: &Value| kea_conf::row_code(o) == Some(u64::from(*code));
                     opts.retain(|o| !same(o) || !kea_conf::is_coded(o));
                     if let Some(data) = data {
-                        opts.push(json!({"code": code, "data": data}));
+                        opts.push(kea_conf::coded_row(*code, data));
                     }
                     sn["option-data"] = opts.into();
                     Ok(())
@@ -10785,7 +10785,7 @@ end
             let mut rows = named_rows(&s.text("DHCP_GATEWAY")?, &dns, domain, &ntp);
             let raw = s.text_or_empty("DHCP_CUSTOM_OPTIONS");
             for (code, data) in crate::shared::dhcp::custom_options(s, &raw)? {
-                rows.push(json!({"code": code, "data": data}));
+                rows.push(coded_row(code, &data));
             }
             Ok(rows)
         }
@@ -10845,6 +10845,20 @@ end
         pub fn pool_parts(pool: &str) -> (&str, &str) {
             let (start, end) = pool.split_once('-').unwrap_or(("", ""));
             (start.trim(), end.trim())
+        }
+
+        // What: an option row given by code, not name.
+        // Why: settings and the subnet edit write one form.
+        // From: Issue #1683 | PR #2020
+        pub fn coded_row(code: u8, data: &str) -> Value {
+            json!({"code": code, "data": data})
+        }
+
+        // What: the option code of a row, if a number.
+        // Why: edits find a row by the code coded_row set.
+        // From: Issue #1683 | PR #2020
+        pub fn row_code(option: &Value) -> Option<u64> {
+            option["code"].as_u64()
         }
 
         // What: true for an option given by code, not name.
