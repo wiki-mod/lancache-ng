@@ -12567,6 +12567,9 @@ end
     // Why: all ui pages show sizes the same way.
     // From: Issue #1683 | PR #1980
     pub mod human {
+        // What: binary size units, smallest first.
+        // Why: bytes() steps through them by 1024.
+        // From: Issue #1683 | PR #1980
         const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
 
         // What: bytes of n GiB; None when it overflows.
@@ -13000,10 +13003,9 @@ end
             for g in all(s)? {
                 let path = file(s, &g)?;
                 let updated = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
                     .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs());
+                    .map(|m| crate::shared::fs::modified_secs(&m))
+                    .filter(|t| *t > 0);
                 let sources: Vec<serde_json::Value> = g
                     .sources
                     .iter()
