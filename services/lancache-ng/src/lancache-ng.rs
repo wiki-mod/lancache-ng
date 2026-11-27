@@ -4907,7 +4907,7 @@ mod dns {
             reverse_name(&ip)?
         };
         let Some(zone) = reverse_zone(s, &name) else {
-            return Err(format!("{name} is in no private reverse zone"));
+            return Err(tr("err_ptr_no_reverse_zone").replace("{name}", &name));
         };
         let mut ttl = 0;
         let mut contents = Vec::new();

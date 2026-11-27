@@ -468,6 +468,7 @@
   "cache_wipe_hint": "Löscht alle zwischengespeicherten Dateien aller Dienste. Sie werden beim nächsten Download neu geholt.",
   "err_ptr_no_zone": "{ip} liegt in keiner Rückwärts-Zone dieses Stacks, deshalb kann kein PTR angelegt werden. PTR-Haken entfernen oder zuerst die Rückwärts-Zone anlegen.",
   "err_ptr_taken": "{ip} hat schon den Rückwärts-Eintrag {name}. Diesen Eintrag zuerst entfernen oder den PTR-Haken entfernen.",
+  "err_ptr_no_reverse_zone": "{name} liegt in keiner privaten Rückwärts-Zone.",
   "reverse_zones_title": "Rückwärts-Zonen",
   "ptr_records_title": "PTR-Einträge",
   "ptr_add_missing": "PTR anlegen",
