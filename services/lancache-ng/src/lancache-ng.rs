@@ -2398,6 +2398,63 @@ mod config {
         Choice(Vec<String>),
     }
 
+    impl Kind {
+        // What: schema word of kind text.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const TEXT: &str = "text";
+
+        // What: schema word of kind bool.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const BOOL: &str = "bool";
+
+        // What: schema word of kind uint.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const UINT: &str = "uint";
+
+        // What: schema word of kind uint~.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const UINT_CLAMP: &str = "uint~";
+
+        // What: schema word of kind list.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const LIST: &str = "list";
+
+        // What: schema word of kind path.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const PATH: &str = "path";
+
+        // What: schema word of kind secret.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const SECRET: &str = "secret";
+
+        // What: schema word of kind choice.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const CHOICE: &str = "choice";
+
+        // What: the schema word of a kind; uint is one.
+        // Why: describe prints the word parse reads.
+        // From: Issue #1683 | PR #2020
+        pub fn word(&self) -> &'static str {
+            match self {
+                Kind::Text => Self::TEXT,
+                Kind::Bool => Self::BOOL,
+                Kind::Uint { .. } => Self::UINT,
+                Kind::List => Self::LIST,
+                Kind::Path => Self::PATH,
+                Kind::Secret => Self::SECRET,
+                Kind::Choice(_) => Self::CHOICE,
+            }
+        }
+    }
+
     // What: what a change needs before it is live.
     // Why: only affected programs act on a change.
     // From: Issue #1683 | PR #1980
@@ -2592,17 +2649,17 @@ mod config {
                 parse_uint(word).ok_or_else(|| format!("{key}: bound {word:?} is no number"))
             };
             let kind = match kind {
-                "text" => Kind::Text,
-                "bool" => Kind::Bool,
-                "uint" | "uint~" => Kind::Uint {
+                Kind::TEXT => Kind::Text,
+                Kind::BOOL => Kind::Bool,
+                Kind::UINT | Kind::UINT_CLAMP => Kind::Uint {
                     min: bound(min, 0)?,
                     max: bound(max, u64::MAX)?,
-                    clamp: kind == "uint~",
+                    clamp: kind == Kind::UINT_CLAMP,
                 },
-                "list" => Kind::List,
-                "path" => Kind::Path,
-                "secret" => Kind::Secret,
-                "choice" => Kind::Choice(min.split(',').map(str::to_string).collect()),
+                Kind::LIST => Kind::List,
+                Kind::PATH => Kind::Path,
+                Kind::SECRET => Kind::Secret,
+                Kind::CHOICE => Kind::Choice(min.split(',').map(str::to_string).collect()),
                 other => return Err(format!("{key}: unknown kind {other:?}")),
             };
             Ok(Self {
@@ -3132,17 +3189,13 @@ mod config {
             let view = self.view();
             let mut out = serde_json::Map::new();
             for sp in self.specs().filter(|sp| only.is_none_or(|k| k == sp.key)) {
-                let (kind, extra) = match &sp.kind {
-                    Kind::Uint { min, max, clamp } => (
-                        "uint",
-                        serde_json::json!({"min": min, "max": max, "clamp": clamp}),
-                    ),
-                    Kind::Choice(c) => ("choice", serde_json::json!({"choices": c})),
-                    Kind::Text => ("text", serde_json::Value::Null),
-                    Kind::Bool => ("bool", serde_json::Value::Null),
-                    Kind::List => ("list", serde_json::Value::Null),
-                    Kind::Path => ("path", serde_json::Value::Null),
-                    Kind::Secret => ("secret", serde_json::Value::Null),
+                let kind = sp.kind.word();
+                let extra = match &sp.kind {
+                    Kind::Uint { min, max, clamp } => {
+                        serde_json::json!({"min": min, "max": max, "clamp": clamp})
+                    }
+                    Kind::Choice(c) => serde_json::json!({"choices": c}),
+                    _ => serde_json::Value::Null,
                 };
                 out.insert(
                     sp.key.clone(),
