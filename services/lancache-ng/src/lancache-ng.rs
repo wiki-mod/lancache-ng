@@ -4367,7 +4367,7 @@ mod dns {
     pub(crate) fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
         let lans = crate::shared::dns::lan_domains(s)?;
         let want = crate::shared::dns::canonical_zone(main.trim());
-        let plain = |z: &String| z.trim_end_matches('.').to_string();
+        let plain = |z: &String| crate::shared::dns::bare_zone(z).to_string();
         let old = lans.first().cloned().unwrap_or_default();
         let mut extra: Vec<String> = lans
             .iter()
@@ -4417,7 +4417,7 @@ mod dns {
         s: &Settings,
         zone: &str,
     ) -> Result<crate::shared::snapshot::Store, String> {
-        let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(zone.trim_end_matches('.'));
+        let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(crate::shared::dns::bare_zone(zone));
         let keep = s.num::<usize>("DNS_SNAPSHOT_KEEP")?;
         let owner = fs::Owner::default();
         Ok(crate::shared::snapshot::Store {
@@ -4546,7 +4546,7 @@ mod dns {
                     .as_ref()
                     .is_some_and(|p| p.is_tld(crate::shared::dns::ending(zone)));
                 json!({
-                    "name": zone.trim_end_matches('.'),
+                    "name": crate::shared::dns::bare_zone(zone),
                     "main": i == 0,
                     "records": own,
                     "subnets": subnets.get(zone).cloned().unwrap_or_default(),
@@ -4657,7 +4657,7 @@ mod dns {
         raw: &str,
     ) -> Result<(), String> {
         let zone = crate::shared::dns::canonical_zone(raw.trim());
-        let name = zone.trim_end_matches('.').to_string();
+        let name = crate::shared::dns::bare_zone(&zone).to_string();
         let lans = crate::shared::dns::lan_domains(s)?;
         let before = hosted_now(s)?;
         let change = match edit {
@@ -4705,7 +4705,7 @@ mod dns {
         // What: only a whole-label suffix counts as inside.
         // Why: "xhome.lan" is not in zone "home.lan".
         // From: Issue #1683
-        let bare = zone.trim_end_matches('.');
+        let bare = crate::shared::dns::bare_zone(zone);
         let inside = crate::shared::dns::is_within(name, bare);
         if name.ends_with('.') || inside {
             name.to_string()
@@ -4771,7 +4771,7 @@ mod dns {
                 if let Some(other) = have.iter().find(|h| **h != host) {
                     return Err(tr("err_ptr_taken")
                         .replace("{ip}", ip)
-                        .replace("{name}", other.trim_end_matches('.')));
+                        .replace("{name}", crate::shared::dns::bare_zone(other)));
                 }
                 places.push((rev, rz));
             }
@@ -6658,7 +6658,7 @@ mod shared {
         // Why: the API wants canonical names.
         // From: Issue #1683 | PR #1980
         pub fn zone_id(zone: &str) -> String {
-            format!("{}.", zone.trim_end_matches('.'))
+            format!("{}.", super::dns::bare_zone(zone))
         }
 
         // What: the API path of one zone.
@@ -7034,11 +7034,18 @@ mod shared {
             crate::shared::pdns::zone_id(&zone.to_ascii_lowercase())
         }
 
+        // What: a zone or name without its final dots.
+        // Why: one rule for the dotless form of a name.
+        // From: Issue #1683 | PR #2020
+        pub fn bare_zone(zone: &str) -> &str {
+            zone.trim_end_matches('.')
+        }
+
         // What: RFC 1035 host name check.
         // Why: SRV needs "_", RPZ wildcards need "*".
         // From: Issue #1683 | PR #1980
         pub fn is_dns_name(name: &str, underscore: bool, wildcard: bool) -> bool {
-            let name = name.trim_end_matches('.');
+            let name = bare_zone(name);
             let label_ok = |label: &str| {
                 (1..=63).contains(&label.len())
                     && !label.starts_with('-')
@@ -7208,7 +7215,7 @@ mod shared {
         // Why: endings decide top zones and refused names.
         // From: Issue #1683 | PR #2019
         pub fn ending(name: &str) -> &str {
-            let bare = name.trim_end_matches('.');
+            let bare = bare_zone(name);
             bare.rsplit('.').next().unwrap_or(bare)
         }
 
@@ -7219,7 +7226,7 @@ mod shared {
             let mut out: Vec<String> = Vec::new();
             for raw in std::iter::once(main).chain(extra.iter().map(String::as_str)) {
                 let zone = canonical_zone(raw);
-                let name = zone.trim_end_matches('.');
+                let name = bare_zone(&zone);
                 // What: one label like "lan" is allowed.
                 // Why: setup.sh offers it; NTA covers it.
                 // From: Issue #1683
@@ -7249,7 +7256,7 @@ mod shared {
         // From: Issue #1683
         pub fn lan_domains(s: &Settings) -> Result<Vec<String>, String> {
             let main = lan_zone(s)?;
-            let main = main.trim_end_matches('.');
+            let main = bare_zone(&main);
             validate_lan_domains(main, &s.list("DNS_EXTRA_LAN_DOMAINS"))
         }
 
@@ -7310,7 +7317,7 @@ mod shared {
         // Why: an old install holds it; its records merge.
         // From: Issue #1683
         pub fn legacy_local_zone(lan: &str) -> String {
-            canonical_zone(&format!("local.{}", lan.trim_end_matches('.')))
+            canonical_zone(&format!("local.{}", bare_zone(lan)))
         }
 
         // What: compare serials by RFC 1982.
@@ -7350,7 +7357,7 @@ mod shared {
         pub fn query(id: u16, name: &str, qtype: u16, rd: bool) -> Result<Vec<u8>, String> {
             let mut q = id.to_be_bytes().to_vec();
             q.extend_from_slice(&[u8::from(rd), 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-            for label in name.trim_end_matches('.').split('.') {
+            for label in bare_zone(name).split('.') {
                 if label.is_empty() || label.len() > 63 {
                     return Err(format!("zone {name:?} is no DNS name"));
                 }
@@ -10026,7 +10033,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // Why: apex of a subdomain row must not match.
             // From: Issue #1072
             for (d, subtree) in domains {
-                let d = d.trim_end_matches('.');
+                let d = crate::shared::dns::bare_zone(d);
                 if !crate::shared::dns::is_dns_name(d, false, true) {
                     return Err(format!("cache domain {d:?} is no DNS name"));
                 }
@@ -10050,7 +10057,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // From: Issue #1683 | PR #1980
             for z in crate::shared::dns::managed_zones(s)? {
                 if !chain.secured.contains(&z) {
-                    out.push(z.trim_end_matches('.').to_string());
+                    out.push(crate::shared::dns::bare_zone(&z).to_string());
                 }
             }
             // What: a top zone without DS stays an NTA.
@@ -10058,7 +10065,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // From: Issue #1683 | PR #2019
             for (zone, ds) in &chain.anchors {
                 if ds.is_empty() {
-                    out.push(zone.trim_end_matches('.').to_string());
+                    out.push(crate::shared::dns::bare_zone(zone).to_string());
                 }
             }
             // What: no DNSSEC check for private domains.
@@ -10088,7 +10095,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // Why: .lan and .local then validate.
             // From: Issue #1683 | PR #2019
             for (zone, ds) in &chain.anchors {
-                let name = zone.trim_end_matches('.');
+                let name = crate::shared::dns::bare_zone(zone);
                 crate::config::plain(name)?;
                 for row in ds {
                     crate::config::plain(row)?;
@@ -10128,7 +10135,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         fn upstream_zones(s: &Settings, key: &str) -> Result<Vec<String>, String> {
             let mut out = Vec::new();
             for raw in s.list(key) {
-                let z = raw.trim_end_matches('.').to_ascii_lowercase();
+                let z = crate::shared::dns::bare_zone(&raw).to_ascii_lowercase();
                 // What: name with "_" allowed; empty is "."
                 // Why: a..b, -bad- are no names to forward
                 // From: Issue #1918
@@ -10145,7 +10152,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // From: Issue #1683 | PR #1980
             if key == "DNS_UPSTREAM_ZONES" {
                 for m in crate::shared::dns::managed_zones(s)? {
-                    let m = m.trim_end_matches('.').to_ascii_lowercase();
+                    let m = crate::shared::dns::bare_zone(&m).to_ascii_lowercase();
                     if let Some(z) = out.iter().find(|z| crate::shared::dns::is_within(z, &m)) {
                         return Err(format!(
                             "{key}: {z} is the local zone {m}; it is answered here"
@@ -10240,7 +10247,7 @@ end
                 .map(|z| {
                     format!(
                         "    - zone: \"{}\"\n      forwarders: [\"{auth}\"]\n",
-                        z.trim_end_matches('.')
+                        crate::shared::dns::bare_zone(z)
                     )
                 })
                 .collect();
@@ -10293,7 +10300,7 @@ end
             if crate::shared::dns::Role::from_settings(s)? == crate::shared::dns::Role::Secondary {
                 let names: Vec<String> = zones
                     .iter()
-                    .map(|z| z.trim_end_matches('.').to_string())
+                    .map(|z| crate::shared::dns::bare_zone(z).to_string())
                     .collect();
                 y += &format!("  allow_notify_for:\n{}", yaml_list(&names, "    ")?);
                 let from = [s.text("LOOPBACK_BIND_IP")?];
@@ -10526,7 +10533,7 @@ end
         // From: Issue #1683 | PR #1980
         fn lan_domain(s: &Settings) -> Result<String, String> {
             let zone = crate::shared::dns::lan_zone(s)?;
-            Ok(zone.trim_end_matches('.').to_string())
+            Ok(crate::shared::dns::bare_zone(&zone).to_string())
         }
 
         // What: the control socket entry of Kea DHCPv4.
@@ -10738,7 +10745,7 @@ end
                 .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
                 .and_then(Value::as_str)
                 .filter(|d| !lans.contains(&crate::shared::dns::canonical_zone(d)))
-                .map(|d| d.trim_end_matches('.').to_string());
+                .map(|d| crate::shared::dns::bare_zone(d).to_string());
             let id = s.uint("DHCP_SUBNET_ID")?;
             let net = s.text("DHCP_SUBNET")?;
             let kept = Value::Array(existing.map_or(&[][..], subnets).to_vec());
@@ -11929,7 +11936,7 @@ end
         // Why: the same PSL and host map nginx gets.
         // From: Issue #1683 | PR #2020
         pub fn psl_lookup(s: &Settings, host: &str) -> Result<serde_json::Value, String> {
-            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            let host = crate::shared::dns::bare_zone(host).to_ascii_lowercase();
             let list = psl(s)?;
             let hosts = cache_hosts(s, &crate::shared::cdn::effective(s)?)?;
             // What: exact name first, then longest *. key.
@@ -15387,7 +15394,7 @@ mod ui {
         let lan = crate::shared::dns::lan_zone(&s)?;
         let mut ctx = Context::new();
         ctx.insert("dns_domains", &crate::shared::cdn::parse_rows(&s)?);
-        ctx.insert("lan_zone", lan.trim_end_matches('.'));
+        ctx.insert("lan_zone", crate::shared::dns::bare_zone(&lan));
         let view = crate::dns::lan_view(&s).await?;
         if let Some(e) = view["error"].as_str() {
             ctx.insert("domain_error_message", e);
@@ -15739,7 +15746,7 @@ mod ui {
         // From: Issue #1683
         let lan_names: Vec<String> = crate::shared::dns::lan_domains(&s)?
             .iter()
-            .map(|z| z.trim_end_matches('.').to_string())
+            .map(|z| crate::shared::dns::bare_zone(z).to_string())
             .collect();
         ctx.insert("lan_domain_names", &lan_names);
         ctx.insert("main_subnet_id", &s.uint("DHCP_SUBNET_ID")?);
