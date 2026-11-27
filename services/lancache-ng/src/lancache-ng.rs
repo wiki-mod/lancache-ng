@@ -61,6 +61,46 @@ mod cachehamster {
         At(u64),
     }
 
+    impl When {
+        // What: the command word of a start time.
+        // Why: add takes now, later or at:UNIX.
+        // From: Issue #871 | PR #2020
+        fn word(&self) -> String {
+            match self {
+                When::Now => "now".to_string(),
+                When::Later => "later".to_string(),
+                When::At(t) => format!("at:{t}"),
+            }
+        }
+
+        // What: a start time of its command word.
+        // Why: the add command reads what word wrote.
+        // From: Issue #871 | PR #2020
+        fn from_word(word: &str) -> Result<Self, String> {
+            match word {
+                "now" => Ok(When::Now),
+                "later" => Ok(When::Later),
+                other => other
+                    .strip_prefix("at:")
+                    .and_then(|t| t.parse().ok())
+                    .map(When::At)
+                    .ok_or_else(|| "when must be now, later or at:UNIX".to_string()),
+            }
+        }
+    }
+
+    // What: the command word of a page's start time choice.
+    // Why: the page sends now, later or at plus a time.
+    // From: Issue #871 | PR #2020
+    pub(crate) fn when_word(choice: &str, at: &str) -> Result<String, String> {
+        let when = match choice {
+            "at" => When::At(at.parse().map_err(|_| format!("{at:?} is no time"))?),
+            "later" => When::Later,
+            _ => When::Now,
+        };
+        Ok(when.word())
+    }
+
     // What: what a job fetches.
     // Why: plain URLs or a Steam app of the owned library.
     // From: Issue #871 | PR #1980
@@ -581,16 +621,7 @@ mod cachehamster {
         let [name, when, what] = args else {
             return Err("usage: add <name> <now|later|at:UNIX> <app:ID|URL,URL>".into());
         };
-        let when = match when.as_str() {
-            "now" => When::Now,
-            "later" => When::Later,
-            other => When::At(
-                other
-                    .strip_prefix("at:")
-                    .and_then(|t| t.parse().ok())
-                    .ok_or("when must be now, later or at:UNIX")?,
-            ),
-        };
+        let when = When::from_word(when)?;
         let target = match what.strip_prefix("app:") {
             Some(id) => Target::SteamApp(id.parse().map_err(|_| "app id must be a number")?),
             None => Target::Urls(
@@ -16646,14 +16677,7 @@ mod ui {
     // Why: the page sends unix seconds for "at".
     // From: Issue #871 | PR #1980
     pub(crate) fn job_time(when: &str, at: &str) -> Result<String, Fail> {
-        match when {
-            "at" => at
-                .parse::<u64>()
-                .map(|t| format!("at:{t}"))
-                .map_err(|_| bad_request(tr("err_time"))),
-            "later" => Ok("later".into()),
-            _ => Ok("now".into()),
-        }
+        crate::cachehamster::when_word(when, at).map_err(|_| bad_request(tr("err_time")))
     }
 
     // What: add, start, cancel, remove, logout.
