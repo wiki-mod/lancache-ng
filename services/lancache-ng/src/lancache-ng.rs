@@ -221,15 +221,15 @@ mod cachehamster {
         // Why: a reader never sees a half file.
         // From: Issue #871 | PR #1980
         fn save(&self, name: &str, body: &[u8]) -> Result<(), String> {
-            write(
-                &self.path(name),
-                body,
-                PRIVATE_MODE,
-                Place::Replace,
-                Owner::default(),
-            )
-            .map_err(|e| format!("{name}: {e}"))
+            replace_private(&self.path(name), body).map_err(|e| format!("{name}: {e}"))
         }
+    }
+
+    // What: replace a file by a private copy of body.
+    // Why: all state files share one mode and one write.
+    // From: Issue #871 | PR #2020
+    fn replace_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+        write(path, body, PRIVATE_MODE, Place::Replace, Owner::default())
     }
 
     // What: remove a file; a missing file is fine.
@@ -277,8 +277,7 @@ mod cachehamster {
                 .cloned()
                 .collect();
             let body = serde_json::to_vec(&names).map_err(|e| e.to_string())?;
-            write(&path, &body, PRIVATE_MODE, Place::Replace, Owner::default())
-                .map_err(|e| format!("{BIND_FILE}: {e}"))?;
+            replace_private(&path, &body).map_err(|e| format!("{BIND_FILE}: {e}"))?;
             names
         } else {
             // What: no bind file means a login from before.
@@ -1864,8 +1863,7 @@ mod cachehamster {
     fn save_depots(dir: &Path, app: u32, ids: &[u32]) -> Result<(), String> {
         let body = serde_json::to_vec(ids).map_err(|e| e.to_string())?;
         let path = dir.join(DEPOTS_DIR).join(format!("{app}.json"));
-        write(&path, &body, PRIVATE_MODE, Place::Replace, Owner::default())
-            .map_err(|e| format!("{}: {e}", path.display()))
+        replace_private(&path, &body).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     // What: every saved app and its depots.
