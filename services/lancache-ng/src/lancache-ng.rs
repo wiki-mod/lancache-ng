@@ -19780,9 +19780,15 @@ mod ui {
         // Why: bind fails on an existing path.
         // From: Issue #1683 | PR #2020
         fs::delete_if_present(Path::new(&path)).map_err(|e| format!("{path}: {e}"))?;
-        let sock = tokio::net::UnixListener::bind(&path).map_err(|e| format!("{path}: {e}"))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
+        // What: bind on a side name, close it, then move.
+        // Why: the socket is never open with a wide mode.
+        // From: Issue #1683 | PR #2020
+        let side = fs::with_suffix(Path::new(&path), ".new");
+        fs::delete_if_present(&side).map_err(|e| format!("{}: {e}", side.display()))?;
+        let sock = tokio::net::UnixListener::bind(&side).map_err(|e| format!("{path}: {e}"))?;
+        std::fs::set_permissions(&side, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
             .map_err(|e| format!("{path}: {e}"))?;
+        std::fs::rename(&side, &path).map_err(|e| format!("{path}: {e}"))?;
         axum::serve(sock, socket_router(app)?)
             .await
             .map_err(|e| format!("{path}: {e}"))
