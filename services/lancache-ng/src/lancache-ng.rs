@@ -10383,21 +10383,6 @@ mod shared {
             ])
         }
 
-        // What: true if crt stays valid for within seconds.
-        // Why: renew before expiry, not after.
-        // From: Issue #1683 | PR #1980
-        pub fn valid_for(crt: &Path, within: u64) -> Result<bool, String> {
-            if !crt.is_file() {
-                return Err(format!("{}: file missing", crt.display()));
-            }
-            Command::new("openssl")
-                .args(["x509", "-noout", "-checkend", &within.to_string(), "-in"])
-                .arg(crt)
-                .output()
-                .map(|o| o.status.success())
-                .map_err(|e| format!("{}: openssl: {e}", crt.display()))
-        }
-
         // What: one certificate: end, days, renew flag.
         // Why: watchdog, CLI and REST read one rule.
         // From: Issue #1683 | PR #2020
@@ -10407,40 +10392,54 @@ mod shared {
                 Err(_) if !crt.is_file() => serde_json::json!({
                     "file": file, "present": false, "renew": true,
                     "error": format!("{file}: file missing")}),
+                // What: an unreadable end asks renewal.
+                // Why: an unknown state must not pass.
+                // From: Issue #1683 | PR #2020
                 Err(e) => serde_json::json!({
                     "file": file, "present": true, "renew": true,
                     "error": format!("{file}: {e}")}),
-                // What: a failed expiry test asks renewal.
-                // Why: an unknown state must not pass.
-                // From: Issue #1683 | PR #2020
-                Ok((day, n)) => match valid_for(crt, within) {
-                    Ok(ok) => serde_json::json!({
-                        "file": file, "present": true, "until": day,
-                        "days_left": n, "renew": !ok}),
-                    Err(e) => serde_json::json!({
-                        "file": file, "present": true, "until": day,
-                        "days_left": n, "renew": true, "error": e}),
-                },
+                Ok(end) => serde_json::json!({
+                    "file": file, "present": true, "until": end.day,
+                    "days_left": end.days_left,
+                    "renew": end.secs_left <= i64::try_from(within).unwrap_or(i64::MAX)}),
             }
         }
 
-        // What: end of crt: ISO day and whole days left.
-        // Why: a warning names the day, not a second count.
+        // What: end of a certificate, read once.
+        // Why: the day for texts, seconds for renewal.
+        // From: Issue #1683 | PR #2020
+        pub struct End {
+            pub day: String,
+            pub days_left: i64,
+            pub secs_left: i64,
+        }
+
+        // What: end of crt: ISO day, days and seconds left.
+        // Why: one openssl read answers day and renewal.
         // From: Issue #1683 | PR #1980
-        pub fn expiry(crt: &Path) -> Result<(String, i64), String> {
+        pub fn expiry(crt: &Path) -> Result<End, String> {
             let a = arg(crt);
             let out = openssl(&[
                 "x509", "-noout", "-enddate", "-dateopt", "iso_8601", "-in", &a,
             ])?;
-            let day: String = out
-                .trim()
-                .trim_start_matches("notAfter=")
-                .chars()
-                .take(10)
-                .collect();
-            let n: Vec<i64> = day.split('-').filter_map(|p| p.parse().ok()).collect();
-            let [y, m, d] = n[..] else {
-                return Err(format!("openssl date: {day}"));
+            // What: "notAfter=YYYY-MM-DD HH:MM:SSZ" read.
+            // Why: openssl -dateopt iso_8601 writes it so.
+            // From: Issue #1683 | PR #2020
+            let text = out.trim().trim_start_matches("notAfter=");
+            let bad = || format!("openssl date: {text}");
+            let (date, time) = text.trim_end_matches('Z').split_once(' ').ok_or_else(bad)?;
+            let n: Vec<i64> = date
+                .split('-')
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .map_err(|_| bad())?;
+            let c: Vec<i64> = time
+                .split(':')
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .map_err(|_| bad())?;
+            let (&[y, m, d], &[hh, mm, ss]) = (&n[..], &c[..]) else {
+                return Err(bad());
             };
             // What: days since 1970-01-01 (civil calendar).
             // Why: no date crate; Hinnant's days_from_civil
@@ -10449,10 +10448,16 @@ mod shared {
             let era = y.div_euclid(400);
             let yoe = y - era * 400;
             let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-            let end = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-            let today = crate::shared::clock::unix_secs() / crate::shared::tidy::DAY;
-            let now = i64::try_from(today).map_err(|e| e.to_string())?;
-            Ok((day, end - now))
+            let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+            let end = days * 86_400 + hh * 3_600 + mm * 60 + ss;
+            let now =
+                i64::try_from(crate::shared::clock::unix_secs()).map_err(|e| e.to_string())?;
+            let day_secs = i64::try_from(crate::shared::tidy::DAY).map_err(|e| e.to_string())?;
+            Ok(End {
+                day: date.to_string(),
+                days_left: days - now / day_secs,
+                secs_left: end - now,
+            })
         }
     }
 
