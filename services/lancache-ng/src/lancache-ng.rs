@@ -8192,16 +8192,16 @@ mod shared {
         // Why: exec and create both go on with this Id.
         // From: Issue #1683 | PR #2017
         fn id_of(answer: &[u8], what: &str) -> Result<String, Error> {
-            decode(answer)?["Id"]
+            decode::<Value>(answer)?["Id"]
                 .as_str()
                 .map(str::to_string)
                 .ok_or_else(|| Error::Decode(format!("{what} without Id")))
         }
 
-        // What: JSON body of an answer.
+        // What: JSON body of an answer, as the type asked.
         // Why: one decode error type.
         // From: Issue #1683 | PR #1980
-        fn decode(bytes: &[u8]) -> Result<Value, Error> {
+        fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
             serde_json::from_slice(bytes).map_err(|e| Error::Decode(e.to_string()))
         }
 
@@ -8256,6 +8256,13 @@ mod shared {
                 resp.bytes().await.map(|b| b.to_vec()).map_err(fail)
             }
 
+            // What: GET a path; the answer as JSON.
+            // Why: inspect, version, stats and exec read alike.
+            // From: Issue #1683 | PR #2020
+            async fn get(&self, path: &str, limit: Duration) -> Result<Value, Error> {
+                decode(&self.call(Method::GET, path, None, limit).await?)
+            }
+
             // What: run a command in a container.
             // Why: OpenRC rc-service and ui CLIs run so.
             // From: Issue #1683 | PR #1980
@@ -8282,11 +8289,7 @@ mod shared {
                         limit,
                     )
                     .await?;
-                let info = decode(
-                    &self
-                        .call(Method::GET, &format!("/exec/{id}/json"), None, limit)
-                        .await?,
-                )?;
+                let info = self.get(&format!("/exec/{id}/json"), limit).await?;
                 Ok((
                     info["ExitCode"].as_i64().unwrap_or(-1),
                     String::from_utf8_lossy(&out).trim().to_string(),
@@ -8309,7 +8312,7 @@ mod shared {
                 .map_err(|e| Error::Transport(e.to_string()))?;
                 let path = format!("{}?{}", url.path(), url.query().unwrap_or_default());
                 let body = self.call(Method::GET, &path, None, limit).await?;
-                serde_json::from_slice(&body).map_err(|e| Error::Decode(e.to_string()))
+                decode(&body)
             }
 
             // What: the service containers of this stack.
@@ -8330,23 +8333,14 @@ mod shared {
             // Why: health, restarts, state come from here.
             // From: Issue #1683 | PR #1980
             pub async fn inspect(&self, name: &str, limit: Duration) -> Result<Value, Error> {
-                decode(
-                    &self
-                        .call(
-                            Method::GET,
-                            &format!("/containers/{name}/json"),
-                            None,
-                            limit,
-                        )
-                        .await?,
-                )
+                self.get(&format!("/containers/{name}/json"), limit).await
             }
 
             // What: engine version and API version.
             // Why: docker check shows the engine answers.
             // From: Issue #1683 | PR #2020
             pub async fn version(&self, limit: Duration) -> Result<Value, Error> {
-                decode(&self.call(Method::GET, "/version", None, limit).await?)
+                self.get("/version", limit).await
             }
 
             // What: one stats sample of a container.
@@ -8354,7 +8348,7 @@ mod shared {
             // From: Issue #1683 | PR #1980
             pub async fn stats(&self, name: &str, limit: Duration) -> Result<Value, Error> {
                 let path = format!("/containers/{name}/stats?stream=false&one-shot=true");
-                decode(&self.call(Method::GET, &path, None, limit).await?)
+                self.get(&path, limit).await
             }
 
             // What: start, stop, restart or HUP container.
@@ -8397,7 +8391,7 @@ mod shared {
                     let start = format!("/containers/{id}/start");
                     self.call(Method::POST, &start, None, limit).await?;
                     let path = format!("/containers/{id}/wait");
-                    let done = decode(&self.call(Method::POST, &path, None, wait).await?)?;
+                    let done: Value = decode(&self.call(Method::POST, &path, None, wait).await?)?;
                     let path = format!("/containers/{id}/logs?stdout=1");
                     let raw = self.call(Method::GET, &path, None, limit).await?;
                     let code = done["StatusCode"].as_i64().unwrap_or(-1);
