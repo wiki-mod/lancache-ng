@@ -5231,8 +5231,7 @@ mod dns {
         target: &str,
     ) -> Result<Value, String> {
         let qtype = crate::shared::dns::qtype(rtype)?;
-        let (addr, rd) = target_addr(s, target)?;
-        let wait = std::time::Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
+        let (addr, rd, wait) = target_addr(s, target)?;
         let (n, ty) = (name.to_string(), qtype);
         let r =
             tokio::task::spawn_blocking(move || crate::shared::dns::ask(addr, &n, ty, rd, wait))
@@ -5245,8 +5244,7 @@ mod dns {
     // Why: shows the serial one server holds for a zone.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn soa_probe(s: &Settings, zone: &str, target: &str) -> Result<Value, String> {
-        let (addr, _) = target_addr(s, target)?;
-        let wait = std::time::Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
+        let (addr, _, wait) = target_addr(s, target)?;
         let z = zone.to_string();
         let soa =
             tokio::task::spawn_blocking(move || crate::shared::dns::soa_probe(addr, &z, wait))
@@ -5256,10 +5254,13 @@ mod dns {
             "serves_zone": soa.serves_zone()}))
     }
 
-    // What: http, https, auth or ip#port as address.
+    // What: address, RD flag and wait of a target word.
     // Why: query and soa-probe name servers one way.
     // From: Issue #1683 | PR #2020
-    fn target_addr(s: &Settings, target: &str) -> Result<(std::net::SocketAddr, bool), String> {
+    fn target_addr(
+        s: &Settings,
+        target: &str,
+    ) -> Result<(std::net::SocketAddr, bool, Duration), String> {
         let port = s.num::<u16>("DNS_PORT")?;
         // What: http, https, auth or an address.
         // Why: the SOT names each server; auth gets no RD.
@@ -5281,7 +5282,8 @@ mod dns {
             },
         };
         let addr = std::net::SocketAddr::new(crate::shared::dns::parse_ip(&host)?, port);
-        Ok((addr, rd))
+        let wait = Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
+        Ok((addr, rd, wait))
     }
 
     // What: anchors, proven zones and NTAs as JSON.
