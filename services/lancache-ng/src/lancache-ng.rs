@@ -2586,6 +2586,8 @@ mod config {
         Ip,
         Net,
         Nets,
+        Hosts,
+        Addrs,
     }
 
     impl Kind {
@@ -2644,6 +2646,16 @@ mod config {
         // From: Issue #1683 | PR #2020
         const NETS: &str = "nets";
 
+        // What: schema word of kind hosts: host[:port].
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const HOSTS: &str = "hosts";
+
+        // What: schema word of kind addrs: addr[:port].
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const ADDRS: &str = "addrs";
+
         // What: the schema word of a kind; uint is one.
         // Why: describe prints the word parse reads.
         // From: Issue #1683 | PR #2020
@@ -2659,6 +2671,8 @@ mod config {
                 Kind::Ip => Self::IP,
                 Kind::Net => Self::NET,
                 Kind::Nets => Self::NETS,
+                Kind::Hosts => Self::HOSTS,
+                Kind::Addrs => Self::ADDRS,
             }
         }
     }
@@ -2926,6 +2940,8 @@ mod config {
                 Kind::IP => Kind::Ip,
                 Kind::NET => Kind::Net,
                 Kind::NETS => Kind::Nets,
+                Kind::HOSTS => Kind::Hosts,
+                Kind::ADDRS => Kind::Addrs,
                 other => return Err(format!("{key}: unknown kind {other:?}")),
             };
             Ok(Self {
@@ -2987,6 +3003,22 @@ mod config {
                     let same = value.to_string() == list_items(raw).collect::<Vec<_>>().join(" ");
                     let note = (!same).then(|| format!("{key}: {raw:?} read as {value}"));
                     Ok((value, note))
+                }
+                // What: hosts, addrs: read, not scanned.
+                // Why: a name or address, a port, no more.
+                // From: Issue #1683 | PR #2020
+                Kind::Hosts | Kind::Addrs => {
+                    let names = self.kind == Kind::Hosts;
+                    let items: Vec<String> = list_items(raw)
+                        .map(|item| {
+                            crate::shared::dns::canonical_endpoint(item, names)
+                                .map_err(|e| format!("{key}: {e}"))
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let same = items.join(" ") == list_items(raw).collect::<Vec<_>>().join(" ");
+                    let note =
+                        (!same).then(|| format!("{key}: {raw:?} read as {}", items.join(" ")));
+                    Ok((Value::List(items), note))
                 }
                 Kind::Uint { min, max, clamp } => {
                     let n =
@@ -8342,6 +8374,48 @@ mod shared {
             Ok((host, port.transpose()?))
         }
 
+        // What: a host name, read by its labels.
+        // Why: one reader; no space, quote or ';' passes.
+        // From: Issue #1683 | PR #2020
+        pub fn parse_name(text: &str) -> Result<String, String> {
+            let bad = || format!("{text:?} is no host name");
+            let body = text.strip_suffix('.').unwrap_or(text);
+            let label = |l: &str| {
+                (1..=63).contains(&l.len())
+                    && !l.starts_with('-')
+                    && !l.ends_with('-')
+                    && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            };
+            let numeric = body.chars().all(|c| c.is_ascii_digit() || c == '.');
+            if body.len() > 253 || numeric || !body.split('.').all(label) {
+                return Err(bad());
+            }
+            Ok(text.to_string())
+        }
+
+        // What: host and port of "host[:port]", read.
+        // Why: one reader; an address is made canonical.
+        // From: Issue #1683 | PR #2020
+        pub fn parse_endpoint(text: &str, names: bool) -> Result<(String, Option<u16>), String> {
+            let (host, port) = split_host_port(text)?;
+            let host = match parse_ip(host) {
+                Ok(ip) => ip.to_string(),
+                Err(_) if names => parse_name(host)?,
+                Err(_) => return Err(format!("{text:?} is no IP address")),
+            };
+            Ok((host, port))
+        }
+
+        // What: "host[:port]" in its one written form.
+        // Why: one text for one endpoint; v6 has brackets.
+        // From: Issue #1683 | PR #2020
+        pub fn canonical_endpoint(text: &str, names: bool) -> Result<String, String> {
+            Ok(match parse_endpoint(text, names)? {
+                (host, Some(port)) => host_port(&host, port),
+                (host, None) => host,
+            })
+        }
+
         // What: host:port; an IPv6 address gets brackets.
         // Why: bare, nobody sees where its port starts.
         // From: Issue #1683 | PR #2017
@@ -8849,7 +8923,7 @@ mod shared {
             if dns.is_empty() {
                 dns.extend(s.text("IP_HTTP").ok());
             }
-            Ok(dns)
+            Ok(ipv4_of(&dns, "DHCP_DNS_SERVERS"))
         }
 
         // What: own NTP for DHCP: NTP and NTP_AUTO_DHCP on.
@@ -11604,9 +11678,9 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // From: Issue #1683 | PR #1985
         fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
             let bad = || format!("{key}: {raw} is no IP address");
-            let (host, _) = crate::shared::dns::split_host_port(raw).map_err(|_| bad())?;
-            let ip = crate::shared::dns::parse_ip(host).map_err(|_| bad())?;
-            if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
+            let (host, _) = crate::shared::dns::parse_endpoint(raw, false).map_err(|_| bad())?;
+            let ip = crate::shared::dns::parse_ip(&host).map_err(|_| bad())?;
+            if ip.is_loopback() || ip.is_unspecified() || own.contains(&host) {
                 return Err(format!(
                     "{key}: {raw} is this LanCache-NG itself; that would loop"
                 ));
@@ -11854,6 +11928,12 @@ end
             for l in listeners {
                 for addr in listen {
                     let addr = crate::config::checked(crate::config::Syntax::Quoted, addr)?;
+                    // What: the listener port is its own.
+                    // Why: "addr:port" doubles the port.
+                    // From: Issue #1683 | PR #2020
+                    if crate::shared::dns::split_host_port(addr)?.1.is_some() {
+                        return Err(format!("DNSDIST_LISTEN: {addr} has a port"));
+                    }
                     let local = crate::shared::dns::host_port(addr, l.port);
                     out += &format!("{call}(\"{local}\")\n");
                     call = "addLocal";

@@ -1963,7 +1963,7 @@ runtime:
     - DHCP_CUSTOM_OPTIONS=text?;;;reload;dhcp
     - DHCP_DDNS=bool;;;reload;dhcp
     - DHCP_DDNS_ENABLED=bool;;;reload;dhcp
-    - DHCP_DNS_SERVERS=list?;;;reload;dhcp
+    - DHCP_DNS_SERVERS=hosts?;;;reload;dhcp
     - DHCP_DOMAIN=text;;;reload;dhcp
     - DHCP_GATEWAY=ip;;;reload;dhcp
     - DHCP_LEASE_TIME=uint~;60;604800;reload;dhcp
@@ -1972,7 +1972,7 @@ runtime:
     - DHCP_LOG_PACKETS=bool;;;reload;dhcp
     - DHCP_MAX_LEASE_FACTOR=uint;1;100;reload;dhcp
     - DHCP_MODE=choice;off,kea,dnsmasq-proxy,dnsmasq-relay;;restart;dhcp
-    - DHCP_NTP_SERVERS=list?;;;reload;dhcp
+    - DHCP_NTP_SERVERS=hosts?;;;reload;dhcp
     - DHCP_OPTION_DATA_MAX=uint;1;65535;live;ui
     - DHCP_PROBE_ACK_WAIT_MS=uint;100;60000;live;ui
     - DHCP_PROBE_SENDS=uint;1;10;live;ui
@@ -2017,7 +2017,7 @@ runtime:
     - STACK_SNAPSHOT_DIR=path;;;fixed;ui
     - STACK_SNAPSHOT_FILE=text;;;fixed;ui
     - STACK_SNAPSHOT_KEEP=uint;1;1000;live;ui
-    - DNS_UPSTREAM_SERVERS=list?;;;reload;dns
+    - DNS_UPSTREAM_SERVERS=addrs?;;;reload;dns
     - DNS_UPSTREAM_UNSIGNED_ZONES=list?;;;reload;dns
     - DNS_UPSTREAM_ZONES=list?;;;reload;dns
     - DNS_XFR_PRIMARY=text?;;;restart;dns
@@ -2087,7 +2087,7 @@ runtime:
     - PDNS_DEFAULT_SOA=text;;;restart;dns
     - DNS_NS_HTTPS_NAME=text;;;live;ui
     - PDNS_DNSUPDATE_FROM=nets?;;;restart;dns
-    - PDNS_LISTEN=list;;;restart;dns
+    - PDNS_LISTEN=addrs;;;restart;dns
     - PDNS_PRIMARY_API_URL=text?;;;fixed;services
     - PDNS_SOA_EDIT=text;;;live;ui
     - PDNS_SOA_COLD_RETRY=uint;1;3600;live;ui
@@ -2123,7 +2123,7 @@ runtime:
     - KEA_DDNS_CONF_FILE=path;;;container;dhcp
     - PDNS_CONF_FILE=path;;;container;dns
     - DNSDIST_CONF_FILE=path;;;container;dns
-    - DNSDIST_LISTEN=list;;;restart;dns
+    - DNSDIST_LISTEN=addrs;;;restart;dns
     - DNSDIST_SOURCE_ADDRESS=ip;;;restart;dns
     - RECURSOR_HTTP_CONF_FILE=path;;;container;dns
     - RECURSOR_HTTP_LUA_FILE=path;;;container;dns
