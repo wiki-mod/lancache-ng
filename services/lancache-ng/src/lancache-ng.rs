@@ -657,11 +657,15 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     fn daemon_alive(c: &Ctx) -> Result<bool, String> {
         let tick = c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?;
+        let rounds = c.s.uint("CACHEHAMSTER_ALIVE_ROUNDS")?;
+        let limit = tick
+            .checked_mul(rounds)
+            .ok_or("CACHEHAMSTER_POLL_INTERVAL times CACHEHAMSTER_ALIVE_ROUNDS is too big")?;
         Ok(std::fs::metadata(c.path(JOBS_FILE))
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age.as_secs() <= tick * 3))
+            .is_some_and(|age| age.as_secs() <= limit))
     }
 
     // What: the status for the UI: login and jobs.

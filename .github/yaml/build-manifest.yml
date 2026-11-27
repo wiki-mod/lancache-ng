@@ -1380,6 +1380,10 @@ runtime:
     - CACHEHAMSTER_PROGRAM=@SERVICES_PROGRAM@
     - CACHEHAMSTER_QUEUES=2
     - CACHEHAMSTER_SERVICE=@SERVICES_SERVICE@
+    # What: rounds without jobs.json write till "down".
+    # Why: one late round must not show the daemon down.
+    # From: Issue #871 | PR #2020
+    - CACHEHAMSTER_ALIVE_ROUNDS=3
     # What: cache domains: own, default list file, disabled.
     # Why: the ui edits them; the renders read them.
     # From: Issue #1683 | PR #2020
@@ -1938,6 +1942,7 @@ runtime:
     - CACHEHAMSTER_CONCURRENCY=uint;1;1024;restart;services
     - CACHEHAMSTER_DATA_DIR=path;;;container;services
     - LOCALTIME_FILE=path;;;container;services
+    - CACHEHAMSTER_ALIVE_ROUNDS=uint;1;100;live;services
     - CACHEHAMSTER_POLL_INTERVAL=uint;1;3600;live;services
     - CACHEHAMSTER_PROGRAM=text;;;live;ui
     - CACHEHAMSTER_QUEUES=uint;1;64;restart;services
