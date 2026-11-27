@@ -10681,6 +10681,7 @@ end
                 .filter(|d| !lans.contains(&crate::shared::dns::canonical_zone(d)))
                 .map(|d| d.trim_end_matches('.').to_string());
             let id = s.uint("DHCP_SUBNET_ID")?;
+            let net = s.text("DHCP_SUBNET")?;
             let kept = Value::Array(existing.map_or(&[][..], subnets).to_vec());
             let kept = follow_domain(kept, before.as_deref(), &domain);
             let back = crate::shared::dhcp::ntp_addrs(s)?.join(", ");
@@ -10690,7 +10691,7 @@ end
             let old_main = old.clone().find(|x| x["id"].as_u64() == Some(id));
             let mut main = json!({
                 "id": id,
-                "subnet": s.text("DHCP_SUBNET")?,
+                "subnet": net,
                 "pools": [{"pool": pool}],
                 "option-data": option_rows(s, &domain)?,
                 "valid-lifetime": valid,
@@ -10701,7 +10702,6 @@ end
             // From: Issue #1683 | PR #2017
             if let Some(o) = old_main {
                 if let Some(hosts) = o.get("reservations").and_then(Value::as_array) {
-                    let net = s.text("DHCP_SUBNET")?;
                     let fit: Vec<Value> = hosts
                         .iter()
                         .filter(|h| {
