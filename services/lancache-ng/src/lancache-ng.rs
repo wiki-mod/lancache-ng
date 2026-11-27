@@ -10125,7 +10125,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         pub fn upstream_entry(key: &str, raw: &str, own: &[String]) -> Result<(), String> {
             let bad = || format!("{key}: {raw} is no IP address");
             let (host, _) = crate::shared::dns::split_host_port(raw).map_err(|_| bad())?;
-            let ip: std::net::IpAddr = host.parse().map_err(|_| bad())?;
+            let ip = crate::shared::dns::parse_ip(host).map_err(|_| bad())?;
             if ip.is_loopback() || ip.is_unspecified() || own.iter().any(|o| *o == host) {
                 return Err(format!(
                     "{key}: {raw} is this LanCache-NG itself; that would loop"
