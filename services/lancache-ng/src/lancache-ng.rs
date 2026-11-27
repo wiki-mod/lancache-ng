@@ -10999,7 +10999,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             // What: no DNSSEC check for private domains.
             // Why: router domains (fritz.box) are unsigned
             // From: Issue #1683 | PR #1980
-            for z in upstream_zones(s, "DNS_UPSTREAM_UNSIGNED_ZONES")? {
+            for z in zone_names(s, "DNS_UPSTREAM_UNSIGNED_ZONES")? {
                 if z != "." {
                     out.push(z);
                 }
@@ -11038,10 +11038,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: fewer root queries; none if "." is forwarded
         // From: Issue #1683 | PR #2019
         fn root_copy(s: &Settings) -> Result<String, String> {
-            let all_upstream = !upstream_servers(s)?.is_empty()
-                && upstream_zones(s, "DNS_UPSTREAM_ZONES")?
-                    .iter()
-                    .any(|z| z == ".");
+            let all_upstream =
+                !upstream_servers(s)?.is_empty() && upstream_zones(s)?.iter().any(|z| z == ".");
             if all_upstream || !s.flag("ROOT_ZONE_MIRROR")? {
                 return Ok(String::new());
             }
@@ -11057,10 +11055,10 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             ))
         }
 
-        // What: domain list for upstream forwarding.
-        // Why: empty or "." means all names; bad chars stop
+        // What: the checked domain names of one list key.
+        // Why: "." means all names; bad chars stop.
         // From: Issue #1683 | PR #1980
-        fn upstream_zones(s: &Settings, key: &str) -> Result<Vec<String>, String> {
+        fn zone_names(s: &Settings, key: &str) -> Result<Vec<String>, String> {
             let mut out = Vec::new();
             for raw in s.list(key)? {
                 let z = crate::shared::dns::bare_zone(&raw).to_ascii_lowercase();
@@ -11072,20 +11070,27 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 }
                 out.push(if z.is_empty() { ".".to_string() } else { z });
             }
-            if out.is_empty() && key == "DNS_UPSTREAM_ZONES" {
+            Ok(out)
+        }
+
+        // What: the zones that go to the upstream servers.
+        // Why: none listed means all; local ones stay.
+        // From: Issue #1683 | PR #1980
+        fn upstream_zones(s: &Settings) -> Result<Vec<String>, String> {
+            let key = "DNS_UPSTREAM_ZONES";
+            let mut out = zone_names(s, key)?;
+            if out.is_empty() {
                 out.push(".".to_string());
             }
             // What: local zone or its subzone never leaves.
             // Why: local names sent out return NXDOMAIN.
             // From: Issue #1683 | PR #1980
-            if key == "DNS_UPSTREAM_ZONES" {
-                for m in crate::shared::dns::managed_zones(s)? {
-                    let m = crate::shared::dns::bare_zone(&m).to_ascii_lowercase();
-                    if let Some(z) = out.iter().find(|z| crate::shared::dns::is_within(z, &m)) {
-                        return Err(format!(
-                            "{key}: {z} is the local zone {m}; it is answered here"
-                        ));
-                    }
+            for m in crate::shared::dns::managed_zones(s)? {
+                let m = crate::shared::dns::bare_zone(&m).to_ascii_lowercase();
+                if let Some(z) = out.iter().find(|z| crate::shared::dns::is_within(z, &m)) {
+                    return Err(format!(
+                        "{key}: {z} is the local zone {m}; it is answered here"
+                    ));
                 }
             }
             Ok(out)
@@ -11200,7 +11205,7 @@ end
                 // What: one forward entry per chosen domain
                 // Why: "domains" mode forwards only those.
                 // From: Issue #1683 | PR #1980
-                let entries: String = upstream_zones(s, "DNS_UPSTREAM_ZONES")?
+                let entries: String = upstream_zones(s)?
                     .iter()
                     .map(|z| format!("    - zone: \"{z}\"\n      forwarders: [{fwd}]\n"))
                     .collect();
