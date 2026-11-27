@@ -2575,6 +2575,9 @@ mod config {
         Path,
         Secret,
         Choice(Vec<String>),
+        Ip,
+        Net,
+        Nets,
     }
 
     impl Kind {
@@ -2618,6 +2621,21 @@ mod config {
         // From: Issue #1683 | PR #2020
         const CHOICE: &str = "choice";
 
+        // What: schema word of kind ip: one IP address.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const IP: &str = "ip";
+
+        // What: schema word of kind net: one addr/len.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const NET: &str = "net";
+
+        // What: schema word of kind nets: IPs or networks.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const NETS: &str = "nets";
+
         // What: the schema word of a kind; uint is one.
         // Why: describe prints the word parse reads.
         // From: Issue #1683 | PR #2020
@@ -2630,6 +2648,9 @@ mod config {
                 Kind::Path => Self::PATH,
                 Kind::Secret => Self::SECRET,
                 Kind::Choice(_) => Self::CHOICE,
+                Kind::Ip => Self::IP,
+                Kind::Net => Self::NET,
+                Kind::Nets => Self::NETS,
             }
         }
     }
@@ -2894,6 +2915,9 @@ mod config {
                 Kind::PATH => Kind::Path,
                 Kind::SECRET => Kind::Secret,
                 Kind::CHOICE => Kind::Choice(min.split(',').map(str::to_string).collect()),
+                Kind::IP => Kind::Ip,
+                Kind::NET => Kind::Net,
+                Kind::NETS => Kind::Nets,
                 other => return Err(format!("{key}: unknown kind {other:?}")),
             };
             Ok(Self {
@@ -2932,6 +2956,29 @@ mod config {
                     } else {
                         Err(format!("{key}: {raw:?} is not one of {}", words.join(", ")))
                     }
+                }
+                // What: IPs and nets are read, not scanned.
+                // Why: what is no IP or net never passes.
+                // From: Issue #1683 | PR #2020
+                Kind::Ip | Kind::Net | Kind::Nets => {
+                    use crate::shared::dns::{canonical_ip, canonical_net};
+                    let one = |item: &str| match self.kind {
+                        Kind::Ip => canonical_ip(item),
+                        Kind::Net => canonical_net(item),
+                        _ if item.contains('/') => canonical_net(item),
+                        _ => canonical_ip(item),
+                    };
+                    let items: Vec<String> = list_items(raw)
+                        .map(|item| one(item).map_err(|e| format!("{key}: {e}")))
+                        .collect::<Result<_, _>>()?;
+                    let value = match self.kind {
+                        Kind::Nets => Value::List(items),
+                        _ if items.len() <= 1 => Value::Text(items.concat()),
+                        _ => return Err(format!("{key}: {raw:?} must be one value")),
+                    };
+                    let same = value.to_string() == list_items(raw).collect::<Vec<_>>().join(" ");
+                    let note = (!same).then(|| format!("{key}: {raw:?} read as {value}"));
+                    Ok((value, note))
                 }
                 Kind::Uint { min, max, clamp } => {
                     let n =
@@ -7967,6 +8014,57 @@ mod shared {
                 .map_err(|_| format!("{text:?} is no IP address"))
         }
 
+        // What: an address in its one written form.
+        // Why: one reader; "::0:1" and "::1" are the same.
+        // From: Issue #1683 | PR #2020
+        pub fn canonical_ip(text: &str) -> Result<String, String> {
+            parse_ip(text).map(|ip| ip.to_string())
+        }
+
+        // What: network and prefix length of "addr/len".
+        // Why: one reader; host bits are cleared.
+        // From: Issue #1683 | PR #2020
+        pub fn parse_net(text: &str) -> Result<(std::net::IpAddr, u8), String> {
+            use std::net::IpAddr;
+            let bad = || format!("{text:?} is no network (address/length)");
+            let (addr, len) = text.split_once('/').ok_or_else(bad)?;
+            let ip = parse_ip(addr).map_err(|_| bad())?;
+            let max: u8 = if ip.is_ipv4() { 32 } else { 128 };
+            let len: u8 = len
+                .parse()
+                .ok()
+                .filter(|n| *n <= max && !len.starts_with('+'))
+                .ok_or_else(bad)?;
+            let net = match ip {
+                IpAddr::V4(v) => {
+                    let mask = u32::MAX.checked_shl(32 - u32::from(len)).unwrap_or(0);
+                    IpAddr::V4((u32::from(v) & mask).into())
+                }
+                IpAddr::V6(v) => {
+                    let mask = u128::MAX.checked_shl(128 - u32::from(len)).unwrap_or(0);
+                    IpAddr::V6((u128::from(v) & mask).into())
+                }
+            };
+            Ok((net, len))
+        }
+
+        // What: "addr/len" in its one written form.
+        // Why: 10.0.0.1/8 and 10.0.0.0/8 are one network.
+        // From: Issue #1683 | PR #2020
+        pub fn canonical_net(text: &str) -> Result<String, String> {
+            parse_net(text).map(|(net, len)| format!("{net}/{len}"))
+        }
+
+        // What: true when an address lies in a network.
+        // Why: one test for Kea reservations and others.
+        // From: Issue #1683 | PR #2020
+        pub fn net_holds(net: &str, ip: &str) -> bool {
+            let (Ok((net, len)), Ok(ip)) = (parse_net(net), parse_ip(ip)) else {
+                return false;
+            };
+            parse_net(&format!("{ip}/{len}")).is_ok_and(|(n, _)| n == net)
+        }
+
         // What: true for a loopback address, IPv4 or IPv6.
         // Why: such an address is never a LAN address.
         // From: Issue #1683 | PR #2017
@@ -8596,7 +8694,7 @@ mod shared {
             hosts
                 .iter()
                 .map(|host| {
-                    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                    if let Ok(std::net::IpAddr::V4(ip)) = crate::shared::dns::parse_ip(host) {
                         return Ok(ip.to_string());
                     }
                     (host.as_str(), 0)
@@ -11736,28 +11834,6 @@ end
             subnets
         }
 
-        // What: true when an IPv4 address lies in a CIDR.
-        // Why: Kea refuses reservation outside its subnet.
-        // From: Issue #1683 | PR #2017
-        fn in_subnet(ip: &str, cidr: &str) -> bool {
-            let Some((net, len)) = cidr.split_once('/') else {
-                return false;
-            };
-            let parsed = (
-                ip.parse::<std::net::Ipv4Addr>(),
-                net.parse::<std::net::Ipv4Addr>(),
-                len.parse::<u32>(),
-            );
-            let (Ok(ip), Ok(net), Ok(len)) = parsed else {
-                return false;
-            };
-            if len > 32 {
-                return false;
-            }
-            let mask = u32::MAX.checked_shl(32 - len).unwrap_or(0);
-            u32::from(ip) & mask == u32::from(net) & mask
-        }
-
         // What: subnet DDNS suffix from its domain-name.
         // Why: Kea D2 picks the zone by the FQDN suffix.
         // From: Issue #1683
@@ -11924,7 +12000,7 @@ end
                         .filter(|h| {
                             let ok = h["ip-address"]
                                 .as_str()
-                                .is_none_or(|ip| in_subnet(ip, &net));
+                                .is_none_or(|ip| crate::shared::dns::net_holds(&net, ip));
                             if !ok {
                                 eprintln!("kea: reservation {h} is outside {net}; dropped");
                             }
