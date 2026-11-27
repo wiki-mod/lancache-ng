@@ -4701,7 +4701,10 @@ mod dns {
             // From: Issue #1683 | PR #1980
             let own = match api.rrsets(zone).await {
                 Ok(sets) => !own_rrsets(&sets).is_empty(),
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("ui: zone {zone} kept: rrsets not read: {e}");
+                    continue;
+                }
             };
             let done = if own {
                 Err(Fault::key("err_zone_has_records", []))
@@ -4988,7 +4991,13 @@ mod dns {
         // What: a domain under a real Internet ending.
         // Why: in the LAN it hides its own Internet names.
         // From: Issue #1683 | PR #2019
-        let psl = render::psl(s).ok();
+        let psl = match render::psl(s) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                error.get_or_insert(e);
+                None
+            }
+        };
         let rows: Vec<Value> = lans
             .iter()
             .enumerate()
@@ -5016,7 +5025,7 @@ mod dns {
         let mut out = Vec::new();
         for zone in crate::shared::dns::private_reverse_zones(s)? {
             let mut rows = Vec::new();
-            for r in api.rrsets(&zone).await.unwrap_or_default() {
+            for r in api.rrsets(&zone).await? {
                 if r["type"] != "PTR" {
                     continue;
                 }
@@ -5786,7 +5795,7 @@ mod dns {
         }
         let api = peer::own_api(s)?;
         for top in &tops {
-            let ds = api.ds(top).await.unwrap_or_default();
+            let ds = ds_or_none(&api, top).await;
             if !ds.is_empty() {
                 chain.secured.push(top.clone());
             }
@@ -5804,7 +5813,7 @@ mod dns {
             if !chain.secured.contains(&parent) {
                 continue;
             }
-            let want = norm(api.ds(&zone).await.unwrap_or_default());
+            let want = norm(ds_or_none(&api, &zone).await);
             let have = norm(rrset_contents(&api, &parent, &zone, "DS").await?);
             if !want.is_empty() && want == have {
                 chain.secured.push(zone);
@@ -5890,6 +5899,16 @@ mod dns {
         Ok(zones)
     }
 
+    // What: the DS rows of a zone; none if unreadable.
+    // Why: no DS: unchecked; wrong DS: SERVFAIL; logged.
+    // From: Issue #1683 | PR #2019
+    async fn ds_or_none(api: &pdns::Api, zone: &str) -> Vec<String> {
+        api.ds(zone).await.unwrap_or_else(|e| {
+            eprintln!("ui: no DS for {zone}: {e}");
+            Vec::new()
+        })
+    }
+
     // What: LAN zones of own endings and their parent.
     // Why: signing and the resolver chain walk one list.
     // From: Issue #1683 | PR #2019
@@ -5938,13 +5957,7 @@ mod dns {
                 continue;
             };
             ensure_rrset(api, &parent, zone, "NS", ttl, &ns).await?;
-            // What: no DS when it cannot be read.
-            // Why: no DS: unchecked; wrong DS: SERVFAIL.
-            // From: Issue #1683 | PR #2019
-            let ds = api.ds(zone).await.unwrap_or_else(|e| {
-                eprintln!("ui: no DS for {zone}: {e}");
-                Vec::new()
-            });
+            let ds = ds_or_none(api, zone).await;
             ensure_rrset(api, &parent, zone, "DS", ttl, &ds).await?;
             wanted.push((parent, zone.clone()));
         }
@@ -13563,16 +13576,15 @@ end
         // What: proxy log files, oldest first.
         // Why: syslog-ng writes one file per day.
         // From: Issue #1683 | PR #1980
-        pub fn files(dir: &Path) -> Vec<PathBuf> {
-            let Ok(rd) = std::fs::read_dir(dir) else {
-                return Vec::new();
-            };
-            let mut out: Vec<PathBuf> = rd
-                .filter_map(|e| e.ok().map(|e| e.path()))
+        pub fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+            let all = crate::shared::fs::entries_if_present(dir)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            let mut out: Vec<PathBuf> = all
+                .into_iter()
                 .filter(|p| p.extension().is_some_and(|x| x == "log"))
                 .collect();
             out.sort();
-            out
+            Ok(out)
         }
 
         // What: reads a file from its end, in chunks.
@@ -13603,16 +13615,17 @@ end
             programs: &[String],
             max: usize,
             chunk: u64,
-        ) -> Vec<serde_json::Value> {
+        ) -> Result<Vec<serde_json::Value>, String> {
             let mut all = Vec::new();
             for p in programs {
-                for line in tail_lines(&root.join(p), max, chunk) {
+                for line in tail_lines(&root.join(p), max, chunk)? {
                     all.push((p.clone(), line));
                 }
             }
             all.sort_by(|a, b| b.1.cmp(&a.1));
             all.truncate(max);
-            all.into_iter()
+            Ok(all
+                .into_iter()
                 .map(|(p, l)| {
                     let (stamp, text) = l.split_once(' ').unwrap_or(("", l.as_str()));
                     // What: drop "host program: " ahead.
@@ -13622,7 +13635,7 @@ end
                     let text = text.split_once(lead.as_str()).map_or(text, |(_, m)| m);
                     serde_json::json!({"host": p, "timestamp": stamp, "message": text})
                 })
-                .collect()
+                .collect())
         }
 
         // What: programs, on/off switches, newest lines.
@@ -13661,7 +13674,7 @@ end
             Ok(serde_json::json!({
                 "hosts": names,
                 "switches": switches,
-                "lines": newest_lines(&root, &read, max, chunk),
+                "lines": newest_lines(&root, &read, max, chunk)?,
             }))
         }
 
@@ -13689,13 +13702,12 @@ end
         // What: last `limit` lines of the newest file.
         // Why: reads from the end; big logs stay cheap.
         // From: Issue #1683 | PR #1980
-        pub fn tail_lines(dir: &Path, limit: usize, chunk: u64) -> Vec<String> {
-            let Some(path) = files(dir).pop() else {
-                return Vec::new();
+        pub fn tail_lines(dir: &Path, limit: usize, chunk: u64) -> Result<Vec<String>, String> {
+            let Some(path) = files(dir)?.pop() else {
+                return Ok(Vec::new());
             };
-            let Ok((buf, cut)) = read_back(&path, limit, chunk) else {
-                return Vec::new();
-            };
+            let (buf, cut) =
+                read_back(&path, limit, chunk).map_err(|e| format!("{}: {e}", path.display()))?;
             let text = String::from_utf8_lossy(&buf);
             let lines: Vec<String> = text
                 .lines()
@@ -13703,17 +13715,17 @@ end
                 .map(String::from)
                 .collect();
             let from = lines.len().saturating_sub(limit);
-            lines[from..].to_vec()
+            Ok(lines[from..].to_vec())
         }
 
         // What: last `limit` cache requests.
         // Why: dashboard list; other lines are skipped.
         // From: Issue #1683 | PR #1980
-        pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Vec<Entry> {
-            let lines = tail_lines(dir, limit.saturating_mul(4), chunk);
+        pub fn tail(dir: &Path, limit: usize, chunk: u64) -> Result<Vec<Entry>, String> {
+            let lines = tail_lines(dir, limit.saturating_mul(4), chunk)?;
             let found: Vec<Entry> = lines.iter().filter_map(|l| parse(l)).collect();
             let from = found.len().saturating_sub(limit);
-            found[from..].to_vec()
+            Ok(found[from..].to_vec())
         }
 
         // What: totals over all proxy log files.
@@ -13751,10 +13763,11 @@ end
             let dir = Path::new(&s.text("SYSLOG_LOG_ROOT")?).join(s.text("PROXY_LOG_PROGRAM")?);
             let limit = s.num::<usize>("UI_RECENT_REQUESTS")?;
             let chunk = s.uint("UI_LOG_TAIL_CHUNK")?;
-            let (stats, recent) =
-                tokio::task::spawn_blocking(move || (stats(&dir), tail(&dir, limit, chunk)))
-                    .await
-                    .map_err(|e| e.to_string())?;
+            let (stats, recent) = tokio::task::spawn_blocking(move || {
+                Ok::<_, String>((stats(&dir)?, tail(&dir, limit, chunk)?))
+            })
+            .await
+            .map_err(|e| e.to_string())??;
             let totals = with_human(&stats, "total_bytes_human", stats.total_bytes);
             let rows: Vec<serde_json::Value> = recent
                 .iter()
@@ -13762,6 +13775,15 @@ end
                 .map(|e| with_human(e, "bytes_human", e.bytes))
                 .collect();
             Ok(serde_json::json!({"totals": totals, "recent": rows}))
+        }
+
+        // What: the summary of no log lines.
+        // Why: a page that cannot read the log shows zeros.
+        // From: Issue #1683 | PR #2020
+        pub fn none() -> serde_json::Value {
+            let stats = Stats::default();
+            let totals = with_human(&stats, "total_bytes_human", 0);
+            serde_json::json!({"totals": totals, "recent": []})
         }
 
         // What: adds a human-readable byte size field.
@@ -13776,14 +13798,21 @@ end
         // What: count requests, hits and bytes.
         // Why: HIT is a hit; MISS and EXPIRED a miss.
         // From: Issue #1683 | PR #1980
-        pub fn stats(dir: &Path) -> Stats {
+        pub fn stats(dir: &Path) -> Result<Stats, String> {
             let mut st = Stats::default();
-            for path in files(dir) {
-                let Ok(f) = std::fs::File::open(&path) else {
-                    continue;
+            let err = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
+            for path in files(dir)? {
+                let f = match std::fs::File::open(&path) {
+                    Ok(f) => f,
+                    // What: a vanished file is skipped.
+                    // Why: syslog-ng may move a day file.
+                    // From: Issue #1683 | PR #2020
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(err(&path, e)),
                 };
-                for line in BufReader::new(f).lines().map_while(Result::ok) {
-                    if let Some(e) = parse(&line) {
+                for line in BufReader::new(f).split(b'\n') {
+                    let line = line.map_err(|e| err(&path, e))?;
+                    if let Some(e) = parse(&String::from_utf8_lossy(&line)) {
                         st.count(&e);
                     }
                 }
@@ -13792,7 +13821,7 @@ end
             if judged > 0 {
                 st.hit_pct = st.hits as f64 * 100.0 / judged as f64;
             }
-            st
+            Ok(st)
         }
     }
 
@@ -16417,7 +16446,13 @@ mod ui {
             .inspect_err(|e| eprintln!("ui: containers: {e}"))
             .unwrap_or_default();
         ctx.insert("containers", &containers);
-        let log = crate::shared::access::summary(&s).await?;
+        // What: an unreadable proxy log shows as empty.
+        // Why: the dashboard must render without the log.
+        // From: Issue #1683 | PR #2020
+        let log = crate::shared::access::summary(&s)
+            .await
+            .inspect_err(|e| eprintln!("ui: proxy log: {e}"))
+            .unwrap_or_else(|_| crate::shared::access::none());
         ctx.insert("log_stats", &log["totals"]);
         ctx.insert("recent_logs", &log["recent"]);
         // What: no nginx answer: no live box, error logged.
@@ -19806,9 +19841,15 @@ mod watchdog {
     // From: Issue #1683 | PR #1985
     fn conntrack(s: &Settings, f: &mut Findings) -> Result<(), String> {
         let path = Path::new(&s.text("HOST_NET_STAT_DIR")?).join(s.text("CONNTRACK_STAT_FILE")?);
-        let Ok(stat) = fs::read_text(&path) else {
+        // What: no stat file means no conntrack table.
+        // Why: a host without the module has no table.
+        // From: Issue #1683 | PR #1985
+        let Some(raw) =
+            fs::read_if_present(&path).map_err(|e| format!("{}: {e}", path.display()))?
+        else {
             return Ok(());
         };
+        let stat = String::from_utf8_lossy(&raw);
         let used = stat
             .lines()
             .nth(1)
