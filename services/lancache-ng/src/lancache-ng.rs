@@ -14676,6 +14676,17 @@ end
         // Why: each entry counts into the totals.
         // From: Issue #1683 | PR #2020
         impl Stats {
+            // What: adds the counts of another Stats.
+            // Why: the totals sum up the log files.
+            // From: Issue #1683 | PR #2020
+            fn add(&mut self, o: &Stats) {
+                self.hits += o.hits;
+                self.misses += o.misses;
+                self.other += o.other;
+                self.total_requests += o.total_requests;
+                self.total_bytes += o.total_bytes;
+            }
+
             // What: adds one log entry to the totals.
             // Why: EXPIRED is fetched anew, so a miss.
             // From: Issue #1683 | PR #1980
@@ -14729,13 +14740,74 @@ end
             out
         }
 
+        // What: what was counted of one log file so far.
+        // Why: a day file only grows; old lines count once.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Default)]
+        struct Seen {
+            inode: u64,
+            offset: u64,
+            stats: Stats,
+        }
+
+        // What: the counts of each log file, by path.
+        // Why: each call reads only what was appended.
+        // From: Issue #1683 | PR #2020
+        static SEEN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Seen>> =
+            std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+        // What: file counts; reads only new whole lines.
+        // Why: a shorter or other file starts from zero.
+        // From: Issue #1683 | PR #2020
+        fn file_stats(path: &Path, f: &std::fs::File) -> std::io::Result<Stats> {
+            use std::os::unix::fs::MetadataExt;
+            let meta = f.metadata()?;
+            let mut seen = SEEN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(path)
+                .filter(|s| s.inode == meta.ino() && s.offset <= meta.len())
+                .cloned()
+                .unwrap_or_default();
+            seen.inode = meta.ino();
+            let mut reader = BufReader::new(f);
+            reader.seek(SeekFrom::Start(seen.offset))?;
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                let n = reader.read_until(b'\n', &mut line)?;
+                // What: a line without its end waits.
+                // Why: the writer may still add to it.
+                // From: Issue #1683 | PR #2020
+                if n == 0 || line.last() != Some(&b'\n') {
+                    break;
+                }
+                seen.offset += n as u64;
+                if let Some(e) = parse(&String::from_utf8_lossy(&line)) {
+                    seen.stats.count(&e);
+                }
+            }
+            let done = seen.stats.clone();
+            SEEN.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.to_path_buf(), seen);
+            Ok(done)
+        }
+
         // What: count requests, hits and bytes.
         // Why: HIT is a hit; MISS and EXPIRED a miss.
         // From: Issue #1683 | PR #1980
         pub fn stats(dir: &Path) -> Result<Stats, String> {
             let mut st = Stats::default();
             let err = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
-            for path in files(dir)? {
+            let list = files(dir)?;
+            // What: files that are gone leave the memory.
+            // Why: a packed or removed file counts no more.
+            // From: Issue #1683 | PR #2020
+            SEEN.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|p, _| p.parent() != Some(dir) || list.contains(p));
+            for path in list {
                 let f = match std::fs::File::open(&path) {
                     Ok(f) => f,
                     // What: a vanished file is skipped.
@@ -14744,12 +14816,8 @@ end
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(e) => return Err(err(&path, e)),
                 };
-                for line in BufReader::new(f).split(b'\n') {
-                    let line = line.map_err(|e| err(&path, e))?;
-                    if let Some(e) = parse(&String::from_utf8_lossy(&line)) {
-                        st.count(&e);
-                    }
-                }
+                let part = file_stats(&path, &f).map_err(|e| err(&path, e))?;
+                st.add(&part);
             }
             let judged = st.hits + st.misses;
             if judged > 0 {
