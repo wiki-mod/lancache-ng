@@ -8020,7 +8020,7 @@ mod shared {
                 // Why: a read; it needs no running ui.
                 // From: Issue #1683 | PR #2020
                 ["plan"] => {
-                    let v = crate::ui::render_plan(&s).await?;
+                    let v = crate::stack::render_plan(&s).await?;
                     println!("{v}");
                     return match v["errors"].as_array().map(Vec::len) {
                         Some(0) => Ok(()),
@@ -13761,7 +13761,7 @@ mod stack {
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::{apply, docker, render};
     use crate::ui::tr;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::sync::RwLock;
@@ -14026,6 +14026,48 @@ mod stack {
         })
     }
 
+    // What: removed proxy files ask for a proxy reload.
+    // Why: apply and its dry run share the rule.
+    // From: Issue #1683 | PR #2019
+    pub(crate) fn prune_change(
+        s: &Settings,
+        stale: &[PathBuf],
+    ) -> Result<Option<config::Change>, String> {
+        if stale.is_empty() {
+            return Ok(None);
+        }
+        proxy_reload(s, "proxy-prune").map(Some)
+    }
+
+    // What: what an apply would write and whom it wakes.
+    // Why: page, REST and CLI show one dry run.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn render_plan(s: &Settings) -> Result<Value, String> {
+        let files = match render_now(s).await? {
+            Ok(f) => f,
+            Err(errors) => return Ok(json!({"errors": errors})),
+        };
+        let rows = render::plan(&files)?;
+        let mut changes = Vec::new();
+        let mut list = Vec::new();
+        for (f, state) in &rows {
+            // What: a new file wakes nobody, as in write.
+            // Why: owners read it at their start.
+            // From: Issue #1683 | PR #2020
+            if *state == "changed" {
+                changes.push(render::change_of(f));
+            }
+            list.push(json!({"path": f.path, "owner": f.owner, "state": state}));
+        }
+        let stale = stale_rendered(s, &files)?;
+        changes.extend(prune_change(s, &stale)?);
+        let owners: BTreeMap<String, String> = apply::plan(&changes)
+            .into_iter()
+            .map(|(o, e)| (o, e.word().to_string()))
+            .collect();
+        Ok(json!({"files": list, "stale": stale, "owners": owners, "errors": []}))
+    }
+
     // What: proxy render files this render no longer has.
     // Why: prune removes them; the plan lists them.
     // From: Issue #1683 | PR #2020
@@ -14115,12 +14157,10 @@ mod stack {
         // Why: a left-over https.conf keeps SSL server up.
         // From: Issue #1683 | PR #2019
         let removed = prune_rendered(new, &files)?;
-        if !removed.is_empty() {
-            for path in &removed {
-                eprintln!("ui: removed stale {}", path.display());
-            }
-            changes.push(proxy_reload(new, "proxy-prune")?);
+        for path in &removed {
+            eprintln!("ui: removed stale {}", path.display());
         }
+        changes.extend(prune_change(new, &removed)?);
         // What: what each apply step did, for the caller.
         // Why: a failed step shows; the next still runs.
         // From: Issue #1683 | PR #1980
@@ -14370,8 +14410,7 @@ mod ui {
     use crate::stack::Stack;
     use crate::stack::{
         Fields, apply_all, apply_now, check_change, commit, container_of, exec_in, exec_json,
-        issue_and_reload, list_change, proxy_reload, render_now, set_wanted, single_field,
-        stale_rendered,
+        issue_and_reload, list_change, render_now, render_plan, set_wanted, single_field,
     };
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
     use axum::extract::{Form, Request, State};
@@ -16431,37 +16470,6 @@ mod ui {
             Some(p) if list.is_empty() => Err(format!("{p}: no rendered owner or file")),
             _ => Ok(json!({"files": list, "errors": []})),
         }
-    }
-
-    // What: what an apply would write and whom it wakes.
-    // Why: page, REST and CLI show one dry run.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn render_plan(s: &Settings) -> Result<Value, String> {
-        let files = match render_now(s).await? {
-            Ok(f) => f,
-            Err(errors) => return Ok(json!({"errors": errors})),
-        };
-        let rows = render::plan(&files)?;
-        let mut changes = Vec::new();
-        let mut list = Vec::new();
-        for (f, state) in &rows {
-            // What: a new file wakes nobody, as in write.
-            // Why: owners read it at their start.
-            // From: Issue #1683 | PR #2020
-            if *state == "changed" {
-                changes.push(render::change_of(f));
-            }
-            list.push(json!({"path": f.path, "owner": f.owner, "state": state}));
-        }
-        let stale = stale_rendered(s, &files)?;
-        if !stale.is_empty() {
-            changes.push(proxy_reload(s, "proxy-prune")?);
-        }
-        let owners: BTreeMap<String, String> = apply::plan(&changes)
-            .into_iter()
-            .map(|(o, e)| (o, format!("{e:?}").to_lowercase()))
-            .collect();
-        Ok(json!({"files": list, "stale": stale, "owners": owners, "errors": []}))
     }
 
     // What: GET UI_ROUTE_PROXY_CERTS: CA and leaves.
