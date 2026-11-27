@@ -12824,7 +12824,14 @@ end
                     std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
                 }
             }
-            std::fs::write(stamp, print).map_err(|e| format!("{}: {e}", stamp.display()))
+            crate::shared::fs::write(
+                stamp,
+                print.as_bytes(),
+                crate::shared::fs::PRIVATE_MODE,
+                crate::shared::fs::Place::Replace,
+                crate::shared::fs::Owner::default(),
+            )
+            .map_err(|e| format!("{}: {e}", stamp.display()))
         }
 
         // What: folder of the stack CA from SOT keys.
@@ -14559,9 +14566,15 @@ end
         // Why: next run waits a day from it.
         // From: Issue #1683 | PR #1980
         pub fn save_stamp(stamp: &Path, at: u64) -> Result<(), String> {
-            let made = stamp.parent().map_or(Ok(()), std::fs::create_dir_all);
-            let wrote = made.and_then(|()| std::fs::write(stamp, at.to_string() + "\n"));
-            wrote.map_err(|e| format!("{}: {e}", stamp.display()))
+            let body = at.to_string() + "\n";
+            crate::shared::fs::write(
+                stamp,
+                body.as_bytes(),
+                crate::shared::fs::PRIVATE_MODE,
+                crate::shared::fs::Place::Replace,
+                crate::shared::fs::Owner::default(),
+            )
+            .map_err(|e| format!("{}: {e}", stamp.display()))
         }
 
         // What: newest change time below a folder.
