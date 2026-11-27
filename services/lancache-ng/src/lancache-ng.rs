@@ -18212,9 +18212,15 @@ mod ui {
             return Err(bad_request(tr("err_action_restart_reload")));
         }
         let s = app.settings();
-        if !s
-            .list("UI_SERVICES")?
-            .contains(&format!("{container}:{program}"))
+        // What: the program is one bare name, never a path.
+        // Why: the list is live; rc-service runs a path.
+        // From: Issue #1683 | PR #2020
+        let bare = crate::config::safe(crate::config::Syntax::Name("_-"), &program)
+            && !program.starts_with('-');
+        if !bare
+            || !s
+                .list("UI_SERVICES")?
+                .contains(&format!("{container}:{program}"))
         {
             return Err(Fail(StatusCode::NOT_FOUND, tr("err_program_not_offered")));
         }
