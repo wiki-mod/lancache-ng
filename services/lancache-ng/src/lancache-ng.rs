@@ -14009,7 +14009,14 @@ mod stack {
     ) -> Result<Vec<PathBuf>, String> {
         let conf = PathBuf::from(s.text("NGINX_CONF_DIR")?);
         let mut stale = Vec::new();
-        for part in s.list("NGINX_LINK_PARTS") {
+        // What: no parts is an error, not "nothing stale".
+        // Why: a missing key must not skip the prune.
+        // From: Issue #1683 | PR #2020
+        let parts = s.list("NGINX_LINK_PARTS");
+        if parts.is_empty() {
+            return Err("NGINX_LINK_PARTS is empty".into());
+        }
+        for part in parts {
             let dir = conf.join(part);
             let kept: BTreeSet<&Path> = files
                 .iter()
