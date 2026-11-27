@@ -11982,6 +11982,13 @@ end
             Ok(PathBuf::from(s.text("NGINX_DIR")?).join(s.text("NGINX_SUBDIR_CA")?))
         }
 
+        // What: folder of the leaf certificates and keys.
+        // Why: the issuer and every reader use this folder.
+        // From: Issue #1683 | PR #2020
+        fn certs_dir(s: &Settings) -> Result<PathBuf, String> {
+            Ok(PathBuf::from(s.text("NGINX_DIR")?).join(s.text("NGINX_SUBDIR_CERTS")?))
+        }
+
         // What: the stack CA certificate file.
         // Why: one path for the issuer and every reader.
         // From: Issue #871 | PR #2017
@@ -11996,9 +12003,8 @@ end
             if !s.flag("HTTPS_ENABLED")? {
                 return Ok(0);
             }
-            let root = PathBuf::from(s.text("NGINX_DIR")?);
             let ca = ca_dir(s)?;
-            let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
+            let dir = certs_dir(s)?;
             let (ca_key, ca_crt) = (ca.join(s.text("CA_KEY_FILE")?), ca_cert(s)?);
             let serial = ca.join(s.text("CA_SERIAL_FILE")?);
             let gid = Some(s.num::<u32>("LANCACHE_RUNTIME_GID")?);
@@ -12075,8 +12081,7 @@ end
         // Why: one naming rule for every reader.
         // From: Issue #1683 | PR #2020
         fn leaf_files(s: &Settings, name: &str) -> Result<(PathBuf, PathBuf), String> {
-            let root = PathBuf::from(s.text("NGINX_DIR")?);
-            let dir = root.join(s.text("NGINX_SUBDIR_CERTS")?);
+            let dir = certs_dir(s)?;
             Ok((
                 dir.join(format!("{name}.key")),
                 dir.join(format!("{name}.crt")),
