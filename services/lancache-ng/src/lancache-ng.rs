@@ -13367,17 +13367,17 @@ end
                     continue;
                 }
                 let body =
-                    nginx_conf::template(&crate::shared::fs::read_text(&src.join(&name))?, s)?;
-                o.add_path(&proxy, dst.join(&name), body);
+                    nginx_conf::template(&crate::shared::fs::read_text(&below(&src, &name)?)?, s)?;
+                o.add_path(&proxy, below(&dst, &name)?, body);
             }
             for (rel, body) in nginx_conf::files(s, &hosts, https)? {
-                o.add_path(&proxy, dst.join(rel), body);
+                o.add_path(&proxy, below(&dst, &rel)?, body);
             }
             // What: the static health body nginx serves.
             // Why: proxy-params.conf aliases; ui owns files
             // From: Issue #1683 | PR #1980
             let health = format!("{}\n", s.text("NGINX_HEALTHZ_BODY")?);
-            o.add_path(&proxy, dst.join(s.text("NGINX_HEALTHZ_FILE")?), health);
+            o.add_path(&proxy, below(&dst, &s.text("NGINX_HEALTHZ_FILE")?)?, health);
             Ok(())
         }
 
@@ -13581,6 +13581,39 @@ end
             })
         }
 
+        // What: every target lies in a render folder.
+        // Why: a bad path key must not write elsewhere.
+        // From: Issue #1683 | PR #2020
+        fn confine(s: &Settings, files: &[File]) -> Result<(), String> {
+            let roots = [s.text("CONFIG_DIR")?, s.text("KEA_DATA_DIR")?];
+            for f in files {
+                let raw = f.path.to_string_lossy();
+                let ok = roots
+                    .iter()
+                    .any(|r| crate::shared::tidy::inside(&raw, r).is_ok());
+                if !ok {
+                    return Err(format!("{raw}: outside {}", roots.join(", ")));
+                }
+            }
+            Ok(())
+        }
+
+        // What: a name or full path inside its folder.
+        // Why: a name may be a full path; it must stay in.
+        // From: Issue #1683 | PR #2020
+        fn below(dir: &Path, name: &str) -> Result<PathBuf, String> {
+            let p = dir.join(name);
+            let up = Path::new(name)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+            if name.is_empty() || up {
+                return Err(format!("{name}: not a name below {}", dir.display()));
+            }
+            crate::shared::tidy::inside(&p.to_string_lossy(), &dir.to_string_lossy())
+                .map_err(|e| format!("{name}: {e}"))?;
+            Ok(p)
+        }
+
         // What: write rendered files; list the changed.
         // Why: an unchanged file never wakes its owner.
         // From: Issue #1683 | PR #1980
@@ -13588,6 +13621,7 @@ end
             s: &Settings,
             files: &[File],
         ) -> Result<Vec<crate::config::Change>, String> {
+            confine(s, files)?;
             let mode = s.mode("UI_CONFIG_FILE_MODE")?;
             let mut out = Vec::new();
             for f in files {
