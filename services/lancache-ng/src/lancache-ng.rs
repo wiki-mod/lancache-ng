@@ -6154,6 +6154,13 @@ mod shared {
             dir.join(key.to_ascii_lowercase().replace('_', "-"))
         }
 
+        // What: the key of a secret file: a-b becomes A_B.
+        // Why: the reverse of file_of; one naming rule.
+        // From: Issue #1683 | PR #2020
+        fn key_of(name: &str) -> String {
+            name.to_ascii_uppercase().replace('-', "_")
+        }
+
         // What: read the file, or create it once.
         // Why: first writer wins; peers then read the same.
         // From: Issue #1683 | PR #1858
@@ -6242,7 +6249,7 @@ mod shared {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
-                let key = name.to_ascii_uppercase().replace('-', "_");
+                let key = key_of(name);
                 let meta =
                     std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
                 let text = read_text(&path).map_err(|e| format!("{}: {e}", path.display()))?;
