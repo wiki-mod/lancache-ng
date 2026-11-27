@@ -3873,7 +3873,8 @@ mod dns {
     // Why: the recursors then read the new forward zones.
     // From: Issue #1683
     fn reload(s: &Settings) -> Result<(), String> {
-        for cmd in apply::exec_cmds(&s.list("RELOAD_EXEC"), "dns") {
+        let owner = s.text("DNS_SERVICE")?;
+        for cmd in apply::exec_cmds(&s.list("RELOAD_EXEC"), &owner) {
             let (program, args) = cmd.split_first().ok_or("empty reload command")?;
             tool::run(std::process::Command::new(program).args(args))?;
         }
