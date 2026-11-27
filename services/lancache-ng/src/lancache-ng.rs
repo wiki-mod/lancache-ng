@@ -16534,6 +16534,7 @@ mod stack {
             Ok(f) => f,
             Err(errors) => return Ok(json!({"errors": errors})),
         };
+        let warnings = render::take_notes();
         let rows = render::file_states(&files)?;
         let mut changes = Vec::new();
         let mut list = Vec::new();
@@ -16552,7 +16553,10 @@ mod stack {
             .into_iter()
             .map(|(o, e)| (o, e.word().to_string()))
             .collect();
-        Ok(json!({"files": list, "stale": stale, "owners": owners, "errors": []}))
+        Ok(
+            json!({"files": list, "stale": stale, "owners": owners, "errors": [],
+            "warnings": warnings}),
+        )
     }
 
     // What: proxy render files this render no longer has.
@@ -16637,6 +16641,13 @@ mod stack {
         zones: bool,
     ) -> Result<Vec<Fault>, String> {
         let (files, written) = render_and_write(new).await?;
+        // What: what the render left out, in the report.
+        // Why: a dropped address must show, not only log.
+        // From: Issue #1683 | PR #2020
+        let mut report: Vec<Fault> = render::take_notes()
+            .into_iter()
+            .map(|w| format!("render: {w}").into())
+            .collect();
         let mut changes = old.diff(new);
         app.rendered.store(true, Ordering::Relaxed);
         changes.extend(written.iter().cloned());
@@ -16651,7 +16662,6 @@ mod stack {
         // What: what each apply step did, for the caller.
         // Why: a failed step shows; the next still runs.
         // From: Issue #1683 | PR #1980
-        let mut report = Vec::new();
         let (grace, limit) = app.limits(new)?;
         // What: a new file runs the commands of its daemon.
         // Why: the daemons do not watch their file.
