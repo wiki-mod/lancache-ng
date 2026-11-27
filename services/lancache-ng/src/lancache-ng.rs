@@ -3318,8 +3318,9 @@ mod dhcp {
     use crate::config::{self, Settings};
     use crate::dns::{chosen_lan_zone, main_domain_fields};
     use crate::shared::dhcp::{Mode as DhcpMode, option_data};
+    use crate::shared::stack::Stack;
     use crate::shared::{docker, fs, http, secret};
-    use crate::ui::{App, Fields, commit, tr};
+    use crate::ui::{Fields, commit, tr};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -3499,7 +3500,11 @@ mod dhcp {
     // What: a Kea change; the main subnet keeps settings.
     // Why: it cannot go; its edit sets DHCP_SUBNET...
     // From: Issue #1683
-    pub(crate) async fn kea_change(app: &App, s: &Settings, edit: &KeaEdit) -> Result<(), String> {
+    pub(crate) async fn kea_change(
+        app: &Stack,
+        s: &Settings,
+        edit: &KeaEdit,
+    ) -> Result<(), String> {
         let main = s.uint("DHCP_SUBNET_ID")?;
         if matches!(edit, KeaEdit::SubnetRemove(id) if *id == main) {
             return Err(tr("err_main_subnet_remove"));
@@ -3763,7 +3768,10 @@ mod dhcp {
     // What: in mode off a running dhcp is stopped again.
     // Why: compose up may start it after the ui.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn dhcp_stays_off(app: &App, s: &Settings) -> Result<Option<String>, String> {
+    pub(crate) async fn dhcp_stays_off(
+        app: &Stack,
+        s: &Settings,
+    ) -> Result<Option<String>, String> {
         let Some(service) = crate::shared::dhcp::off_service(s)? else {
             return Ok(None);
         };
@@ -3803,16 +3811,16 @@ mod dns {
     use crate::config::{self, Settings};
     use crate::shared::dns::Role;
     use crate::shared::peer::{self, PeerZone, ZoneState};
+    use crate::shared::stack::Stack;
     use crate::shared::tool;
     use crate::shared::{apply, fs, render, secret};
     use crate::ui::{
-        App, Failing, Fields, apply_all, commit, list_change, or_stop, primary_https_ip,
-        single_field, tr,
+        Failing, Fields, apply_all, commit, list_change, or_stop, primary_https_ip, single_field,
+        tr,
     };
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::path::Path;
-    use std::sync::Arc;
     use std::time::Duration;
 
     // What: the zones the own pdns pulls, with serials.
@@ -4611,7 +4619,7 @@ mod dns {
     // Why: each LAN domain is one zone in PowerDNS.
     // From: Issue #1683
     pub(crate) async fn lan_domain_action(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         edit: LanDomainEdit,
         raw: &str,
@@ -4830,7 +4838,7 @@ mod dns {
     // Why: one SOT key holds the whole list.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn store_secondaries(
-        app: &App,
+        app: &Stack,
         list: &[(String, String)],
     ) -> Result<(), String> {
         let rows = crate::shared::pdns_conf::secondary_rows(list);
@@ -4896,11 +4904,11 @@ mod dns {
     // What: check every secondary; again after a wait.
     // Why: the SOT sets a shorter wait while one fails.
     // From: Issue #1683
-    pub(crate) async fn secondary_watch(app: Arc<App>) {
+    pub(crate) async fn secondary_watch(app: &Stack) {
         let mut failing: BTreeMap<String, Failing> = BTreeMap::new();
         loop {
             let s = app.settings();
-            let key = match watch_round(&app, &s, &mut failing).await {
+            let key = match watch_round(app, &s, &mut failing).await {
                 Ok(()) if failing.is_empty() => "DNS_SECONDARY_CHECK_SECONDS",
                 Ok(()) => "DNS_SECONDARY_RECHECK_SECONDS",
                 // What: own pdns down: no secondary blamed.
@@ -4922,7 +4930,7 @@ mod dns {
     // Why: resync a lag, enter or take out NS names.
     // From: Issue #1683
     pub(crate) async fn watch_round(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         failing: &mut BTreeMap<String, Failing>,
     ) -> Result<(), String> {
@@ -5089,7 +5097,7 @@ mod dns {
     // What: flush recursor caches when a serial moves.
     // Why: UI, DDNS, AXFR and rollback all bump it.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn flush_on_transfer(app: Arc<App>) {
+    pub(crate) async fn flush_on_transfer(app: &Stack) {
         let mut seen = peer::Flushed::default();
         // What: an error only after the grace time.
         // Why: a planned dns restart must log nothing.
@@ -5761,7 +5769,7 @@ mod dns {
     // What: replace the TSIG secret and apply.
     // Why: shuts out a removed or leaked secondary.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn rotate_tsig(app: &App) -> Result<(), String> {
+    pub(crate) async fn rotate_tsig(app: &Stack) -> Result<(), String> {
         let s = app.settings();
         let file = secret::tsig_file(&s)?;
         fs::remove_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -5781,6 +5789,46 @@ mod shared {
     // What: wall-clock time since the Unix epoch.
     // Why: file names, ids and logs need a plain number.
     // From: Issue #1683 | PR #1980
+    pub mod stack {
+        use crate::config::Settings;
+        use std::sync::RwLock;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+
+        // What: state of a settings change and apply.
+        // Why: dns and dhcp need no web state to save.
+        // From: Issue #1683 | PR #2020
+        pub(crate) struct Stack {
+            pub(crate) settings: RwLock<Settings>,
+            pub(crate) saved: Option<std::path::PathBuf>,
+            pub(crate) docker: crate::shared::docker::Api,
+            // What: true once every config was rendered.
+            // Why: dns and proxy wait for these files.
+            // From: Issue #1683 | PR #1858
+            pub(crate) rendered: AtomicBool,
+        }
+
+        impl Stack {
+            // What: copy of the current settings.
+            // Why: a handler never sees half an update.
+            // From: Issue #1683 | PR #1858
+            pub(crate) fn settings(&self) -> Settings {
+                match self.settings.read() {
+                    Ok(s) => s.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                }
+            }
+
+            // What: Docker stop grace and call limit.
+            // Why: every wait comes from the SOT.
+            // From: Issue #1683 | PR #1858
+            pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
+                let grace = s.num::<u32>("UI_STOP_GRACE")?;
+                Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
+            }
+        }
+    }
+
     pub mod clock {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13715,6 +13763,7 @@ mod ui {
     };
     use crate::shared::dhcp::Mode as DhcpMode;
     use crate::shared::peer;
+    use crate::shared::stack::Stack;
     use crate::shared::{access, apply, docker, fs, http, human, render, secret};
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
     use axum::extract::{Form, Request, State};
@@ -13881,39 +13930,25 @@ mod ui {
     // Why: settings swap whole after each save.
     // From: Issue #1683 | PR #1858
     pub(crate) struct App {
-        pub(crate) settings: RwLock<Settings>,
-        pub(crate) saved: Option<PathBuf>,
+        pub(crate) stack: Stack,
         pub(crate) tera: Tera,
-        pub(crate) docker: docker::Api,
         pub(crate) session_key: [u8; 32],
         pub(crate) cache_used: AtomicU64,
-        // What: true once every config was rendered.
-        // Why: dns and proxy wait for these files.
-        // From: Issue #1683 | PR #1858
-        pub(crate) rendered: AtomicBool,
+    }
+
+    // What: App reads like its stack state.
+    // Why: handlers keep app.settings() and app.docker.
+    // From: Issue #1683 | PR #2020
+    impl std::ops::Deref for App {
+        type Target = Stack;
+        fn deref(&self) -> &Stack {
+            &self.stack
+        }
     }
 
     pub(crate) type Shared = State<Arc<App>>;
 
     impl App {
-        // What: copy of the current settings.
-        // Why: a handler never sees half an update.
-        // From: Issue #1683 | PR #1858
-        pub(crate) fn settings(&self) -> Settings {
-            match self.settings.read() {
-                Ok(s) => s.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
-            }
-        }
-
-        // What: Docker stop grace and call limit.
-        // Why: every wait comes from the SOT.
-        // From: Issue #1683 | PR #1858
-        pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
-            let grace = s.num::<u32>("UI_STOP_GRACE")?;
-            Ok((grace, Duration::from_secs(s.uint("DOCKER_TIMEOUT")?)))
-        }
-
         // What: render a page with the shared context.
         // Why: menu, csrf and values on every page.
         // From: Issue #1683 | PR #1858
@@ -14272,7 +14307,7 @@ mod ui {
     // What: save, reload, render, write, apply.
     // Why: one path for every setting change.
     // From: Issue #1683 | PR #1858
-    pub(crate) async fn commit(app: &App, form: Fields) -> Result<(), String> {
+    pub(crate) async fn commit(app: &Stack, form: Fields) -> Result<(), String> {
         let Some(path) = app.saved.clone() else {
             return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
         };
@@ -14320,7 +14355,7 @@ mod ui {
     // Why: save and apply-now end the same way.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn adopt(
-        app: &App,
+        app: &Stack,
         old: &Settings,
         new: Settings,
     ) -> Result<Vec<String>, String> {
@@ -14335,7 +14370,7 @@ mod ui {
     // What: read the settings file again and apply it.
     // Why: a hand edit or a lost file takes effect.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn apply_now(app: &App) -> Result<Vec<String>, String> {
+    pub(crate) async fn apply_now(app: &Stack) -> Result<Vec<String>, String> {
         let old = app.settings();
         let new = match app.saved.clone() {
             Some(path) => Settings::load(&process_env, Some(&path))?,
@@ -14581,7 +14616,7 @@ mod ui {
     // What: keys a change would set, if it renders.
     // Why: config validate and ?dry_run=1 save nothing.
     // From: Issue #1683 | PR #2020
-    pub(crate) fn check_change(app: &App, form: Fields) -> Result<Vec<String>, String> {
+    pub(crate) fn check_change(app: &Stack, form: Fields) -> Result<Vec<String>, String> {
         let Some(path) = app.saved.clone() else {
             return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
         };
@@ -15378,7 +15413,7 @@ mod ui {
     // What: Docker stats of each container into RRD.
     // Why: values per container, not only the box.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn sample_containers(app: &App, s: &Settings) -> Vec<String> {
+    pub(crate) async fn sample_containers(app: &Stack, s: &Settings) -> Vec<String> {
         let all = match crate::shared::rrd::container_graphs(s) {
             Ok(v) => v,
             Err(e) => return vec![e],
@@ -15420,7 +15455,7 @@ mod ui {
     // Why: a program that is off leaves its values unknown.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn service_values(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         want: &[String],
     ) -> BTreeMap<String, String> {
@@ -15498,7 +15533,7 @@ mod ui {
     // What: chrony tracking from its container.
     // Why: sampler and REST run one command, one parser.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn chrony_tracking(app: &App, s: &Settings) -> Result<Value, String> {
+    pub(crate) async fn chrony_tracking(app: &Stack, s: &Settings) -> Result<Value, String> {
         let rows = s.list("CHRONY_TRACKING_EXEC");
         let (svc, cmd) = apply::exec_rows(&rows)
             .next()
@@ -15550,7 +15585,7 @@ mod ui {
     // What: program values into RRD each step.
     // Why: PowerDNS, nginx, Kea and chrony give values.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn sample_services(app: &App, s: &Settings) -> Vec<String> {
+    pub(crate) async fn sample_services(app: &Stack, s: &Settings) -> Vec<String> {
         let all = match crate::shared::rrd::service_graphs(s) {
             Ok(v) => v,
             Err(e) => return vec![e],
@@ -15588,7 +15623,7 @@ mod ui {
     // What: one sample round: SNMP, containers, programs.
     // Why: the loop and a sample on demand run it alike.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn sample_round(app: &App, s: &Settings) -> Vec<String> {
+    pub(crate) async fn sample_round(app: &Stack, s: &Settings) -> Vec<String> {
         let c = s.clone();
         let mut errs = match tokio::task::spawn_blocking(move || sample_all(&c)).await {
             Ok(list) => list,
@@ -15668,7 +15703,7 @@ mod ui {
     // Why: Docker calls need the real name.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn container_of(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         service: &str,
     ) -> Result<String, String> {
@@ -15683,7 +15718,7 @@ mod ui {
     // Why: rc-service and cachehamster go this way.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn exec_in(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         service: &str,
         cmd: &[&str],
@@ -15700,7 +15735,7 @@ mod ui {
     // Why: cachehamster and watchdog answer in JSON.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn exec_json(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         service: &str,
         cmd: &[&str],
@@ -15766,7 +15801,7 @@ mod ui {
     // What: one cachehamster command; JSON answer.
     // Why: it runs in the services container.
     // From: Issue #871 | PR #1980
-    pub(crate) async fn hamster(app: &App, args: &[&str]) -> Result<Value, String> {
+    pub(crate) async fn hamster(app: &Stack, args: &[&str]) -> Result<Value, String> {
         let s = app.settings();
         let program = s.text("CACHEHAMSTER_PROGRAM")?;
         let mut cmd = vec![program.as_str(), "cachehamster"];
@@ -16002,7 +16037,7 @@ mod ui {
     // Why: an owner without a container has nothing to do.
     // From: Issue #1683 | PR #2017
     pub(crate) async fn plan_containers<V>(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         plan: &mut BTreeMap<String, V>,
     ) -> (BTreeMap<String, String>, Vec<String>) {
@@ -16106,7 +16141,7 @@ mod ui {
     // Why: only owners with changes are touched.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn apply_all(
-        app: &App,
+        app: &Stack,
         old: &Settings,
         new: &Settings,
         zones: bool,
@@ -16275,7 +16310,10 @@ mod ui {
     // What: issue missing certs; reload the proxy.
     // Why: apply and cert renewal share the step.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn issue_and_reload(app: &App, new: &Settings) -> Result<Vec<String>, String> {
+    pub(crate) async fn issue_and_reload(
+        app: &Stack,
+        new: &Settings,
+    ) -> Result<Vec<String>, String> {
         let mut report = Vec::new();
         let s = new.clone();
         let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
@@ -16328,7 +16366,7 @@ mod ui {
     // Why: "done" must mean the service answers again.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn wait_healthy(
-        app: &App,
+        app: &Stack,
         s: &Settings,
         names: &[String],
         limit: Duration,
@@ -16360,7 +16398,7 @@ mod ui {
     // What: start or stop a container for the user.
     // Why: SERVICES_STOPPED is the wish the watchdog obeys.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn set_wanted(app: &App, service: &str, run: bool) -> Result<(), String> {
+    pub(crate) async fn set_wanted(app: &Stack, service: &str, run: bool) -> Result<(), String> {
         let s = app.settings();
         if !s
             .list("UI_CONTROLLABLE_SERVICES")
@@ -16933,7 +16971,7 @@ mod ui {
     // What: language of one request.
     // Why: cookie first, then the browser, then the SOT.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn pick_lang(app: &App, headers: &HeaderMap) -> String {
+    pub(crate) fn pick_lang(app: &Stack, headers: &HeaderMap) -> String {
         let known = |c: &str| all_texts().contains_key(c);
         if let Some(c) = cookie(headers, LANG_COOKIE).filter(|c| known(c)) {
             return c;
@@ -17504,13 +17542,15 @@ mod ui {
             .set(texts(&s.text("LANG_DIR")?)?)
             .map_err(|_| "lang: files read twice".to_string())?;
         let app = Arc::new(App {
-            docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
+            stack: Stack {
+                docker: docker::Api::new(&s.text("DOCKER_ENDPOINT")?)?,
+                settings: RwLock::new(s.clone()),
+                saved,
+                rendered: AtomicBool::new(false),
+            },
             tera: templates(&s.text("TEMPLATE_DIR")?)?,
-            settings: RwLock::new(s.clone()),
-            saved,
             session_key: secret::key_bytes(&key)?,
             cache_used: AtomicU64::new(u64::MAX),
-            rendered: AtomicBool::new(false),
         });
         // What: render every config once at start.
         // Why: owners read config volume; it starts empty.
@@ -17521,9 +17561,11 @@ mod ui {
         }
         tokio::spawn(sampler(app.clone()));
         tokio::spawn(cache_scanner(app.clone()));
-        tokio::spawn(flush_on_transfer(app.clone()));
+        let a = app.clone();
+        tokio::spawn(async move { flush_on_transfer(&a).await });
         tokio::spawn(zones_at_start(app.clone()));
-        tokio::spawn(secondary_watch(app.clone()));
+        let a = app.clone();
+        tokio::spawn(async move { secondary_watch(&a).await });
         let listen = crate::shared::dns::host_port(&s.text("UI_LISTEN")?, s.uint("UI_PORT")?);
         let sock = tokio::net::TcpListener::bind(&listen)
             .await
