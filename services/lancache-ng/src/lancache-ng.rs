@@ -3342,8 +3342,8 @@ mod config {
 mod dhcp {
     use crate::config::{self, Settings};
     use crate::dns::{chosen_lan_zone, main_domain_fields};
-    use crate::shared::dhcp::{Mode as DhcpMode, option_data};
-    use crate::shared::{docker, fs, http, secret};
+    use crate::shared::dhcp::{Mode as DhcpMode, ipv4_of, off_service, option_data};
+    use crate::shared::{docker, fs, http, kea, kea_conf, secret, snapshot};
     use crate::stack::{Fields, Stack, commit};
     use crate::ui::tr;
     use serde_json::{Value, json};
@@ -3376,14 +3376,14 @@ mod dhcp {
     // What: Kea control agent of this stack.
     // Why: host from env; basic auth with the stack token.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn kea_api(s: &Settings) -> Result<crate::shared::kea::Api, String> {
+    pub(crate) fn kea_api(s: &Settings) -> Result<kea::Api, String> {
         let url = format!(
             "http://{}:{}/",
             s.text("DHCP_API_HOST")?,
             s.uint("KEA_CTRL_PORT")?
         );
         let token = secret::get(s, "KEA_CTRL_TOKEN")?;
-        Ok(crate::shared::kea::Api::new(
+        Ok(kea::Api::new(
             http::client(s)?,
             &url,
             &s.text("KEA_CTRL_USER")?,
@@ -3399,8 +3399,8 @@ mod dhcp {
         let dns_text = option_data(sn, DNS_SERVERS.name);
         let dns: Vec<String> = config::list_items(&dns_text).map(str::to_string).collect();
         let pool = sn["pools"][0]["pool"].as_str().unwrap_or_default();
-        let (start, end) = crate::shared::kea_conf::pool_parts(pool);
-        let custom: Vec<Value> = crate::shared::kea_conf::coded_options(sn)
+        let (start, end) = kea_conf::pool_parts(pool);
+        let custom: Vec<Value> = kea_conf::coded_options(sn)
             .into_iter()
             .filter(|o| o.get("code").is_some())
             .collect();
@@ -3430,9 +3430,9 @@ mod dhcp {
     }
 
     // What: the Kea API; none if the mode is not Kea.
-    // Why: every Kea read stops the same way in other modes.
+    // Why: each Kea read stops alike in other modes.
     // From: Issue #1683 | PR #2020
-    fn kea_api_in_kea_mode(s: &Settings) -> Result<Option<crate::shared::kea::Api>, String> {
+    fn kea_api_in_kea_mode(s: &Settings) -> Result<Option<kea::Api>, String> {
         if DhcpMode::from_settings(s)? != DhcpMode::Kea {
             return Ok(None);
         }
@@ -3444,7 +3444,7 @@ mod dhcp {
     // From: Issue #1683 | PR #1980
     fn kea_subnets(cfg: &Value) -> (Vec<Value>, Vec<Value>) {
         let (mut subnets, mut reservations) = (Vec::new(), Vec::new());
-        for sn in crate::shared::kea_conf::subnets(cfg) {
+        for sn in kea_conf::subnets(cfg) {
             for r in sn["reservations"].as_array().into_iter().flatten() {
                 reservations.push(json!({
                     "subnet_id": sn["id"], "mac": r["hw-address"],
@@ -3482,10 +3482,10 @@ mod dhcp {
     // What: snapshot store of the Kea config.
     // Why: each subnet change can be undone.
     // From: Issue #1683 | PR #1980
-    pub(crate) fn kea_store(s: &Settings) -> Result<crate::shared::snapshot::Store, String> {
+    pub(crate) fn kea_store(s: &Settings) -> Result<snapshot::Store, String> {
         let dir = PathBuf::from(s.text("KEA_CONFIG_SNAPSHOT_DIR")?);
         let keep = s.num::<usize>("KEA_SNAPSHOT_KEEP")?;
-        Ok(crate::shared::snapshot::Store {
+        Ok(snapshot::Store {
             dir,
             keep,
             owner: fs::Owner::default(),
@@ -3626,8 +3626,8 @@ mod dhcp {
             // From: Issue #1683 | PR #2020
             Some("probe") => {
                 let route = s.text("UI_ROUTE_DHCP_CHECK")?;
-                let body = crate::shared::http::Body::Form(vec![]);
-                crate::shared::http::ui_socket(&s, &route, body).await?
+                let body = http::Body::Form(vec![]);
+                http::ui_socket(&s, &route, body).await?
             }
             // What: a DHCP page action via the ui socket.
             // Why: the ui checks, saves and applies it.
@@ -3642,7 +3642,7 @@ mod dhcp {
                     .filter(|o| !matches!(o, DhcpOp::KeaRollback))
                     .map(|o| o.key())
                     .collect();
-                crate::shared::http::page_do(&s, &keys, &args[1..]).await?
+                http::page_do(&s, &keys, &args[1..]).await?
             }
             _ => return Err("commands: state kea-snapshots stats kea-rollback probe do".into()),
         };
@@ -3677,9 +3677,9 @@ mod dhcp {
         if let Some(top) = cfg.as_object_mut() {
             top.remove("hash");
         }
-        let mut subnets = crate::shared::kea_conf::subnets(&cfg).to_vec();
+        let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
-        crate::shared::kea_conf::set_subnets(&mut cfg, subnets);
+        kea_conf::set_subnets(&mut cfg, subnets);
         api.set_config(cfg.clone()).await?;
         let store = kea_store(s)?;
         store.save(&serde_json::to_vec(&cfg).map_err(|e| e.to_string())?)?;
@@ -3693,13 +3693,12 @@ mod dhcp {
         let hosts: Vec<String> = config::list_items(&input.ntp_servers)
             .map(str::to_string)
             .collect();
-        let ntp = crate::shared::dhcp::ipv4_of(&hosts, "ntp_servers");
-        let mut opts =
-            crate::shared::kea_conf::named_rows(&input.gateway, &input.dns, &input.domain, &ntp);
+        let ntp = ipv4_of(&hosts, "ntp_servers");
+        let mut opts = kea_conf::named_rows(&input.gateway, &input.dns, &input.domain, &ntp);
         if let Some(old) = old {
-            opts.extend(crate::shared::kea_conf::coded_options(old));
+            opts.extend(kea_conf::coded_options(old));
         }
-        let pool = crate::shared::kea_conf::pool_text(&input.pool_start, &input.pool_end);
+        let pool = kea_conf::pool_text(&input.pool_start, &input.pool_end);
         let mut sn = json!({"id": id, "subnet": input.subnet, "pools": [{"pool": pool}],
                         "option-data": opts});
         if let Some(life) = input.lease_time {
@@ -3736,7 +3735,7 @@ mod dhcp {
                 kea_edit(s, |l| {
                     let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
                     let mut sn = subnet_from(input, next, None);
-                    crate::shared::kea_conf::subnet_ddns_suffix(s, &mut sn)?;
+                    kea_conf::subnet_ddns_suffix(s, &mut sn)?;
                     l.push(sn);
                     Ok(())
                 })
@@ -3746,7 +3745,7 @@ mod dhcp {
                 kea_edit(s, |l| {
                     let sn = subnet_mut(l, *id)?;
                     *sn = subnet_from(input, *id, Some(&sn.clone()));
-                    crate::shared::kea_conf::subnet_ddns_suffix(s, sn)
+                    kea_conf::subnet_ddns_suffix(s, sn)
                 })
                 .await
             }
@@ -3762,7 +3761,7 @@ mod dhcp {
                     let sn = subnet_mut(l, *subnet)?;
                     let mut opts = sn["option-data"].as_array().cloned().unwrap_or_default();
                     let same = |o: &Value| o["code"].as_u64() == Some(u64::from(*code));
-                    opts.retain(|o| !same(o) || !crate::shared::kea_conf::is_coded(o));
+                    opts.retain(|o| !same(o) || !kea_conf::is_coded(o));
                     if let Some(data) = data {
                         opts.push(json!({"code": code, "data": data}));
                     }
@@ -3802,7 +3801,7 @@ mod dhcp {
         app: &Stack,
         s: &Settings,
     ) -> Result<Option<String>, String> {
-        let Some(service) = crate::shared::dhcp::off_service(s)? else {
+        let Some(service) = off_service(s)? else {
             return Ok(None);
         };
         let (grace, limit) = app.limits(s)?;
@@ -10603,7 +10602,7 @@ end
             format!("{start} - {end}")
         }
 
-        // What: the subnet list of a Kea config; none: empty.
+        // What: subnet list of a Kea config; none: empty.
         // Why: one reader of where Kea keeps its subnets.
         // From: Issue #1683 | PR #2020
         pub fn subnets(cfg: &Value) -> &[Value] {
@@ -10619,7 +10618,7 @@ end
             cfg["Dhcp4"]["subnet4"] = Value::Array(subnets);
         }
 
-        // What: start and end of a pool text, as pool_text wrote.
+        // What: start and end of a pool text.
         // Why: one place knows the pool form for both ways.
         // From: Issue #1683 | PR #2020
         pub fn pool_parts(pool: &str) -> (&str, &str) {
