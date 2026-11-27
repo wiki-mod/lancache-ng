@@ -310,7 +310,7 @@ mod cachehamster {
 
     // What: seal key: session.key plus machine features.
     // Why: a copied data dir must not open the login.
-    // From: Issue #871
+    // From: Issue #871 | PR #2020
     fn bound_key(dir: &Path, bind: &[String], fresh: bool) -> Result<[u8; 32], String> {
         let salt = session_key(dir)?;
         let path = dir.join(BIND_FILE);
@@ -1111,7 +1111,7 @@ mod cachehamster {
         os: String,
         // What: the shared client with the SOT timeouts.
         // Why: no Steam request may hang without a limit.
-        // From: Issue #871
+        // From: Issue #871 | PR #2020
         web: reqwest::Client,
     }
 
@@ -3688,7 +3688,7 @@ mod config {
 
         // What: a copy with one checked value replaced.
         // Why: the dns helper renders the live zone list.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn with(&self, key: &str, raw: &str) -> Result<Self, String> {
             let value = self.validate(key, raw)?;
             let mut copy = self.clone();
@@ -3853,12 +3853,12 @@ mod dhcp {
 
     // What: Kea subnets per LAN zone, by domain-name.
     // Why: the DNS page shows which subnet uses a domain.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn domain_subnets(s: &Settings) -> BTreeMap<String, Vec<String>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         // What: no Kea answer leaves the column empty.
         // Why: DNS page must not fail when dhcp is down.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let Ok(Some(cfg)) = kea_config(s).await else {
             return out;
         };
@@ -4043,7 +4043,7 @@ mod dhcp {
 
     // What: a Kea change; the main subnet keeps settings.
     // Why: it cannot go; its edit sets DHCP_SUBNET...
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_change(app: &Stack, s: &Settings, edit: &KeaEdit) -> Result<(), Fault> {
         let main = s.uint("DHCP_SUBNET_ID")?;
         if matches!(edit, KeaEdit::SubnetRemove(id) if *id == main) {
@@ -4060,7 +4060,7 @@ mod dhcp {
 
     // What: SOT keys the main subnet is kept in.
     // Why: the settings are the only source of it.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn main_subnet_settings(
         s: &Settings,
         input: &SubnetInput,
@@ -4077,7 +4077,7 @@ mod dhcp {
         }
         // What: main subnet domain sets main LAN domain.
         // Why: picking an extra swaps it with the old main.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         if !input.domain.is_empty() {
             f.extend(main_domain_fields(s, &input.domain)?);
         }
@@ -4285,7 +4285,7 @@ mod dhcp {
     pub(crate) async fn kea_action(s: &Settings, edit: &KeaEdit) -> Result<(), Fault> {
         // What: a subnet domain must be a LAN domain.
         // Why: DDNS and DNS answer only for those zones.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         if let KeaEdit::SubnetAdd(input) | KeaEdit::SubnetUpdate(_, input) = edit
             && !input.domain.is_empty()
         {
@@ -4408,7 +4408,7 @@ mod dns {
 
     // What: the zones the own pdns pulls, with serials.
     // Why: the primary sets them; the recursors follow.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     async fn own_zones(s: &Settings) -> Result<BTreeMap<String, u32>, String> {
         let api = peer::own_api(s)?;
         Ok(serial_map(
@@ -4425,7 +4425,7 @@ mod dns {
 
     // What: dns configs for these zones; true if changed.
     // Why: one renderer with the render one-shot.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     fn write_for(s: &Settings, zones: &[String]) -> Result<bool, String> {
         let s = s.with("DNS_SECONDARY_ZONES", &crate::config::join_items(zones))?;
         let sec = render::secrets(&s)?;
@@ -4435,7 +4435,7 @@ mod dns {
 
     // What: the dns reload commands of the SOT, run here.
     // Why: the recursors then read the new forward zones.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     fn reload(s: &Settings) -> Result<(), String> {
         let owner = s.text("DNS_SERVICE")?;
         for cmd in apply::exec_cmds(&s.list("RELOAD_EXEC")?, &owner) {
@@ -4447,26 +4447,26 @@ mod dns {
 
     // What: what is in place so far.
     // Why: a step is noted only after it worked.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     #[derive(Default)]
     struct Done {
         // What: TSIG key, setup zones and key binding done.
         // Why: once per start; then primary keeps zones.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         seeded: bool,
         // What: a written config not yet reloaded.
         // Why: a failed reload must be retried.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         reload_due: bool,
         // What: the serial each zone was last flushed at.
         // Why: a failed flush is retried next round.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         flushed: peer::Flushed,
     }
 
     // What: TSIG key, setup zones without removal, binding.
     // Why: the secondary pulls with its key from the start.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     async fn seed(s: &Settings) -> Result<(), String> {
         let key = peer::ensure_tsigkey(s).await?;
         peer::ensure_secondary_zones(s, &key).await?;
@@ -4475,11 +4475,11 @@ mod dns {
 
     // What: one round towards the wanted state.
     // Why: same input changes nothing; a failure retries.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     async fn round(s: &Settings, done: &mut Done) -> Result<(), String> {
         // What: before pdns answers, the setup zone list.
         // Why: pdns and recursors start on the first write.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let live = own_zones(s).await;
         let names: Vec<String> = match &live {
             Ok(zones) => zones.keys().cloned().collect(),
@@ -4818,7 +4818,7 @@ mod dns {
 
     // What: idle on a primary, else rounds forever.
     // Why: OpenRC keeps process; the primary's ui renders.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     async fn follow() -> Result<(), String> {
         let mut done = Done::default();
         loop {
@@ -4942,7 +4942,7 @@ mod dns {
 
     // What: the LAN zone a form names; empty = main.
     // Why: records go only into a configured LAN domain.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn chosen_lan_zone(s: &Settings, raw: &str) -> Result<String, Fault> {
         if raw.trim().is_empty() {
             return Ok(crate::shared::dns::lan_zone(s)?);
@@ -4954,7 +4954,7 @@ mod dns {
 
     // What: a zone must be one of the LAN domains.
     // Why: one check and one text for LAN domain input.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     fn in_lan_domains(lans: &[String], zone: &str, shown: &str) -> Result<(), Fault> {
         match lans.iter().any(|l| l == zone) {
             true => Ok(()),
@@ -4964,7 +4964,7 @@ mod dns {
 
     // What: settings that make one domain the main one.
     // Why: a former extra leaves the list; swap keeps both.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn main_domain_fields(s: &Settings, main: &str) -> Result<Fields, String> {
         let lans = crate::shared::dns::lan_domains(s)?;
         let want = crate::shared::dns::canonical_zone(main.trim());
@@ -4978,13 +4978,13 @@ mod dns {
             .collect();
         // What: old main stays as extra only on a swap.
         // Why: a non-extra name renames the main one.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         if want != old && lans.iter().skip(1).any(|z| *z == want) {
             extra.push(plain(&old));
         }
         // What: the new set passes the LAN domain rule.
         // Why: one rule; else lan_domains fails everywhere.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         crate::shared::dns::validate_lan_domains(&plain(&want), &extra)?;
         Ok(Fields::from([
             ("DHCP_DOMAIN".to_string(), plain(&want)),
@@ -4997,7 +4997,7 @@ mod dns {
 
     // What: rrsets of a zone besides SOA, NS and DS.
     // Why: only these are records a person added.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn own_rrsets(rows: &[Value]) -> Vec<Value> {
         rows.iter()
             .filter(|r| !matches!(r["type"].as_str(), Some("SOA" | "NS" | "DS")))
@@ -5276,7 +5276,7 @@ mod dns {
 
     // What: add, remove or promote one LAN domain.
     // Why: each LAN domain is one zone in PowerDNS.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn lan_domain_action(
         app: &Stack,
         s: &Settings,
@@ -5302,7 +5302,7 @@ mod dns {
                 in_lan_domains(&lans, &zone, &name)?;
                 // What: a domain with own records stays.
                 // Why: removing it drops names from DNS.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2020
                 let own = own_rrsets(&peer::own_api(s)?.rrsets(&zone).await?).len();
                 if own > 0 {
                     return Err(Fault::key(
@@ -5326,7 +5326,7 @@ mod dns {
     pub(crate) fn in_zone(name: &str, zone: &str) -> String {
         // What: only a whole-label suffix counts as inside.
         // Why: "xhome.lan" is not in zone "home.lan".
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let bare = crate::shared::dns::bare_zone(zone);
         let inside = crate::shared::dns::is_within(name, bare);
         if name.ends_with('.') || inside {
@@ -5522,7 +5522,7 @@ mod dns {
             "primary": primary,
             // What: the zones the primary serves.
             // Why: the secondary pulls each one by AXFR.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             "zones": crate::shared::dns::managed_zones(s)?,
             "pdns_api_key": secret::get(s, "PDNS_API_KEY")?,
             "tsig_name": s.text("DDNS_TSIG_NAME")?,
@@ -5583,7 +5583,7 @@ mod dns {
                 Ok(()) => "DNS_SECONDARY_RECHECK_SECONDS",
                 // What: own pdns down: no secondary blamed.
                 // Why: at ui start the dns may not run yet.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2020
                 Err(e) => {
                     eprintln!("ui: secondary check skipped: {e}");
                     "PDNS_SOA_COLD_RETRY"
@@ -5632,7 +5632,7 @@ mod dns {
                     failing.remove(name);
                     // What: first entry; not after take out
                     // Why: re-entry only by hand.
-                    // From: Issue #1683
+                    // From: Issue #1683 | PR #2020
                     if aa && enabled && !ns.contains(name) && !off.contains(name) {
                         eprintln!("ui: secondary {name}: entered as NS");
                         enter.push(name.clone());
@@ -5692,7 +5692,7 @@ mod dns {
 
     // What: one secondary gets our zone list.
     // Why: added or removed domains reach it alone.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn peer_follows(
         s: &Settings,
         api: &pdns::Api,
@@ -5709,7 +5709,7 @@ mod dns {
 
     // What: every secondary follows, in the background.
     // Why: a zone change must not wait for the slow check.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn peers_follow(s: &Settings) {
         let s = s.clone();
         tokio::spawn(async move {
@@ -5758,7 +5758,7 @@ mod dns {
             }
             // What: pull ahead/unknown/behind; skip missing
             // Why: a missing zone has no copy to refresh.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             if matches!(
                 state,
                 ZoneState::Ahead | ZoneState::Unknown | ZoneState::Behind
@@ -5774,7 +5774,7 @@ mod dns {
 
     // What: worst state over all zones, each in detail
     // Why: in sync only when every managed zone matches.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn secondary_health(s: &Settings, address: &str) -> Value {
         let zones = match peer_serials(s, address).await {
             Ok(z) => z,
@@ -6149,7 +6149,7 @@ mod dns {
 
     // What: moves local.<domain> records into <domain>.
     // Why: an old install still holds this extra zone.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn merge_legacy_zone(
         s: &Settings,
         api: &pdns::Api,
@@ -6160,7 +6160,7 @@ mod dns {
         let id = pdns::zone_id(&legacy);
         // What: a LAN domain named local.<x> is kept.
         // Why: then it is a configured zone, not legacy.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         if !have.contains(&id) || crate::shared::dns::lan_domains(s)?.contains(&legacy) {
             return Ok(());
         }
@@ -6169,7 +6169,7 @@ mod dns {
         let parent = own_rrsets(&api.rrsets(lan).await?);
         // What: a clash keeps both zones and logs it.
         // Why: a record must never be overwritten silently.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         if let Some(r) = moved
             .iter()
             .find(|r| parent.iter().any(|p| key(p) == key(r)))
@@ -6199,7 +6199,7 @@ mod dns {
 
     // What: NS and A record for the SOA's nameserver.
     // Why: the SOA nameserver needs a record of its name.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn ensure_soa_nameserver(
         s: &Settings,
         api: &pdns::Api,
@@ -6285,7 +6285,7 @@ mod dns {
         };
         // What: delete PTR only when it names this host.
         // Why: an own PTR of the admin must stay.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let ours = rrset_contents(&api, &zone, &rev, "PTR")
             .await?
             .contains(&host);
@@ -6402,7 +6402,7 @@ mod dns {
 
     // What: writes one rrset only when it differs.
     // Why: an equal PATCH would still raise the serial.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn ensure_rrset(
         api: &pdns::Api,
         zone: &str,
@@ -6843,7 +6843,7 @@ mod shared {
 
         // What: file bytes, or None if the file is absent.
         // Why: a missing file is a normal first state.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn read_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
             match fs::read(path) {
                 Ok(b) => Ok(Some(b)),
@@ -6888,7 +6888,7 @@ mod shared {
 
         // What: paths in a folder; an absent one is empty.
         // Why: a folder made on first write may not exist.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn entries_if_present(dir: &Path) -> io::Result<Vec<PathBuf>> {
             match fs::read_dir(dir) {
                 Ok(rd) => rd.map(|e| e.map(|e| e.path())).collect(),
@@ -7165,7 +7165,7 @@ mod shared {
 
         // What: one secret by its key: env, else the file.
         // Why: every program gets same key the same way.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn get(s: &crate::config::Settings, key: &str) -> Result<String, String> {
             resolve(&crate::config::process_env, &dir(s)?, key, Owner::default())
                 .map_err(|e| format!("{key}: {e}"))
@@ -7323,7 +7323,7 @@ mod shared {
 
         // What: 32 key bytes from salt, machine features.
         // Why: the key needs the data dir and this machine.
-        // From: Issue #871
+        // From: Issue #871 | PR #2020
         pub fn bind_key(salt: &[u8; 32], parts: &[(String, Vec<u8>)]) -> [u8; 32] {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
@@ -8008,7 +8008,7 @@ mod shared {
 
             // What: primary address of one secondary zone.
             // Why: a rerun fixes the masters of old zones.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             pub async fn set_masters(&self, zone: &str, masters: &[String]) -> Result<(), String> {
                 let path = zone_path(zone);
                 let body = json!({"masters": masters});
@@ -8017,7 +8017,7 @@ mod shared {
 
             // What: TSIG key a secondary uses for AXFR.
             // Why: the API refuses meta AXFR-MASTER-TSIG.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             pub async fn set_secondary_tsig(&self, zone: &str, key: &str) -> Result<(), String> {
                 let path = zone_path(zone);
                 let body = json!({"slave_tsig_key_ids": [zone_id(key)]});
@@ -8437,7 +8437,7 @@ mod shared {
 
         // What: checked LAN domains, main domain first.
         // Why: one rule for zones, DDNS, records and ui.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn validate_lan_domains(main: &str, extra: &[String]) -> Result<Vec<String>, String> {
             let mut out: Vec<String> = Vec::new();
             for raw in std::iter::once(main).chain(extra.iter().map(String::as_str)) {
@@ -8445,7 +8445,7 @@ mod shared {
                 let name = bare_zone(&zone);
                 // What: one label like "lan" is allowed.
                 // Why: setup.sh offers it; NTA covers it.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2020
                 if !is_dns_name(name, false, false) {
                     return Err(format!("LAN domain {raw:?} is no domain name"));
                 }
@@ -8469,7 +8469,7 @@ mod shared {
 
         // What: DHCP_DOMAIN, then DNS_EXTRA_LAN_DOMAINS.
         // Why: DHCP and the NS names use the main domain.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn lan_domains(s: &Settings) -> Result<Vec<String>, String> {
             let main = lan_zone(s)?;
             let main = bare_zone(&main);
@@ -8531,7 +8531,7 @@ mod shared {
 
         // What: the old extra zone local.<domain>.
         // Why: an old install holds it; its records merge.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn legacy_local_zone(lan: &str) -> String {
             canonical_zone(&format!("local.{}", bare_zone(lan)))
         }
@@ -8911,7 +8911,7 @@ mod shared {
 
         // What: DNS servers handed to DHCP clients.
         // Why: setup.sh: empty means the stack, IP_HTTP.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn dns_addrs(s: &Settings) -> Result<Vec<String>, String> {
             let mut dns = s.list("DHCP_DNS_SERVERS")?;
             if dns.is_empty() {
@@ -8928,7 +8928,7 @@ mod shared {
 
         // What: own NTP for DHCP: NTP and NTP_AUTO_DHCP on.
         // Why: one rule for the render and the DHCP page.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn own_ntp(s: &Settings) -> Result<bool, String> {
             Ok(s.flag("NTP_ENABLED")? && s.flag("NTP_AUTO_DHCP")?)
         }
@@ -9257,7 +9257,7 @@ mod shared {
 
             // What: the one colour rule of bar and watchdog
             // Why: a stop user wanted is gray, else red.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             pub fn colour(&self, wanted: bool) -> &'static str {
                 match self {
                     Health::Healthy => "green",
@@ -9780,7 +9780,7 @@ mod shared {
 
             // What: the service containers of this stack.
             // Why: a "compose run" one is no service.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             pub async fn stack(&self, s: &crate::config::Settings) -> Result<Vec<Value>, String> {
                 let limit = timeout(s)?;
                 let project = s.text("COMPOSE_PROJECT")?;
@@ -10923,7 +10923,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                     if primary {
                         // What: NOTIFY to secondary pdns.
                         // Why: port 53 there is recursor.
-                        // From: Issue #1683
+                        // From: Issue #1683 | PR #2020
                         let port = s.uint("PDNS_AUTH_PORT")?;
                         let to: Vec<String> = secondary_ips(s)?
                             .iter()
@@ -10958,7 +10958,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 ("allow-axfr-ips", joined("PDNS_AXFR_FROM")?),
                 // What: dnsdist passes client IP by header.
                 // Why: ACLs and logs need real client IP.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2020
                 (
                     "proxy-protocol-from",
                     crate::shared::dnsdist_conf::source_of(s)?,
@@ -11075,7 +11075,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             use std::cmp::Ordering;
             // What: no primary serial is the state Error.
             // Why: CodeQL read a None in a tuple as unused.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             let Some(p) = z.primary else {
                 return ZoneState::Error;
             };
@@ -11143,13 +11143,13 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             )];
             // What: no removal; the primary's check prunes.
             // Why: this list is from setup, maybe stale.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             match_zones(&own_api(s)?, &zones, &masters, key, false, "secondary").await
         }
 
         // What: a secondary holds exactly the wanted zones.
         // Why: one rule at setup and in primary's check.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub async fn match_zones(
             api: &crate::shared::pdns::Api,
             zones: &[String],
@@ -11172,14 +11172,14 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                     api.create_secondary(id, masters, key).await?;
                     // What: pull the new zone now.
                     // Why: else pdns waits a xfr cycle.
-                    // From: Issue #1683
+                    // From: Issue #1683 | PR #2020
                     api.axfr_retrieve(id).await?;
                     eprintln!("{who}: secondary zone {id} added");
                 }
             }
             // What: drop copies primary no longer serves.
             // Why: a removed LAN domain must stop answering
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             for z in have
                 .iter()
                 .filter(|z| prune && z.kind == "Slave" && !wanted.contains(&z.name))
@@ -11202,7 +11202,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let probe = soa_on_dns_port(s, &primary, zone).await;
             // What: no aa, no answer: keep PDNS_AUTH_PORT.
             // Why: a failed probe must not stop zones step.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             let chosen = match &probe {
                 Ok(soa) if soa.serves_zone() => s.uint("DNS_PORT")?,
                 _ => fallback,
@@ -11213,7 +11213,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: non-RD SOA query to DNS_PORT of one address
         // Why: XFR port choice and NS check ask the same.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub async fn soa_on_dns_port(
             s: &Settings,
             address: &str,
@@ -11228,7 +11228,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: the zone list of one secondary by address.
         // Why: the watchdog and the ui read the same list.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub async fn zones_at(
             s: &Settings,
             address: &str,
@@ -11251,14 +11251,14 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: serial each zone was last flushed at.
         // Why: one rule for the ui and the dns helper.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         #[derive(Default)]
         pub struct Flushed(Option<BTreeMap<String, u32>>);
 
         impl Flushed {
             // What: zones whose serial moved since flush.
             // Why: at start pdns NOTIFY already wiped them.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             pub fn due(&mut self, zones: &BTreeMap<String, u32>) -> Vec<(String, u32)> {
                 let seen = self.0.get_or_insert_with(|| zones.clone());
                 seen.retain(|zone, _| zones.contains_key(zone));
@@ -11271,7 +11271,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
             // What: note a flush that worked.
             // Why: a failed one stays due for next round.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             pub fn done(&mut self, zone: &str, serial: u32) {
                 self.0
                     .get_or_insert_with(BTreeMap::new)
@@ -11361,7 +11361,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
         // What: state of one zone and the worst-of rule.
         // Why: in sync only if every managed zone matches.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         #[cfg(test)]
         mod tests {
             use super::{PeerZone, worst_state, zone_state};
@@ -11379,7 +11379,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
             // What: each serial pair maps to its state word
             // Why: page and alarms show these words.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             #[test]
             fn zone_state_names_each_case() {
                 assert_eq!(zone_state(&zone(Some(3), Some(3))).word(), "in_sync");
@@ -11391,7 +11391,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
 
             // What: one lagging zone makes the peer behind.
             // Why: a peer is in sync only if every zone is.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             #[test]
             fn one_lagging_zone_decides_the_status() {
                 let zones = vec![zone(Some(3), Some(3)), zone(Some(5), Some(4))];
@@ -11503,7 +11503,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             );
             // What: ".name" = subdomains, "name" = itself.
             // Why: apex of a subdomain row must not match.
-            // From: Issue #1072
+            // From: Issue #1072 | PR #2020
             for (d, subtree) in domains {
                 let d = crate::shared::dns::bare_zone(d);
                 if !crate::shared::dns::is_dns_name(d, false, true) {
@@ -11608,7 +11608,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 let z = crate::shared::dns::bare_zone(&raw).to_ascii_lowercase();
                 // What: name with "_" allowed; empty is "."
                 // Why: a..b, -bad- are no names to forward
-                // From: Issue #1918
+                // From: Issue #1918 | PR #2020
                 if !z.is_empty() && !crate::shared::dns::is_dns_name(&z, true, false) {
                     return Err(format!("{key}: bad domain {raw}"));
                 }
@@ -12109,7 +12109,7 @@ end
 
         // What: subnet DDNS suffix from its domain-name.
         // Why: Kea D2 picks the zone by the FQDN suffix.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn subnet_ddns_suffix(s: &Settings, subnet: &mut Value) -> Result<(), String> {
             let lans = crate::shared::dns::lan_domains(s)?;
             let domain =
@@ -12122,7 +12122,7 @@ end
             };
             // What: the main domain uses the global suffix.
             // Why: a foreign domain-name has no zone here.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             match zone.filter(|z| lans.iter().skip(1).any(|l| l == z)) {
                 Some(z) => obj.insert("ddns-qualifying-suffix".into(), Value::from(z)),
                 None => obj.remove("ddns-qualifying-suffix"),
@@ -12146,7 +12146,7 @@ end
 
         // What: the named options of one Kea subnet.
         // Why: settings and subnet form give the same rows.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn named_rows(
             gateway: &str,
             dns: &[String],
@@ -12232,14 +12232,14 @@ end
 
         // What: kea-dhcp4.conf; main subnet from settings.
         // Why: the settings are the only source of it.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn dhcp4(s: &Settings, existing: Option<&Value>) -> Result<Value, String> {
             let domain = lan_domain(s)?;
             let (valid, max) = crate::shared::dhcp::lease_limits(s, s.uint("DHCP_LEASE_TIME")?)?;
             let pool = pool_text(&s.text("DHCP_RANGE_START")?, &s.text("DHCP_RANGE_END")?);
             // What: last main domain, if no LAN domain now.
             // Why: kept subnets follow only dropped domain.
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             let lans = crate::shared::dns::lan_domains(s)?;
             let before = existing
                 .and_then(|e| e.pointer("/Dhcp4/ddns-qualifying-suffix"))
@@ -12354,7 +12354,7 @@ end
             let entry = |zone: &str| json!({"name": zone, "key-name": key, "dns-servers": target});
             // What: one forward entry per LAN domain.
             // Why: D2 rejects name outside all listed zones
-            // From: Issue #1683
+            // From: Issue #1683 | PR #2020
             let forward: Vec<Value> = crate::shared::dns::lan_domains(s)?
                 .iter()
                 .map(|z| entry(z))
@@ -13138,7 +13138,7 @@ end
 
         // What: an owner's reload commands, "owner:cmd+arg"
         // Why: RELOAD_EXEC in the SOT; no list in code.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub fn exec_cmds<'a>(
             exec: &'a [String],
             owner: &'a str,
@@ -13148,7 +13148,7 @@ end
 
         // What: run every reload command; stop at first.
         // Why: a failed reload is shown, never hidden.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         pub async fn reload_exec(
             api: &Api,
             name: &str,
@@ -15492,7 +15492,7 @@ end
                 let cols: Vec<&str> = row.split(';').collect();
                 // What: old dst.file rows or d_store row.
                 // Why: syslog-ng 4 shows only d_store row.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2020
                 let store = match cols.first() {
                     Some(&"dst.file") => true,
                     Some(&"destination") => cols.get(1) == Some(&super::log::STORE),
@@ -17271,7 +17271,7 @@ mod ui {
         )?;
         // What: a new main domain also updates the extras.
         // Why: an extra made main must leave extra list.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let mut form = form;
         if let Some(d) = form.get("DHCP_DOMAIN").cloned() {
             form.extend(main_domain_fields(&app.settings(), &d).map_err(bad_request)?);
@@ -17709,7 +17709,7 @@ mod ui {
                 }
                 // What: a new address drops old records.
                 // Why: same address: no save/ensure runs.
-                // From: Issue #1683
+                // From: Issue #1683 | PR #2020
                 if list[at].1 != a.address {
                     delete_peer_records(&s, &name, &list[at].1)
                         .await
@@ -17759,7 +17759,7 @@ mod ui {
         ctx.insert("dhcp_domain", &opt("DHCP_DOMAIN"));
         // What: LAN domains for the subnet domain dropdown.
         // Why: a subnet may only use a domain DNS serves.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let lan_names: Vec<String> = crate::shared::dns::lan_domains(&s)?
             .iter()
             .map(|z| crate::shared::dns::bare_zone(z).to_string())
@@ -17787,7 +17787,7 @@ mod ui {
         ctx.insert("kea_snapshot_retention", &opt("KEA_SNAPSHOT_KEEP"));
         // What: hint shows only when own NTP is handed out
         // Why: one rule with the Kea and dnsmasq render.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         ctx.insert("ntp_auto_dhcp_active", &crate::shared::dhcp::own_ntp(&s)?);
         let codes: Vec<u8> = crate::shared::dhcp::MANAGED
             .iter()
@@ -17839,7 +17839,7 @@ mod ui {
         }
         // What: the Kea server needs a network card.
         // Why: without a card Kea answers nobody.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let cards = get("dhcp_proxy_interface");
         if matches!(op, DhcpOp::Mode) && asked == Some(DhcpMode::Kea) && cards.is_empty() {
             return Err(bad_request(tr("err_kea_needs_interface")));
@@ -18019,7 +18019,7 @@ mod ui {
         })];
         // What: no dhcp tab while DHCP_MODE is off.
         // Why: the tab would show a stopped container.
-        // From: Issue #1683
+        // From: Issue #1683 | PR #2020
         let off = crate::shared::dhcp::off_service(&s)?.unwrap_or_default();
         for c in s.list("STATS_CONTAINERS")? {
             if c == off {
@@ -19018,14 +19018,14 @@ mod ui {
 
     // What: a PHC string in its .env form, base64url.
     // Why: the stack .env bars "$", which every PHC has.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn env_form(phc: &str) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(phc)
     }
 
     // What: one line from stdin without its line end.
     // Why: both setup.sh commands read their input so.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn stdin_line() -> Result<String, String> {
         let mut line = String::new();
         std::io::stdin()
@@ -19048,7 +19048,7 @@ mod ui {
 
     // What: .env form of a PHC hash from stdin.
     // Why: setup.sh moves an old hash without openssl.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn encode_password_hash() -> Result<(), String> {
         let phc = stdin_line()?;
         PasswordHash::new(&phc).map_err(|e| format!("no PHC hash on stdin: {e}"))?;
@@ -19717,7 +19717,7 @@ mod ui {
 
     // What: all ui routes plus auth and headers.
     // Why: rows of the one table, by access.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     pub(crate) fn router(app: Arc<App>) -> Result<Router, String> {
         let s = app.settings();
         let mut rows = table(&s)?;
@@ -19907,7 +19907,7 @@ mod ui {
 
     // What: unit tests of the ui helpers.
     // Why: cargo test runs them without a stack.
-    // From: Issue #1683
+    // From: Issue #1683 | PR #2020
     #[cfg(test)]
     mod tests {
         use super::duration_text;
@@ -20824,7 +20824,7 @@ const GROUPS: [(&str, Target); 10] = [
 
 // What: turn a role Result into a process exit code.
 // Why: roles return Result; cachehamster its own code.
-// From: Issue #1683
+// From: Issue #1683 | PR #2020
 fn code(r: Result<(), String>) -> std::process::ExitCode {
     match r {
         Ok(()) => std::process::ExitCode::SUCCESS,
