@@ -11713,7 +11713,7 @@ end
                     (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => self.errs.push(e),
                 }
             }
-            // What: adds one file of a known owner and path.
+            // What: adds a file of known owner and path.
             // Why: nginx files have no SOT key per file.
             // From: Issue #1683 | PR #2020
             fn add_path(&mut self, owner: &str, path: PathBuf, body: String) {
@@ -13674,7 +13674,7 @@ end
             let mut total = 0;
             for row in text.lines() {
                 let cols: Vec<&str> = row.split(';').collect();
-                // What: old dst.file rows or d_store row.
+                // What: dst.file rows or the d_store row.
                 // Why: syslog-ng 4 shows only d_store row.
                 // From: Issue #1683
                 let store = match cols.first() {
