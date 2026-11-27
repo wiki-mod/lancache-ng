@@ -17238,12 +17238,12 @@ mod ui {
         Form(form): Form<Fields>,
     ) -> Page {
         csrf.check(&form)?;
-        // What: back to the page that sent the form.
-        // Why: a form of the dashboard returns there.
-        // From: Issue #1683 | PR #1980
+        // What: back to the sending page; a local path.
+        // Why: browsers read "\\" as "/": "/\\x" is a host.
+        // From: Issue #1683 | PR #2020
         let back = form
             .get("back")
-            .filter(|b| b.starts_with('/') && !b.starts_with("//"))
+            .filter(|b| b.starts_with('/') && !b.starts_with("//") && !b.contains('\\'))
             .cloned()
             .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
         save_settings(&app, form, false).await?;
