@@ -106,12 +106,12 @@
     });
   }
 
-  // What: shows each log time in the browser's local time
+  // What: shows each log time in local time, page language
   // Why: the server sends UTC; operators read local time
   // From: Issue #1683 | PR #1858
   document.querySelectorAll('time[data-iso]').forEach((el) => {
     const d = new Date(el.dataset.iso);
-    if (!isNaN(d)) el.textContent = d.toLocaleString('de-DE');
+    if (!isNaN(d)) el.textContent = window.LancacheUi.when(d);
   });
 
   // What: shows one tab panel, keeps it in the URL hash

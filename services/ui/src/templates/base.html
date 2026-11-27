@@ -696,6 +696,21 @@
     // From: Issue #1683 | PR #1912
     window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
 
+    // What: date and time of a Date in the page language
+    // Why: one formatter for every page, html lang
+    // From: Issue #1683 | PR #2020
+    (function () {
+      const lang = document.documentElement.lang;
+      const day = new Intl.DateTimeFormat(lang, { dateStyle: 'medium' });
+      const clock = new Intl.DateTimeFormat(lang, { timeStyle: 'medium' });
+      window.LancacheUi.when = function (date) {
+        return day.format(date) + ', ' + clock.format(date);
+      };
+      window.LancacheUi.whenParts = function (date) {
+        return [day.format(date), clock.format(date)];
+      };
+    })();
+
     // What: a visible error line at the page bottom.
     // Why: else an error shows only in the console.
     // From: Issue #1683 | PR #1980
@@ -1304,20 +1319,27 @@
     window.LancacheStatus.refresh();
     setInterval(window.LancacheStatus.refresh, window.LancacheUi.ms({{ status_refresh_seconds }}));
 
-    // What: each [data-epoch] value as de-DE date and time
+    // What: each [data-epoch] value as date and time
     // Why: one owner for every page; 0 or junk stays raw
     // From: Issue #1683 | PR #1912
     (function () {
-      const formatter = new Intl.DateTimeFormat('de-DE', {
-        dateStyle: 'medium',
-        timeStyle: 'medium',
-      });
       document.querySelectorAll('[data-epoch]').forEach(function (el) {
         const epoch = Number(el.dataset.epoch);
         if (!Number.isFinite(epoch) || epoch <= 0) {
           return;
         }
-        el.textContent = formatter.format(new Date(window.LancacheUi.ms(epoch)));
+        const date = new Date(window.LancacheUi.ms(epoch));
+        // What: data-split puts the time under the date.
+        // Why: one line makes a table column wide.
+        // From: Issue #871 | PR #1985
+        if (el.hasAttribute('data-split')) {
+          const parts = window.LancacheUi.whenParts(date);
+          el.textContent = parts[0];
+          el.appendChild(document.createElement('br'));
+          el.appendChild(document.createTextNode(parts[1]));
+        } else {
+          el.textContent = window.LancacheUi.when(date);
+        }
         el.title = 'Unix: ' + el.dataset.epoch;
       });
     })();

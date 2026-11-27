@@ -61,10 +61,10 @@
       <tr><th>{{ t.date_and_time }}</th><th>Name</th><th>{{ t.what }}</th><th>{{ t.when }}</th><th>{{ t.state }}</th><th>{{ t.progress }}</th><th></th></tr>
       {% for j in hamster.jobs | reverse %}{% if panel == "history" or loop.index <= 3 %}
       <tr{% if j.state.state == "running" or (j.state.state == "waiting" and j.when.kind == "now") %} data-busy="1"{% endif %}>
-        <td style="white-space:nowrap;">{% if j.history | length > 0 %}{% set ev = j.history | first %}<span data-unix="{{ ev.at }}"></span>{% endif %}</td>
+        <td style="white-space:nowrap;">{% if j.history | length > 0 %}{% set ev = j.history | first %}<span data-split data-epoch="{{ ev.at }}"></span>{% endif %}</td>
         <td>{{ j.name }}</td>
         <td style="white-space:nowrap;">{% if j.target.kind == "steam_app" %}{{ t.steam_app }} {{ j.target.value }}{% else %}{{ j.target.value | length }} {{ t.addresses }}{% endif %}</td>
-        <td>{% if j.when.kind == "at" %}<span data-unix="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
+        <td>{% if j.when.kind == "at" %}<span data-split data-epoch="{{ j.when.at }}"></span>{% elif j.when.kind == "later" %}{{ t.by_hand_press_start }}{% else %}{{ t.now }}{% endif %}</td>
         {% set sk = "hamster_st_" ~ j.state.state %}<td>{{ t[sk] }}{% if j.state.reason %}<br><span style="font-size:12px; color:var(--mist);">{{ j.state.reason }}</span>{% endif %}{% if j.skipped %}<br><span style="font-size:12px; color:var(--mist);" title="{{ j.skipped | join(sep="; ") }}">{{ t.hamster_skipped }}: {{ j.skipped | length }}</span>{% endif %}</td>
         <td style="font-variant-numeric:tabular-nums;">{{ j.done }} {{ t.of }} {{ j.total }} {{ t.done }} {{ j.failed }} {{ t.failed }} {{ j.bytes | filesizeformat }}{% if j.size %} {{ t.of }} {{ j.size | filesizeformat }}{% endif %}</td>
         <td>
@@ -171,15 +171,6 @@
     const saved = sessionStorage.getItem('ch-tab');
     if (saved && document.querySelector('[data-ch-tab="' + saved + '"]')) { pickTab(saved); }
   } catch (err) { reportError(err); }
-  // What: date on the first line, time on the second.
-  // Why: one line makes the column wide.
-  // From: Issue #871 | PR #1985
-  document.querySelectorAll('[data-unix]').forEach(function (el) {
-    const d = new Date(Number(el.dataset.unix) * 1000);
-    el.textContent = d.toLocaleDateString(undefined, { dateStyle: 'medium' });
-    el.appendChild(document.createElement('br'));
-    el.appendChild(document.createTextNode(d.toLocaleTimeString(undefined, { timeStyle: 'medium' })));
-  });
   // What: the time field opens its calendar on click.
   // Why: a click on the field alone opens nothing.
   // From: Issue #1683 | PR #1980
