@@ -8135,6 +8135,11 @@ mod shared {
             }
         }
 
+        // What: bytes of a DNS message header.
+        // Why: RFC 1035 4.1.1; replies shorter are cut.
+        // From: Issue #1683 | PR #2020
+        const HEADER_LEN: usize = 12;
+
         // What: record type number of A.
         // Why: RFC 1035 code; parser and table share it.
         // From: Issue #1683 | PR #2020
@@ -8327,10 +8332,16 @@ mod shared {
                     .map(|b| u16::from_be_bytes([b[0], b[1]]))
                     .ok_or_else(cut)
             };
+            // What: a reply shorter than the header is cut.
+            // Why: the flag bytes are read before counts.
+            // From: Issue #1683 | PR #2020
+            if msg.len() < HEADER_LEN {
+                return Err(cut());
+            }
             if word(0)? != id || msg[2] & 0x80 == 0 {
                 return Err("DNS reply does not match the query".into());
             }
-            let mut at = 12;
+            let mut at = HEADER_LEN;
             for _ in 0..word(4)? {
                 at = name_end(msg, at)? + 4;
             }
