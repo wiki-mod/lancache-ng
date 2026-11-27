@@ -6613,7 +6613,7 @@ mod shared {
     // Why: ui writes records; no message bus between.
     // From: Issue #1683 | PR #1980
     pub mod pdns {
-        use reqwest::Method;
+        use reqwest::{Method, StatusCode};
         use serde_json::{Value, json};
         use std::collections::BTreeSet;
 
@@ -6675,6 +6675,17 @@ mod shared {
             format!("{}/{tail}", zone_path(zone))
         }
 
+        // What: the body of a 2xx answer; else an error.
+        // Why: PowerDNS explains refusals in the body.
+        // From: Issue #1683 | PR #1980
+        fn checked((url, status, text): (String, StatusCode, String)) -> Result<String, String> {
+            if status.is_success() {
+                Ok(text)
+            } else {
+                Err(format!("{url}: HTTP {status}: {text}"))
+            }
+        }
+
         impl Api {
             // What: a client for one server base URL.
             // Why: auth and recursor share this code.
@@ -6687,15 +6698,15 @@ mod shared {
                 }
             }
 
-            // What: one request; non-2xx is an error.
-            // Why: PowerDNS explains refusals in the body.
-            // From: Issue #1683 | PR #1980
-            async fn call(
+            // What: one request; status and body text.
+            // Why: a caller may read the status, not text.
+            // From: Issue #1683 | PR #2020
+            async fn request(
                 &self,
                 method: Method,
                 path: &str,
                 body: Option<Value>,
-            ) -> Result<String, String> {
+            ) -> Result<(String, StatusCode, String), String> {
                 let url = format!("{}{path}", self.base);
                 let mut req = self
                     .client
@@ -6710,11 +6721,19 @@ mod shared {
                     .map_err(|e| format!("{url}: {}", super::http::error_chain(&e)))?;
                 let status = resp.status();
                 let text = resp.text().await.map_err(|e| format!("{url}: {e}"))?;
-                if status.is_success() {
-                    Ok(text)
-                } else {
-                    Err(format!("{url}: HTTP {status}: {text}"))
-                }
+                Ok((url, status, text))
+            }
+
+            // What: one request; non-2xx is an error.
+            // Why: most callers need only the body text.
+            // From: Issue #1683 | PR #1980
+            async fn call(
+                &self,
+                method: Method,
+                path: &str,
+                body: Option<Value>,
+            ) -> Result<String, String> {
+                checked(self.request(method, path, body).await?)
             }
 
             // What: a request whose answer text is dropped.
@@ -6863,16 +6882,16 @@ mod shared {
             // From: Issue #1683 | PR #2020
             pub async fn tsigkey(&self, name: &str) -> Result<Option<Value>, String> {
                 let path = format!("/tsigkeys/{}", zone_id(name));
-                match self.call(Method::GET, &path, None).await {
-                    Ok(text) => serde_json::from_str(&text)
-                        .map(Some)
-                        .map_err(|e| e.to_string()),
-                    // What: 404 means the key is not there.
-                    // Why: call names the status in text.
-                    // From: Issue #1683 | PR #2020
-                    Err(e) if e.contains("HTTP 404") => Ok(None),
-                    Err(e) => Err(e),
+                let answer = self.request(Method::GET, &path, None).await?;
+                // What: 404 means the key is not there.
+                // Why: the status says so; no text match.
+                // From: Issue #1683 | PR #2020
+                if answer.1 == StatusCode::NOT_FOUND {
+                    return Ok(None);
                 }
+                serde_json::from_str(&checked(answer)?)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
             }
 
             // What: create or replace one TSIG key.
