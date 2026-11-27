@@ -2746,6 +2746,18 @@ mod config {
         current: &Settings,
         updates: &BTreeMap<String, String>,
     ) -> Result<(), String> {
+        check_updates(path, current, updates)?;
+        write_lines(path, updates)
+    }
+
+    // What: the store checks without a write.
+    // Why: store and the trial run share them.
+    // From: Issue #1683 | PR #2020
+    fn check_updates(
+        path: &Path,
+        current: &Settings,
+        updates: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
         let over = override_path(path);
         let overridden = read_raw(&over)?;
         for (key, raw) in updates {
@@ -2772,7 +2784,38 @@ mod config {
                 current.validate(key, raw)?;
             }
         }
-        write_lines(path, updates)
+        Ok(())
+    }
+
+    // What: settings as they would be after a store.
+    // Why: a dry run loads a copy; the file stays.
+    // From: Issue #1683 | PR #2020
+    pub fn trial(
+        path: &Path,
+        current: &Settings,
+        updates: &BTreeMap<String, String>,
+    ) -> Result<Settings, String> {
+        check_updates(path, current, updates)?;
+        let copy = crate::shared::fs::with_suffix(path, ".trial");
+        let files = [
+            (path.to_path_buf(), copy.clone()),
+            (override_path(path), override_path(&copy)),
+        ];
+        let made = files.iter().try_for_each(|(from, to)| {
+            let body = crate::shared::fs::read_if_present(from)
+                .map_err(|e| format!("{}: {e}", from.display()))?
+                .unwrap_or_default();
+            std::fs::write(to, body).map_err(|e| format!("{}: {e}", to.display()))
+        });
+        let new = made
+            .and_then(|()| write_lines(&copy, updates))
+            .and_then(|()| Settings::load(&process_env, Some(&copy)));
+        for f in [copy.clone(), override_path(&copy), lock_path(&copy)] {
+            if let Err(e) = crate::shared::fs::remove_if_present(&f) {
+                eprintln!("config: {} left behind: {e}", f.display());
+            }
+        }
+        new
     }
 
     // What: puts raw lines back as read_raw gave them.
@@ -3231,7 +3274,7 @@ mod config {
             // What: KEY=VALUE pairs go to the running ui.
             // Why: it saves, renders and applies at once.
             // From: Issue #1683 | PR #2020
-            [cmd, pairs @ ..] if cmd == "set" && !pairs.is_empty() => {
+            [cmd, pairs @ ..] if (cmd == "set" || cmd == "validate") && !pairs.is_empty() => {
                 let mut body = serde_json::Map::new();
                 for pair in pairs {
                     let (k, v) = pair
@@ -3239,14 +3282,20 @@ mod config {
                         .ok_or_else(|| format!("{pair}: needs KEY=VALUE"))?;
                     body.insert(k.to_string(), v.into());
                 }
-                let route = s.text("UI_ROUTE_SETTINGS")?;
+                // What: validate posts as a dry run.
+                // Why: one save path checks both.
+                // From: Issue #1683 | PR #2020
+                let mut route = s.text("UI_ROUTE_SETTINGS")?;
+                if cmd == "validate" {
+                    route.push_str("?dry_run=1");
+                }
                 let body = crate::shared::http::Body::Json(body.into());
                 let v = crate::shared::http::ui_socket(&s, &route, body).await?;
                 println!("{v}");
             }
             _ => {
                 return Err(
-                    "usage: config show [KEY] | config schema [KEY] | config set KEY=VALUE ..."
+                    "usage: config show [KEY] | config schema [KEY] | config set|validate KEY=VALUE ..."
                         .into(),
                 );
             }
@@ -14409,14 +14458,18 @@ mod ui {
             .filter(|b| b.starts_with('/') && !b.starts_with("//"))
             .cloned()
             .map_or_else(|| app.settings().text("UI_PAGE_SETUP"), Ok)?;
-        save_settings(&app, form).await?;
+        save_settings(&app, form, false).await?;
         Ok(Redirect::to(&back).into_response())
     }
 
     // What: check, derive and save a settings change.
     // Why: page form and REST save the same way.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn save_settings(app: &App, form: Fields) -> Result<(), Fail> {
+    pub(crate) async fn save_settings(
+        app: &App,
+        form: Fields,
+        dry: bool,
+    ) -> Result<Vec<String>, Fail> {
         // What: the hash only through the password form.
         // Why: it checks the old password and length.
         // From: Issue #1683 | PR #2020
@@ -14456,9 +14509,30 @@ mod ui {
         let before = hosted_now(&app.settings())
             .inspect_err(|e| eprintln!("ui: zones before the save unknown: {e}"))
             .unwrap_or_default();
+        // What: a dry run checks the change, saves none.
+        // Why: the same checks; nothing is applied.
+        // From: Issue #1683 | PR #2020
+        if dry {
+            return check_change(app, form).map_err(bad_request);
+        }
         commit(app, form).await.map_err(bad_request)?;
         drop_old_zones(&app.settings(), &before).await;
-        Ok(())
+        Ok(Vec::new())
+    }
+
+    // What: keys a change would set, if it renders.
+    // Why: config validate and ?dry_run=1 save nothing.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn check_change(app: &App, form: Fields) -> Result<Vec<String>, String> {
+        let Some(path) = app.saved.clone() else {
+            return Err(format!("{} is not set", config::SETTINGS_FILE_ENV));
+        };
+        let old = app.settings();
+        let updates = changes(&old, form);
+        if !updates.is_empty() {
+            render_check(&config::trial(&path, &old, &updates)?)?;
+        }
+        Ok(updates.into_keys().collect())
     }
 
     // What: logs page.
@@ -17178,11 +17252,19 @@ mod ui {
     pub(crate) async fn settings_set(
         State(app): Shared,
         Extension(csrf): Extension<Csrf>,
+        axum::extract::Query(query): axum::extract::Query<Fields>,
         headers: HeaderMap,
         axum::Json(values): axum::Json<Fields>,
     ) -> Page {
         csrf.check_header(&headers)?;
-        save_settings(&app, values).await?;
+        // What: ?dry_run=1 checks and names the keys.
+        // Why: config validate saves nothing.
+        // From: Issue #1683 | PR #2020
+        if field(&query, "dry_run") == "1" {
+            let keys = save_settings(&app, values, true).await?;
+            return Ok(axum::Json(json!({"valid": true, "changes": keys})).into_response());
+        }
+        save_settings(&app, values, false).await?;
         Ok(axum::Json(app.settings().view_json()).into_response())
     }
 
