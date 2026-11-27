@@ -9647,7 +9647,7 @@ mod shared {
         // What: self-signed CA key and certificate.
         // Why: HTTPS mode signs leaves with this CA.
         // From: Issue #1683 | PR #1980
-        pub fn make_ca(
+        pub fn create_ca(
             key: &Path,
             crt: &Path,
             subject: &str,
@@ -9677,7 +9677,7 @@ mod shared {
         }
 
         // What: the files of the CA that signs leaves.
-        // Why: make_leaf takes them as one value.
+        // Why: create_leaf takes them as one value.
         // From: Issue #1683 | PR #2020
         pub struct Ca<'a> {
             pub key: &'a Path,
@@ -9688,7 +9688,7 @@ mod shared {
         // What: leaf key and certificate signed by the CA.
         // Why: one leaf per CDN name set in HTTPS mode.
         // From: Issue #1683 | PR #1980
-        pub fn make_leaf(
+        pub fn create_leaf(
             ca: &Ca,
             key: &Path,
             crt: &Path,
@@ -12503,7 +12503,7 @@ end
             }
 
             // What: certs to issue: file name and SANs.
-            // Why: cert::make_leaf issues exactly these.
+            // Why: cert::create_leaf issues exactly these.
             // From: Issue #1683 | PR #1980
             pub fn certs(&self) -> Vec<(String, Vec<String>)> {
                 let mut out = Vec::new();
@@ -13341,7 +13341,7 @@ end
             };
             grant(&dir, gid, s.mode("CERT_DIR_MODE")?)?;
             if !(ca_crt.exists() && ca_key.exists()) {
-                crate::shared::cert::make_ca(
+                crate::shared::cert::create_ca(
                     &ca_key,
                     &ca_crt,
                     &s.text("CA_SUBJECT")?,
@@ -13365,7 +13365,7 @@ end
                         crt: &ca_crt,
                         serial: &serial,
                     };
-                    crate::shared::cert::make_leaf(
+                    crate::shared::cert::create_leaf(
                         &ca,
                         &key,
                         &crt,
