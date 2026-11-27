@@ -14709,8 +14709,11 @@ mod stack {
             }
             report.push(format!("{owner}: {result:?}"));
         }
-        for name in wait_healthy(app, new, &restarted, limit).await? {
-            report.push(format!("{name}: not healthy in time"));
+        for (name, cause) in wait_healthy(app, new, &restarted, limit).await? {
+            match cause {
+                Some(e) => report.push(format!("{name}: not healthy in time, inspect: {e}")),
+                None => report.push(format!("{name}: not healthy in time")),
+            }
         }
 
         // What: after a dns restart wait for the pdns API.
@@ -14777,15 +14780,17 @@ mod stack {
         s: &Settings,
         names: &[String],
         limit: Duration,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<(String, Option<String>)>, String> {
         let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
         let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
         let end = Instant::now() + wait;
         let mut late = Vec::new();
         for name in names {
             loop {
-                let state = app.docker.inspect(name, limit).await.ok();
-                let health = state.as_ref().map(docker::Health::from_inspect);
+                let (health, cause) = match app.docker.inspect(name, limit).await {
+                    Ok(state) => (Some(docker::Health::from_inspect(&state)), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
                 if matches!(
                     health,
                     Some(docker::Health::Healthy | docker::Health::Degraded)
@@ -14793,7 +14798,7 @@ mod stack {
                     break;
                 }
                 if Instant::now() >= end {
-                    late.push(name.clone());
+                    late.push((name.clone(), cause));
                     break;
                 }
                 tokio::time::sleep(poll).await;
