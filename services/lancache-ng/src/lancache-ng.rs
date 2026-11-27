@@ -3850,13 +3850,18 @@ mod dns {
     // From: Issue #1683
     async fn own_zones(s: &Settings) -> Result<BTreeMap<String, u32>, String> {
         let api = peer::own_api(s)?;
-        Ok(api
-            .zones()
-            .await?
-            .into_iter()
-            .filter(|z| z.kind == "Slave")
-            .map(|z| (z.name, z.serial))
-            .collect())
+        Ok(serial_map(
+            api.zones().await?.into_iter().filter(|z| z.kind == "Slave"),
+        ))
+    }
+
+    // What: serial of each zone in a zone list, by name.
+    // Why: the follow and flush rounds compare by name.
+    // From: Issue #1683 | PR #2020
+    fn serial_map(
+        zones: impl IntoIterator<Item = crate::shared::pdns::Zone>,
+    ) -> BTreeMap<String, u32> {
+        zones.into_iter().map(|z| (z.name, z.serial)).collect()
     }
 
     // What: dns configs for these zones; true if changed.
@@ -5181,12 +5186,7 @@ mod dns {
     pub(crate) async fn flush_round(s: &Settings, seen: &mut peer::Flushed) -> Result<(), String> {
         let api = peer::own_api(s)?;
         let peers = !crate::shared::pdns_conf::secondaries(s).is_empty();
-        let zones: BTreeMap<String, u32> = api
-            .zones()
-            .await?
-            .into_iter()
-            .map(|z| (z.name, z.serial))
-            .collect();
+        let zones = serial_map(api.zones().await?);
         for (zone, serial) in seen.due(&zones) {
             peer::flush_zone(s, &zone).await?;
             // What: NOTIFY to the secondaries right away.
