@@ -3064,7 +3064,7 @@ mod config {
     // What: a plain decimal number, digits only.
     // Why: "+5" or " 5" in a setting is a typo.
     // From: Issue #1683 | PR #1980
-    fn parse_uint(raw: &str) -> Option<u64> {
+    pub fn parse_uint(raw: &str) -> Option<u64> {
         if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
@@ -4239,13 +4239,17 @@ mod dhcp {
         pub ntp_servers: String,
         pub pool_start: String,
         pub pool_end: String,
-        pub lease_time: Option<u64>,
+        pub lease_time: String,
+        // What: valid and max lease time, once read.
+        // Why: read_subnet fills it from lease_time.
+        // From: Issue #1683 | PR #2020
+        pub lease: Option<(u64, u64)>,
     }
 
     // What: a subnet form read into its one written form.
     // Why: a bad address fails with its field, before Kea.
     // From: Issue #1683 | PR #2020
-    fn read_subnet(input: &SubnetInput) -> Result<SubnetInput, Fault> {
+    fn read_subnet(s: &Settings, input: &SubnetInput) -> Result<SubnetInput, Fault> {
         use crate::shared::dns::{canonical_ip, canonical_net, net_holds};
         let field = |name: &str, r: Result<String, String>| {
             r.map_err(|e| Fault::Plain(format!("{name}: {e}")))
@@ -4267,6 +4271,18 @@ mod dhcp {
             pool.push(ip);
         }
         let dns = input.dns.iter().map(|d| field("dns", canonical_ip(d)));
+        // What: empty lease time keeps Kea's default.
+        // Why: a set one obeys the SOT lease bounds.
+        // From: Issue #1683 | PR #2020
+        let lease = match input.lease_time.trim() {
+            "" => None,
+            raw => {
+                let n = config::parse_uint(raw)
+                    .ok_or_else(|| Fault::Plain(format!("lease_time: {raw:?} is no number")))?;
+                let limits = crate::shared::dhcp::lease_limits(s, n);
+                Some(limits.map_err(|e| Fault::Plain(format!("lease_time: {e}")))?)
+            }
+        };
         Ok(SubnetInput {
             subnet,
             gateway,
@@ -4275,7 +4291,8 @@ mod dhcp {
             ntp_servers: input.ntp_servers.clone(),
             pool_end: pool.pop().unwrap_or_default(),
             pool_start: pool.pop().unwrap_or_default(),
-            lease_time: input.lease_time,
+            lease_time: input.lease_time.clone(),
+            lease,
         })
     }
 
@@ -4354,8 +4371,11 @@ mod dhcp {
         if !input.domain.is_empty() {
             f.extend(main_domain_fields(s, &input.domain)?);
         }
-        if let Some(life) = input.lease_time {
-            f.insert("DHCP_LEASE_TIME".into(), life.to_string());
+        if !input.lease_time.trim().is_empty() {
+            f.insert(
+                "DHCP_LEASE_TIME".into(),
+                input.lease_time.trim().to_string(),
+            );
         }
         f.insert("DHCP_DNS_SERVERS".into(), config::join_items(&input.dns));
         Ok(f)
@@ -4540,8 +4560,9 @@ mod dhcp {
         let pool = kea_conf::pool_text(&input.pool_start, &input.pool_end);
         let mut sn = json!({"id": id, "subnet": input.subnet, "pools": [{"pool": pool}],
                         "option-data": opts});
-        if let Some(life) = input.lease_time {
-            sn["valid-lifetime"] = life.into();
+        if let Some((valid, max)) = input.lease {
+            sn["valid-lifetime"] = valid.into();
+            sn["max-valid-lifetime"] = max.into();
         }
         if let Some(hosts) = old.and_then(|o| o.get("reservations")) {
             sn["reservations"] = hosts.clone();
@@ -4571,7 +4592,7 @@ mod dhcp {
         }
         match edit {
             KeaEdit::SubnetAdd(input) => {
-                let input = &read_subnet(input)?;
+                let input = &read_subnet(s, input)?;
                 kea_edit(s, |l| {
                     let next = l.iter().filter_map(|x| x["id"].as_u64()).max().unwrap_or(0) + 1;
                     let mut sn = subnet_from(input, next, None);
@@ -4582,7 +4603,7 @@ mod dhcp {
                 .await
             }
             KeaEdit::SubnetUpdate(id, input) => {
-                let input = &read_subnet(input)?;
+                let input = &read_subnet(s, input)?;
                 kea_edit(s, |l| {
                     let sn = subnet_mut(l, *id)?;
                     *sn = subnet_from(input, *id, Some(&sn.clone()));
@@ -4628,7 +4649,11 @@ mod dhcp {
                     let sn = subnet_mut(l, *subnet)?;
                     let mut hosts = sn["reservations"].as_array().cloned().unwrap_or_default();
                     let same = |r: &Value| {
-                        r["hw-address"].as_str().map(str::to_ascii_lowercase) == Some(mac.clone())
+                        r["hw-address"]
+                            .as_str()
+                            .and_then(|m| canonical_mac(m).ok())
+                            .as_ref()
+                            == Some(&mac)
                     };
                     hosts.retain(|r| !same(r));
                     if *add {
@@ -18644,7 +18669,8 @@ mod ui {
             ntp_servers: get("ntp_servers"),
             pool_start: get("pool_start"),
             pool_end: get("pool_end"),
-            lease_time: get("lease_time").parse().ok(),
+            lease_time: get("lease_time"),
+            lease: None,
         }
     }
 
