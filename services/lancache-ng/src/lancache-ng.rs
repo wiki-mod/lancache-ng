@@ -14157,31 +14157,37 @@ end
         use std::path::{Path, PathBuf};
 
         // What: warnings of the render in progress.
-        // Why: a dead name leaves an option out.
+        // Why: one render runs on one thread.
         // From: Issue #1683 | PR #2020
-        static NOTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        thread_local! {
+            static NOTES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
 
         // What: remember and log one warning of the render.
         // Why: plan and the ui log show what was left out.
         // From: Issue #1683 | PR #2020
         pub fn note(text: String) {
             eprintln!("render: warning: {text}");
-            let mut list = NOTES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !list.contains(&text) {
-                list.push(text);
-            }
+            NOTES.with_borrow_mut(|list| {
+                if !list.contains(&text) {
+                    list.push(text);
+                }
+            });
         }
 
-        // What: the warnings since the last take.
-        // Why: each render starts with an empty list.
+        // What: the warnings of this thread, taken.
+        // Why: a render starts empty and returns its own.
         // From: Issue #1683 | PR #2020
-        pub fn take_notes() -> Vec<String> {
-            let mut list = NOTES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::take(&mut *list)
+        fn take_notes() -> Vec<String> {
+            NOTES.with_borrow_mut(std::mem::take)
+        }
+
+        // What: the files of one render and its warnings.
+        // Why: the warnings travel with the result.
+        // From: Issue #1683 | PR #2020
+        pub struct Rendered {
+            pub files: Vec<File>,
+            pub notes: Vec<String>,
         }
 
         // What: secrets the config files embed.
@@ -14795,7 +14801,7 @@ end
         // What: render all files; report every error.
         // Why: one call for the ui; nothing half written.
         // From: Issue #1683 | PR #1980
-        pub fn all(s: &Settings, sec: &Secrets, chain: &Chain) -> Result<Vec<File>, Vec<String>> {
+        pub fn all(s: &Settings, sec: &Secrets, chain: &Chain) -> Result<Rendered, Vec<String>> {
             take_notes();
             let mut o = Out::new(s);
             let domains = match crate::shared::cdn::effective(s) {
@@ -14820,7 +14826,10 @@ end
             {
                 o.errs.push(e);
             }
-            o.finish()
+            o.finish().map(|files| Rendered {
+                files,
+                notes: take_notes(),
+            })
         }
 
         // What: dns files and snmpd.conf, for a secondary.
@@ -16902,7 +16911,7 @@ mod stack {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn render_now(
         s: &Settings,
-    ) -> Result<Result<Vec<render::File>, Vec<String>>, String> {
+    ) -> Result<Result<render::Rendered, Vec<String>>, String> {
         let sec = render::secrets(s)?;
         let chain = dnssec_chain(s).await;
         Ok(render::all(s, &sec, &chain))
@@ -17140,11 +17149,10 @@ mod stack {
     // Why: page, REST and CLI show one dry run.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn render_plan(s: &Settings) -> Result<Value, String> {
-        let files = match render_now(s).await? {
-            Ok(f) => f,
+        let (files, warnings) = match render_now(s).await? {
+            Ok(done) => (done.files, done.notes),
             Err(errors) => return Ok(json!({"errors": errors})),
         };
-        let warnings = render::take_notes();
         let rows = render::file_states(&files)?;
         let mut changes = Vec::new();
         let mut list = Vec::new();
@@ -17214,10 +17222,10 @@ mod stack {
     // From: Issue #1683 | PR #2019
     pub(crate) async fn render_and_write(
         s: &Settings,
-    ) -> Result<(Vec<render::File>, Vec<config::Change>), String> {
-        let files = render_now(s).await?.map_err(|e| e.join("; "))?;
-        let written = render::write_files(s, &files)?;
-        Ok((files, written))
+    ) -> Result<(Vec<render::File>, Vec<String>, Vec<config::Change>), String> {
+        let done = render_now(s).await?.map_err(|e| e.join("; "))?;
+        let written = render::write_files(s, &done.files)?;
+        Ok((done.files, done.notes, written))
     }
 
     // What: render, write and wake the owners.
@@ -17229,11 +17237,11 @@ mod stack {
         new: &Settings,
         zones: bool,
     ) -> Result<Vec<Fault>, String> {
-        let (files, written) = render_and_write(new).await?;
+        let (files, notes, written) = render_and_write(new).await?;
         // What: what the render left out, in the report.
         // Why: a dropped address must show, not only log.
         // From: Issue #1683 | PR #2020
-        let mut report: Vec<Fault> = render::take_notes()
+        let mut report: Vec<Fault> = notes
             .into_iter()
             .map(|w| format!("render: {w}").into())
             .collect();
@@ -17277,7 +17285,7 @@ mod stack {
         // From: Issue #1683 | PR #2019
         if zones {
             match render_and_write(new).await {
-                Ok((_, again)) => changes.extend(again),
+                Ok((_, _, again)) => changes.extend(again),
                 Err(e) => report.push(e.into()),
             }
         }
@@ -19603,7 +19611,7 @@ mod ui {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn render_preview(s: &Settings, pick: Option<&str>) -> Result<Value, String> {
         let files = match render_now(s).await? {
-            Ok(f) => f,
+            Ok(done) => done.files,
             Err(errors) => return Ok(json!({"errors": errors})),
         };
         let hide = crate::shared::secret::all_values(s)?;
