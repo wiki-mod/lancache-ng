@@ -63,8 +63,8 @@ Provided by `services/ui/nginx/*` templates and the generator `nginx_conf` in
   (`$lancache_client_allowed`, and `allow` / `deny all` in the stream block).
 - **Certificates.** `cert::create_ca` creates the CA (`CA_KEY_TYPE`, `CA_DAYS`,
   `CA_KEY_MODE`); `cert::create_leaf` signs one leaf per host;
-  `render::issue_certs` issues the planned set; `cert::valid_for` and
-  `cert::expiry` report remaining validity.
+  `render::issue_certs` issues the planned set; `cert::expiry` reads the
+  end once and `cert::state` reports the days left and whether to renew.
 - **Endpoints.** `PROXY_HEALTH_PATH` serves the health file and
   `PROXY_STATUS_PATH` serves `stub_status`, both only to loopback and the Docker
   network; a request with an IP literal as host is redirected to the Admin UI.
