@@ -16293,6 +16293,11 @@ end
             (freed, errs)
         }
 
+        // What: file name ending of a packed log.
+        // Why: closed and pack read one name of the xz.
+        // From: Issue #1683 | PR #2020
+        const PACKED_EXT: &str = "xz";
+
         // What: files closed before today, not yet xz.
         // Why: past days are never written again.
         // From: Issue #1683 | PR #2020
@@ -16301,7 +16306,7 @@ end
             let (all, errs) = files(dir);
             let pick = all
                 .into_iter()
-                .filter(|f| f.mtime < today && f.path.extension().is_none_or(|e| e != "xz"))
+                .filter(|f| f.mtime < today && f.path.extension().is_none_or(|e| e != PACKED_EXT))
                 .collect();
             (pick, errs)
         }
@@ -16315,7 +16320,7 @@ end
                 // What: late lines join existing .xz file.
                 // Why: a second stream; xz reads one file.
                 // From: Issue #1683 | PR #1985
-                let packed = super::fs::with_suffix(&f.path, ".xz");
+                let packed = super::fs::with_suffix(&f.path, &format!(".{PACKED_EXT}"));
                 if let Err(e) = pack_one(&f.path, &packed, preset) {
                     errs.push(e);
                 }
