@@ -192,10 +192,17 @@ Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/
   without a command, or a failed reload, is restarted.
 - **Container actions.** `/api/container/{service}` sets a desired state,
   `/api/restart-ui` restarts the UI,
-  `/api/service/{container}/{program}/{action}` (`service_action`) restarts or
-  reloads one program through `rc-service` in its container; only programs
-  listed in `UI_SERVICES` and only a running program; `docker::Api` also reads container state
-  and statistics.
+  `/api/service/{container}/{program}/{action}` restarts or reloads one
+  program: the ui passes it to the watchdog REST socket `WATCHDOG_SOCKET`
+  (`watchdog::api_program`), which runs `rc-service` in that container, only
+  for a service OpenRC lists there (`rc-update show`, from the SOT
+  `processes`) and only while it runs; `/api/watchdog/programs` lists them;
+  `docker::Api` also reads container state and statistics.
+- **Watchdog REST.** The watchdog serves check, processed, programs, tidy
+  steps and program actions on `WATCHDOG_SOCKET` (volume `watchdog-api`,
+  services and ui only); `lancache-ng watchdog ...` and `lancache-ng system
+  service|programs` call it there, so they run only in the watchdog, also
+  without a running ui.
 - **Access control.** HTTP Basic with an Argon2id hash when `UI_AUTH_PASSWORD_HASH`
   is set (`login_ok`), CSRF tokens bound to the session (`Csrf`), password
   change on `/setup/password` (`UI_PASSWORD_MIN_LENGTH`).

@@ -1091,9 +1091,19 @@
     // From: Issue #1683 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
     // What: programs per container (container:program)
-    // Why: reload/restart one program via OpenRC
-    // From: Issue #1683 | PR #1980
-    const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    // Why: the watchdog lists what OpenRC runs there
+    // From: Issue #1683 | PR #2020
+    let DOCK_PROGRAMS = [];
+    fetch('{{ routes.watchdog_programs | safe }}')
+      .then(function (r) {
+        if (!r.ok) { throw new Error('programs: HTTP ' + r.status); }
+        return r.json();
+      })
+      .then(function (v) {
+        DOCK_PROGRAMS = v.programs || [];
+        window.LancacheStatus.refresh();
+      })
+      .catch(function (err) { reportError(err); });
     // What: the ui container: restart only, no stop.
     // Why: its menu offers restart like the proxy menu.
     // From: Issue #1683 | PR #1985

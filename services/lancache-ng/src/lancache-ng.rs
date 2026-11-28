@@ -4069,7 +4069,8 @@ mod config {
                     route.push_str("?dry_run=1");
                 }
                 let body = crate::shared::http::Body::Json(body.into());
-                let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+                let v = crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &route, body)
+                    .await?;
                 println!("{v}");
             }
             _ => return Err(crate::shared::cli::help(&COMMANDS)),
@@ -4490,7 +4491,7 @@ mod dhcp {
             Op::Probe => {
                 let route = s.text("UI_ROUTE_DHCP_CHECK")?;
                 let body = http::Body::Form(vec![]);
-                http::ui_socket(&s, &route, body).await?
+                http::call(&s, http::Peer::Ui, &route, body).await?
             }
             // What: a DHCP page action via the ui socket.
             // Why: the ui checks, saves and applies it.
@@ -4970,7 +4971,13 @@ mod dns {
                     Some("ensure") => {
                         let route = s.text("UI_ROUTE_DNS_ZONES_ENSURE")?;
                         let body = crate::shared::http::Body::Form(vec![]);
-                        let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+                        let v = crate::shared::http::call(
+                            &s,
+                            crate::shared::http::Peer::Ui,
+                            &route,
+                            body,
+                        )
+                        .await?;
                         println!("{v}");
                     }
                     Some(_) => return Err(cli::usage(&COMMANDS, |o| *o == Op::Zones)),
@@ -5099,7 +5106,7 @@ mod dns {
             _ => return Err(usage),
         };
         let route = crate::shared::fill(route.to_string(), &[("name", name.to_string())]);
-        let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+        let v = crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &route, body).await?;
         println!("{}", json!({"done": route, "answer": v}));
         Ok(())
     }
@@ -7883,24 +7890,51 @@ mod shared {
             None,
         }
 
-        // What: POST to the ui over its CLI socket.
-        // Why: CLI writes run in the ui, one state owner.
+        // What: a process that serves REST on a socket.
+        // Why: CLI and ui reach ui and watchdog one way.
         // From: Issue #1683 | PR #2020
-        pub async fn ui_socket(
+        #[derive(Clone, Copy)]
+        pub enum Peer {
+            Ui,
+            Watchdog,
+        }
+
+        impl Peer {
+            // What: socket key, timeout key and name.
+            // Why: the SOT holds where each one listens.
+            // From: Issue #1683 | PR #2020
+            fn keys(self) -> (&'static str, &'static str, &'static str) {
+                match self {
+                    Peer::Ui => ("UI_CLI_SOCKET", "UI_CLI_WRITE_TIMEOUT_SECONDS", "ui"),
+                    Peer::Watchdog => (
+                        "WATCHDOG_SOCKET",
+                        "WATCHDOG_API_TIMEOUT_SECONDS",
+                        "watchdog",
+                    ),
+                }
+            }
+        }
+
+        // What: one REST call to a peer: status, text.
+        // Why: the ui passes watchdog answers on as sent.
+        // From: Issue #1683 | PR #2020
+        pub async fn send(
             s: &Settings,
+            peer: Peer,
             route: &str,
             body: Body,
-        ) -> Result<serde_json::Value, String> {
-            let path = s.text("UI_CLI_SOCKET")?;
+        ) -> Result<(reqwest::StatusCode, String), String> {
+            let (key, wait, name) = peer.keys();
+            let path = s.text(key)?;
             // What: a redirect is read, never followed.
             // Why: a page form answers 303 when it is done.
             // From: Issue #1683 | PR #2020
             let client = Build::new()
                 .socket(&path)
                 .no_redirect()
-                .timeout(Duration::from_secs(s.uint("UI_CLI_WRITE_TIMEOUT_SECONDS")?))
+                .timeout(Duration::from_secs(s.uint(wait)?))
                 .build(&path)?;
-            let url = format!("http://ui{route}");
+            let url = format!("http://{name}{route}");
             let req = match &body {
                 Body::Json(v) => client.post(url).json(v),
                 Body::Form(f) => client.post(url).form(f),
@@ -7913,11 +7947,33 @@ mod shared {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| format!("{path}: is the ui running? {}", error_chain(&e)))?;
+                .map_err(|e| format!("{path}: is the {name} running? {}", error_chain(&e)))?;
             let status = resp.status();
             let text = read_text(resp, max_body(s)?, &path).await?;
+            Ok((status, text))
+        }
+
+        // What: REST call to a peer; JSON or the error.
+        // Why: CLI writes run in the owner process.
+        // From: Issue #1683 | PR #2020
+        pub async fn call(
+            s: &Settings,
+            peer: Peer,
+            route: &str,
+            body: Body,
+        ) -> Result<serde_json::Value, String> {
+            let (status, text) = send(s, peer, route, body).await?;
+            let name = peer.keys().2;
             if !status.is_success() && !status.is_redirection() {
-                return Err(format!("ui {}: {text}", status.as_u16()));
+                // What: a JSON error answer shows its text.
+                // Why: the watchdog sends {"error": ...}.
+                // From: Issue #1683 | PR #2020
+                let v: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+                let why = v
+                    .as_ref()
+                    .and_then(|v| v["error"].as_str())
+                    .unwrap_or(&text);
+                return Err(format!("{name} {}: {why}", status.as_u16()));
             }
             // What: an empty answer (204, 303) is null.
             // Why: start, stop and forms send no body.
@@ -7925,7 +7981,32 @@ mod shared {
             if text.trim().is_empty() {
                 return Ok(serde_json::Value::Null);
             }
-            serde_json::from_str(&text).map_err(|e| format!("ui answer: {e}"))
+            serde_json::from_str(&text).map_err(|e| format!("{name} answer: {e}"))
+        }
+
+        // What: serve a REST router on a Unix socket.
+        // Why: ui and watchdog listen one way, mode 0600.
+        // From: Issue #1683 | PR #2020
+        pub async fn serve_unix(path: String, router: axum::Router) -> Result<(), String> {
+            use crate::shared::fs;
+            use std::os::unix::fs::PermissionsExt;
+            use std::path::Path;
+            // What: a socket file of an earlier run goes.
+            // Why: bind fails on an existing path.
+            // From: Issue #1683 | PR #2020
+            fs::delete_file(Path::new(&path))?;
+            // What: bind on a side name, then move it.
+            // Why: the socket is never open too wide.
+            // From: Issue #1683 | PR #2020
+            let side = fs::with_suffix(Path::new(&path), ".new");
+            fs::delete_file(&side)?;
+            let sock = tokio::net::UnixListener::bind(&side).map_err(|e| format!("{path}: {e}"))?;
+            std::fs::set_permissions(&side, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
+                .map_err(|e| format!("{path}: {e}"))?;
+            std::fs::rename(&side, &path).map_err(|e| format!("{path}: {e}"))?;
+            axum::serve(sock, router)
+                .await
+                .map_err(|e| format!("{path}: {e}"))
         }
 
         // What: "do <action> field=value" for page forms.
@@ -7953,7 +8034,7 @@ mod shared {
                 let (k, v) = crate::shared::cli::pair(pair, "field=value")?;
                 form.push((k.to_string(), v.to_string()));
             }
-            let v = ui_socket(s, &s.text(key)?, Body::Form(form)).await?;
+            let v = call(s, Peer::Ui, &s.text(key)?, Body::Form(form)).await?;
             Ok(serde_json::json!({"done": name, "answer": v}))
         }
 
@@ -10056,6 +10137,7 @@ mod shared {
             Container,
             Ui,
             Service,
+            Programs,
             Time,
             Snapshot,
         }
@@ -10063,7 +10145,7 @@ mod shared {
         // What: every command of the system group.
         // Why: help, errors and the choice read this table.
         // From: Issue #1683 | PR #2020
-        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 10] = [
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 11] = [
             ("status", crate::shared::cli::row(Op::Status, "status")),
             ("docker", crate::shared::cli::row(Op::Docker, "docker")),
             ("plan", crate::shared::cli::row(Op::Plan, "plan")),
@@ -10083,6 +10165,10 @@ mod shared {
                     Op::Service,
                     "service <container> <program> restart|reload",
                 ),
+            ),
+            (
+                "programs",
+                crate::shared::cli::row(Op::Programs, "programs"),
             ),
             ("time", crate::shared::cli::row(Op::Time, "time")),
             (
@@ -10183,9 +10269,17 @@ mod shared {
                     );
                     (r, Body::Form(vec![]))
                 }
+                (Some(Op::Programs), []) => (s.text("UI_ROUTE_WATCHDOG_PROGRAMS")?, Body::None),
                 _ => return Err(crate::shared::cli::help(&COMMANDS)),
             };
-            let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+            // What: programs go to the watchdog.
+            // Why: it runs and knows every program restart.
+            // From: Issue #1683 | PR #2020
+            let peer = match op {
+                Some(Op::Service | Op::Programs) => crate::shared::http::Peer::Watchdog,
+                _ => crate::shared::http::Peer::Ui,
+            };
+            let v = crate::shared::http::call(&s, peer, &route, body).await?;
             println!("{}", json!({"done": route, "answer": v}));
             Ok(())
         }
@@ -13434,7 +13528,8 @@ end
                     Some("renew") => {
                         let route = s.text("UI_ROUTE_PROXY_CERTS_RENEW")?;
                         let body = crate::shared::http::Body::Form(vec![]);
-                        crate::shared::http::ui_socket(&s, &route, body).await?
+                        crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &route, body)
+                            .await?
                     }
                     Some(x) => {
                         return Err(format!(
@@ -14894,7 +14989,8 @@ end
                     let body = crate::shared::http::Body::None;
                     println!(
                         "{}",
-                        crate::shared::http::ui_socket(&s, &route, body).await?
+                        crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &route, body)
+                            .await?
                     );
                     return Ok(());
                 }
@@ -15424,7 +15520,7 @@ end
         // Why: list reads here; changes go to the ui.
         // From: Issue #1683 | PR #2020
         pub async fn run(args: &[String]) -> Result<(), String> {
-            use crate::shared::http::{Body, ui_socket};
+            use crate::shared::http::{Body, Peer, call};
             let s = Settings::from_process()?;
             use crate::shared::cli;
             let (op, rest) = cli::split(&COMMANDS, args);
@@ -15446,7 +15542,7 @@ end
                 ),
                 _ => return Err(crate::shared::cli::help(&COMMANDS)),
             };
-            ui_socket(&s, &s.text(key)?, Body::Form(form)).await?;
+            call(&s, Peer::Ui, &s.text(key)?, Body::Form(form)).await?;
             println!("{}", listing(&Settings::from_process()?)?);
             Ok(())
         }
@@ -15841,7 +15937,9 @@ end
                 (Some(Op::Sample), []) => {
                     let route = s.text("UI_ROUTE_STATS_SAMPLE")?;
                     let body = crate::shared::http::Body::Form(vec![]);
-                    let v = crate::shared::http::ui_socket(&s, &route, body).await?;
+                    let v =
+                        crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &route, body)
+                            .await?;
                     println!("{v}");
                     if v["errors"].as_array().is_some_and(|e| !e.is_empty()) {
                         return Err("sample: a graph could not be recorded".into());
@@ -16290,7 +16388,8 @@ end
                         &[("op", "wipe".into())],
                     );
                     let body = crate::shared::http::Body::Form(vec![]);
-                    let v = crate::shared::http::ui_socket(&s, &r, body).await?;
+                    let v = crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &r, body)
+                        .await?;
                     println!("{v}");
                     Ok(())
                 }
@@ -17463,9 +17562,8 @@ mod ui {
     use crate::shared::{access, docker, fs, http, human, render, secret};
     use crate::stack::Stack;
     use crate::stack::{
-        Fields, apply_all, apply_now, check_change, commit, commit_with, container_of, exec_in,
-        exec_json, issue_and_reload, list_change, render_now, render_plan, set_wanted,
-        single_field,
+        Fields, apply_all, apply_now, check_change, commit, commit_with, container_of, exec_json,
+        issue_and_reload, list_change, render_now, render_plan, set_wanted, single_field,
     };
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
     use axum::extract::{Form, Request, State};
@@ -17719,7 +17817,6 @@ mod ui {
             ctx.insert("routes", &routes);
             ctx.insert("repo_url", &s.text("REPO_URL")?);
             ctx.insert("desired_services", &s.list("UI_CONTROLLABLE_SERVICES")?);
-            ctx.insert("programs", &s.list("UI_SERVICES")?);
             ctx.insert("ui_service", &s.text_or_empty("UI_SERVICE"));
             ctx.insert("status_refresh_seconds", &s.uint("UI_STATUS_REFRESH")?);
             ctx.insert("warnings", &s.warnings);
@@ -19400,9 +19497,9 @@ mod ui {
         }
     }
 
-    // What: restart or reload one program.
-    // Why: only through OpenRC; only listed ones.
-    // From: Issue #1683 | PR #1980
+    // What: POST UI_ROUTE_SERVICE_ACTION via watchdog.
+    // Why: the watchdog runs and knows every restart.
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn service_action(
         State(app): Shared,
         Extension(csrf): Extension<Csrf>,
@@ -19414,44 +19511,51 @@ mod ui {
         headers: HeaderMap,
     ) -> Page {
         csrf.check_header(&headers)?;
-        if action != "restart" && action != "reload" {
-            return Err(bad_request(tr("err_action_restart_reload")));
-        }
         let s = app.settings();
-        // What: the program is one bare name, never a path.
-        // Why: the list is live; rc-service runs a path.
-        // From: Issue #1683 | PR #2020
-        let bare =
-            crate::config::safe(crate::config::Syntax::BARE, &program) && !program.starts_with('-');
-        if !bare
-            || !s
-                .list("UI_SERVICES")?
-                .contains(&format!("{container}:{program}"))
-        {
-            return Err(Fail(StatusCode::NOT_FOUND, tr("err_program_not_offered")));
-        }
-        // What: only a running program is touched.
-        // Why: a restart must not start kea in dnsmasq mode
-        // From: Issue #1683 | PR #1985
-        let control = s.text("SERVICE_CONTROL_PROGRAM")?;
-        let status = [control.as_str(), program.as_str(), "status"];
-        let (code, _) = exec_in(&app, &s, &container, &status)
+        let route = crate::shared::fill(
+            s.text("UI_ROUTE_SERVICE_ACTION")?,
+            &[
+                ("container", container),
+                ("program", program),
+                ("action", action),
+            ],
+        );
+        to_watchdog(&s, &route, crate::shared::http::Body::Form(vec![])).await
+    }
+
+    // What: GET UI_ROUTE_WATCHDOG_PROGRAMS via watchdog.
+    // Why: the dock offers what OpenRC runs.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn watchdog_programs(State(app): Shared) -> Page {
+        let s = app.settings();
+        let route = s.text("UI_ROUTE_WATCHDOG_PROGRAMS")?;
+        to_watchdog(&s, &route, crate::shared::http::Body::None).await
+    }
+
+    // What: one watchdog REST call; answer passed on.
+    // Why: the watchdog runs it; errors in page words.
+    // From: Issue #1683 | PR #2020
+    async fn to_watchdog(s: &Settings, route: &str, body: crate::shared::http::Body) -> Page {
+        use crate::shared::http::{Peer, send};
+        let (status, text) = send(s, Peer::Watchdog, route, body)
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
-        if code != 0 {
-            return Err(Fail(StatusCode::CONFLICT, tr("err_program_not_running")));
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let v: Option<Value> = serde_json::from_str(&text).ok();
+        if !code.is_success() {
+            let v = v.unwrap_or_default();
+            let vals: Vec<(String, String)> =
+                serde_json::from_value(v["vals"].clone()).unwrap_or_default();
+            let why = match v["key"].as_str() {
+                Some(key) => crate::shared::fill(tr(key), &vals),
+                None => v["error"].as_str().unwrap_or(&text).to_string(),
+            };
+            return Err(Fail(code, why));
         }
-        let cmd = [control.as_str(), program.as_str(), action.as_str()];
-        let (code, out) = exec_in(&app, &s, &container, &cmd)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
-        if code != 0 {
-            return Err(Fail(
-                StatusCode::BAD_GATEWAY,
-                format!("{control} exit {code}: {out}"),
-            ));
-        }
-        Ok(StatusCode::NO_CONTENT.into_response())
+        Ok(match v {
+            Some(v) => (code, axum::Json(v)).into_response(),
+            None => code.into_response(),
+        })
     }
 
     // What: one cachehamster command; JSON answer.
@@ -19483,41 +19587,26 @@ mod ui {
         Ok(v)
     }
 
-    // What: one watchdog command in services; JSON answer.
-    // Why: check, processed and tidy steps run it alike.
-    // From: Issue #1683 | PR #2020
-    async fn watchdog_json(app: &Stack, args: &[&str]) -> Result<(i64, Value), Fail> {
-        let s = app.settings();
-        let program = s.text("SERVICES_PROGRAM")?;
-        let mut cmd = vec![program.as_str(), "watchdog"];
-        cmd.extend_from_slice(args);
-        exec_json(app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))
-    }
-
-    // What: GET UI_ROUTE_WATCHDOG_CHECK: checks now.
-    // Why: REST runs the watchdog check in services.
+    // What: GET UI_ROUTE_WATCHDOG_CHECK via watchdog.
+    // Why: the watchdog checks; the ui passes it on.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn watchdog_check(State(app): Shared) -> Page {
-        let (_, v) = watchdog_json(&app, &["check"]).await?;
-        Ok(axum::Json(v).into_response())
+        let s = app.settings();
+        let route = s.text("UI_ROUTE_WATCHDOG_CHECK")?;
+        to_watchdog(&s, &route, crate::shared::http::Body::None).await
     }
 
-    // What: GET UI_ROUTE_WATCHDOG_PROCESSED: syslog count.
-    // Why: REST asks services what the CLI asks there.
+    // What: GET UI_ROUTE_WATCHDOG_PROCESSED via watchdog.
+    // Why: the syslog-ng socket is in services.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn watchdog_processed(State(app): Shared) -> Page {
-        let (code, v) = watchdog_json(&app, &["processed"]).await?;
-        if code != 0 {
-            let why = v["error"].as_str().unwrap_or("syslog-ng did not answer");
-            return Err(Fail(StatusCode::BAD_GATEWAY, why.to_string()));
-        }
-        Ok(axum::Json(v).into_response())
+        let s = app.settings();
+        let route = s.text("UI_ROUTE_WATCHDOG_PROCESSED")?;
+        to_watchdog(&s, &route, crate::shared::http::Body::None).await
     }
 
-    // What: POST UI_ROUTE_WATCHDOG_TIDY, ?dry_run=1.
-    // Why: REST runs the watchdog step in services.
+    // What: POST UI_ROUTE_WATCHDOG_TIDY via watchdog.
+    // Why: the watchdog runs the step, ?dry_run=1 too.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn watchdog_tidy(
         State(app): Shared,
@@ -19527,15 +19616,12 @@ mod ui {
         headers: HeaderMap,
     ) -> Page {
         csrf.check_header(&headers)?;
-        if !crate::watchdog::TIDY_STEPS.contains(&op.as_str()) {
-            return Err(Fail(StatusCode::NOT_FOUND, "no such step".into()));
-        }
-        let mut args = vec![op.as_str()];
+        let s = app.settings();
+        let mut route = crate::shared::fill(s.text("UI_ROUTE_WATCHDOG_TIDY")?, &[("op", op)]);
         if field(&query, "dry_run") == "1" {
-            args.push("--dry-run");
+            route.push_str("?dry_run=1");
         }
-        let (_, v) = watchdog_json(&app, &args).await?;
-        Ok(axum::Json(v).into_response())
+        to_watchdog(&s, &route, crate::shared::http::Body::Form(vec![])).await
     }
 
     // What: cachehamster page.
@@ -20678,6 +20764,7 @@ mod ui {
             route("UI_ROUTE_WATCHDOG_TIDY", Post, Api, watchdog_tidy),
             route("UI_ROUTE_WATCHDOG_CHECK", Get, Api, watchdog_check),
             route("UI_ROUTE_WATCHDOG_PROCESSED", Get, Api, watchdog_processed),
+            route("UI_ROUTE_WATCHDOG_PROGRAMS", Get, Api, watchdog_programs),
             route("UI_ROUTE_ZONE_OVERVIEW", Get, Api, zone_overview),
             route("UI_ROUTE_DESIRED_STATE", Post, Api, container_state),
             route("UI_ROUTE_RESTART_UI", Post, Api, restart_ui),
@@ -20745,7 +20832,7 @@ mod ui {
             form.push(("user".to_string(), u.clone()));
         }
         let route = s.text("UI_ROUTE_PASSWORD")?;
-        let v = http::ui_socket(s, &route, http::Body::Form(form)).await?;
+        let v = http::call(s, http::Peer::Ui, &route, http::Body::Form(form)).await?;
         println!("{v}");
         Ok(())
     }
@@ -20798,29 +20885,6 @@ mod ui {
             ))
             .layer(axum::middleware::from_fn_with_state(app.clone(), lang))
             .with_state(app))
-    }
-
-    // What: serve the REST routes on the CLI socket.
-    // Why: CLI writes go through the running ui.
-    // From: Issue #1683 | PR #2020
-    async fn serve_socket(app: Arc<App>, path: String) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        // What: a socket file of an earlier run goes.
-        // Why: bind fails on an existing path.
-        // From: Issue #1683 | PR #2020
-        fs::delete_file(Path::new(&path))?;
-        // What: bind on a side name, close it, then move.
-        // Why: the socket is never open with a wide mode.
-        // From: Issue #1683 | PR #2020
-        let side = fs::with_suffix(Path::new(&path), ".new");
-        fs::delete_file(&side)?;
-        let sock = tokio::net::UnixListener::bind(&side).map_err(|e| format!("{path}: {e}"))?;
-        std::fs::set_permissions(&side, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
-            .map_err(|e| format!("{path}: {e}"))?;
-        std::fs::rename(&side, &path).map_err(|e| format!("{path}: {e}"))?;
-        axum::serve(sock, socket_router(app)?)
-            .await
-            .map_err(|e| format!("{path}: {e}"))
     }
 
     // What: save settings from a JSON object.
@@ -20947,7 +21011,8 @@ mod ui {
         let sock = tokio::net::TcpListener::bind(&listen)
             .await
             .map_err(|e| format!("{listen}: {e}"))?;
-        let socket = serve_socket(app.clone(), s.text("UI_CLI_SOCKET")?);
+        let socket =
+            crate::shared::http::serve_unix(s.text("UI_CLI_SOCKET")?, socket_router(app.clone())?);
         let tcp = async {
             axum::serve(
                 sock,
@@ -21015,12 +21080,7 @@ mod watchdog {
         // Why: a check reports here and keeps running.
         // From: Issue #1683 | PR #1980
         fn add(&mut self, level: Level, source: &str, what: impl Into<Fault>) {
-            let what = what.into();
-            let text = crate::ui::say(&what);
-            let (key, vals) = match what {
-                Fault::Key(key, vals) => (Some(key), vals),
-                _ => (None, Vec::new()),
-            };
+            let (text, key, vals) = worded(what.into());
             self.alarms.push(Alarm {
                 level,
                 source: source.to_string(),
@@ -21694,6 +21754,261 @@ mod watchdog {
         Ok(())
     }
 
+    // What: text, language key and values of a failure.
+    // Why: alarms and REST errors carry all three.
+    // From: Issue #1683 | PR #2020
+    type Worded = (String, Option<&'static str>, Vec<(&'static str, String)>);
+
+    // What: a failure split into its words.
+    // Why: the ui shows the key in the page language.
+    // From: Issue #1683 | PR #2020
+    fn worded(what: Fault) -> Worded {
+        let text = crate::ui::say(&what);
+        match what {
+            Fault::Key(key, vals) => (text, Some(key), vals),
+            _ => (text, None, Vec::new()),
+        }
+    }
+
+    // What: a refused REST call: status and failure.
+    // Why: every handler answers errors one way.
+    // From: Issue #1683 | PR #2020
+    type Refused = (axum::http::StatusCode, Fault);
+
+    // What: a REST answer, or the error as JSON.
+    // Why: {"error","key","vals"}; the ui translates.
+    // From: Issue #1683 | PR #2020
+    fn answer(r: Result<axum::response::Response, Refused>) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        match r {
+            Ok(done) => done,
+            Err((code, what)) => {
+                let (error, key, vals) = worded(what);
+                let body = serde_json::json!({"error": error, "key": key, "vals": vals});
+                (code, axum::Json(body)).into_response()
+            }
+        }
+    }
+
+    // What: settings of the process for one call.
+    // Why: a handler rereads them like the round.
+    // From: Issue #1683 | PR #2020
+    fn settings() -> Result<Settings, Refused> {
+        Settings::from_process()
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.into()))
+    }
+
+    // What: name of this process, e.g. lancache-watchdog.
+    // Why: it never restarts itself; it would not answer.
+    // From: Issue #1683 | PR #2020
+    fn own_program() -> String {
+        let arg = std::env::args().next().unwrap_or_default();
+        Path::new(&arg)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    // What: the OpenRC services of one container.
+    // Why: openrc-setup adds each SOT process so.
+    // From: Issue #1683 | PR #2020
+    async fn programs_in(
+        api: &docker::Api,
+        s: &Settings,
+        name: &str,
+    ) -> Result<Vec<String>, String> {
+        let list = s.text("SERVICE_LIST_PROGRAM")?;
+        let cmd = [list.as_str(), "show"];
+        let (code, out) = api
+            .exec(name, &cmd, docker::timeout(s)?)
+            .await
+            .map_err(|e| format!("{name}: {e}"))?;
+        if code != 0 {
+            return Err(format!("{name}: {list} exit {code}: {out}"));
+        }
+        let own = own_program();
+        let names: std::collections::BTreeSet<String> = out
+            .lines()
+            .filter_map(|l| l.split_once('|'))
+            .map(|(n, _)| n.trim().to_string())
+            .filter(|n| !n.is_empty() && *n != own)
+            .collect();
+        Ok(names.into_iter().collect())
+    }
+
+    // What: GET UI_ROUTE_WATCHDOG_PROGRAMS.
+    // Why: service:program rows; a failing one is named.
+    // From: Issue #1683 | PR #2020
+    async fn api_programs() -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                let s = settings()?;
+                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
+                let api = docker::client(&s).map_err(bad)?;
+                let (mut programs, mut errors) = (Vec::new(), Vec::new());
+                for m in docker::members(&api, &s).await.map_err(bad)? {
+                    match programs_in(&api, &s, &m.name).await {
+                        Ok(list) => {
+                            programs.extend(list.into_iter().map(|p| format!("{}:{p}", m.service)))
+                        }
+                        Err(e) => errors.push(e),
+                    }
+                }
+                let body = serde_json::json!({"programs": programs, "errors": errors});
+                Ok(axum::Json(body).into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: POST UI_ROUTE_SERVICE_ACTION in the watchdog.
+    // Why: only OpenRC services that run are touched.
+    // From: Issue #1683 | PR #2020
+    async fn api_program(
+        axum::extract::Path((service, program, action)): axum::extract::Path<(
+            String,
+            String,
+            String,
+        )>,
+    ) -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                if action != "restart" && action != "reload" {
+                    let no = Fault::key("err_action_restart_reload", []);
+                    return Err((StatusCode::BAD_REQUEST, no));
+                }
+                let s = settings()?;
+                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
+                let api = docker::client(&s).map_err(bad)?;
+                let members = docker::members(&api, &s).await.map_err(bad)?;
+                let Some(m) = members.iter().find(|m| m.service == service) else {
+                    let no = Fault::key("err_no_container", [("service", service.clone())]);
+                    return Err((StatusCode::NOT_FOUND, no));
+                };
+                if !programs_in(&api, &s, &m.name)
+                    .await
+                    .map_err(bad)?
+                    .contains(&program)
+                {
+                    let no = Fault::key("err_program_not_offered", []);
+                    return Err((StatusCode::NOT_FOUND, no));
+                }
+                let control = s.text("SERVICE_CONTROL_PROGRAM").map_err(bad)?;
+                let limit = docker::timeout(&s).map_err(bad)?;
+                // What: only a running program is touched.
+                // Why: no restart starts kea for dnsmasq.
+                // From: Issue #1683 | PR #1985
+                let status = [control.as_str(), program.as_str(), "status"];
+                let (code, _) = api
+                    .exec(&m.name, &status, limit)
+                    .await
+                    .map_err(|e| bad(e.to_string()))?;
+                if code != 0 {
+                    let no = Fault::key("err_program_not_running", []);
+                    return Err((StatusCode::CONFLICT, no));
+                }
+                let cmd = [control.as_str(), program.as_str(), action.as_str()];
+                let (code, out) = api
+                    .exec(&m.name, &cmd, limit)
+                    .await
+                    .map_err(|e| bad(e.to_string()))?;
+                if code != 0 {
+                    return Err(bad(format!("{control} exit {code}: {out}")));
+                }
+                Ok(StatusCode::NO_CONTENT.into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: GET UI_ROUTE_WATCHDOG_CHECK: checks now.
+    // Why: no heal, no tidy; see a fix at once.
+    // From: Issue #1683 | PR #2020
+    async fn api_check() -> axum::response::Response {
+        answer(
+            async {
+                use axum::response::IntoResponse;
+                let s = settings()?;
+                let mut f = checks(&s, &mut Memory::default(), false).await;
+                sort_alarms(&mut f);
+                Ok(axum::Json(report_of(&f)).into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: GET UI_ROUTE_WATCHDOG_PROCESSED.
+    // Why: lines syslog-ng wrote; its socket is here.
+    // From: Issue #1683 | PR #2020
+    async fn api_processed() -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                let s = settings()?;
+                let n = tokio::task::spawn_blocking(move || tidy::syslog_processed(&s))
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Fault::from(e.to_string()),
+                        )
+                    })?
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                Ok(axum::Json(serde_json::json!({"processed": n})).into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: POST UI_ROUTE_WATCHDOG_TIDY, ?dry_run=1.
+    // Why: the same tidy functions as the round.
+    // From: Issue #1683 | PR #2020
+    async fn api_tidy(
+        axum::extract::Path(op): axum::extract::Path<String>,
+        axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+    ) -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                if !TIDY_STEPS.contains(&op.as_str()) {
+                    return Err((StatusCode::NOT_FOUND, Fault::from("no such step")));
+                }
+                let dry = query.get("dry_run").map(String::as_str) == Some("1");
+                let s = settings()?;
+                let t = tokio::task::spawn_blocking(move || tidy_now(&s, &op, dry))
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Fault::from(e.to_string()),
+                        )
+                    })?
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Fault::from(e)))?;
+                Ok(axum::Json(t).into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: the watchdog REST routes from the SOT.
+    // Why: ui and CLI reach them on WATCHDOG_SOCKET.
+    // From: Issue #1683 | PR #2020
+    fn router(s: &Settings) -> Result<axum::Router, String> {
+        use axum::routing::{get, post};
+        Ok(axum::Router::new()
+            .route(&s.text("UI_ROUTE_WATCHDOG_CHECK")?, get(api_check))
+            .route(&s.text("UI_ROUTE_WATCHDOG_PROCESSED")?, get(api_processed))
+            .route(&s.text("UI_ROUTE_WATCHDOG_PROGRAMS")?, get(api_programs))
+            .route(&s.text("UI_ROUTE_WATCHDOG_TIDY")?, post(api_tidy))
+            .route(&s.text("UI_ROUTE_SERVICE_ACTION")?, post(api_program)))
+    }
+
     // What: what one watchdog command does.
     // Why: run() matches these; tidy steps are TIDY_STEPS.
     // From: Issue #1683 | PR #2020
@@ -21725,7 +22040,7 @@ mod watchdog {
     // Why: settings are reread; a bad round never exits.
     // From: Issue #1683 | PR #1858
     pub async fn run(args: &[String]) -> Result<(), String> {
-        use crate::shared::cli;
+        use crate::shared::{cli, http};
         let first = args.first().map(String::as_str);
         match (first, cli::op_of(&COMMANDS, args.first())) {
             (None, _) => {}
@@ -21746,35 +22061,31 @@ mod watchdog {
                 return Ok(());
             }
             // What: the checks once, no heal, no tidy.
-            // Why: see a fix now, not after CHECK_INTERVAL.
+            // Why: the watchdog runs it; rc 1 on a crit.
             // From: Issue #1683 | PR #2020
             (_, Some(Op::Check)) => {
                 let s = Settings::from_process()?;
-                let mut f = checks(&s, &mut Memory::default(), false).await;
-                sort_alarms(&mut f);
-                let body = serde_json::to_string(&report_of(&f)).map_err(|e| e.to_string())?;
-                println!("{body}");
-                if f.alarms.iter().any(|a| a.level == Level::Crit) {
+                let route = s.text("UI_ROUTE_WATCHDOG_CHECK")?;
+                let v = http::call(&s, http::Peer::Watchdog, &route, http::Body::None).await?;
+                println!("{v}");
+                let mut alarms = v["alarms"].as_array().into_iter().flatten();
+                if alarms.any(|a| a["level"] == "Crit") {
                     std::process::exit(1);
                 }
                 return Ok(());
             }
             // What: lines syslog-ng wrote to the log store.
-            // Why: its input; the socket is in services.
+            // Why: the watchdog asks syslog-ng's socket.
             // From: Issue #1683 | PR #2020
             (_, Some(Op::Processed)) => {
                 let s = Settings::from_process()?;
-                match tidy::syslog_processed(&s) {
-                    Ok(n) => println!("{}", serde_json::json!({"processed": n})),
-                    Err(e) => {
-                        println!("{}", serde_json::json!({"error": e}));
-                        std::process::exit(1);
-                    }
-                }
+                let route = s.text("UI_ROUTE_WATCHDOG_PROCESSED")?;
+                let v = http::call(&s, http::Peer::Watchdog, &route, http::Body::None).await?;
+                println!("{v}");
                 return Ok(());
             }
             // What: one tidy step now, or --dry-run.
-            // Why: the same functions as the round.
+            // Why: the watchdog runs it; rc 1 unless ok.
             // From: Issue #1683 | PR #2020
             (Some(step), None) if TIDY_STEPS.contains(&step) => {
                 let dry = match args.get(1).map(String::as_str) {
@@ -21782,9 +22093,16 @@ mod watchdog {
                     Some("--dry-run") => true,
                     Some(x) => return Err(format!("{x}: only --dry-run")),
                 };
-                let t = tidy_now(&Settings::from_process()?, step, dry)?;
-                println!("{}", serde_json::to_string(&t).map_err(|e| e.to_string())?);
-                if !t.ok {
+                let s = Settings::from_process()?;
+                let tidy = s.text("UI_ROUTE_WATCHDOG_TIDY")?;
+                let mut route = crate::shared::fill(tidy, &[("op", step.to_string())]);
+                if dry {
+                    route.push_str("?dry_run=1");
+                }
+                let body = http::Body::Form(vec![]);
+                let v = http::call(&s, http::Peer::Watchdog, &route, body).await?;
+                println!("{v}");
+                if v["ok"] != true {
                     std::process::exit(1);
                 }
                 return Ok(());
@@ -21805,6 +22123,15 @@ mod watchdog {
         let mut pause = Duration::from_secs(settings.uint("CHECK_INTERVAL")?);
         let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
         let mut memory = Memory::default();
+        // What: the REST routes on WATCHDOG_SOCKET.
+        // Why: ui and CLI reach the watchdog, not exec.
+        // From: Issue #1683 | PR #2020
+        let api = http::serve_unix(settings.text("WATCHDOG_SOCKET")?, router(&settings)?);
+        tokio::spawn(async move {
+            if let Err(e) = api.await {
+                eprintln!("watchdog: REST socket: {e}");
+            }
+        });
         loop {
             match Settings::from_process() {
                 Ok(s) => settings = s,

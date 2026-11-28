@@ -829,6 +829,7 @@ runtime:
     - UI_ROUTE_STACK_SNAPSHOT_RESTORE=/api/stack/snapshots/restore
     - UI_ROUTE_WATCHDOG_CHECK=/api/watchdog/check
     - UI_ROUTE_WATCHDOG_PROCESSED=/api/watchdog/processed
+    - UI_ROUTE_WATCHDOG_PROGRAMS=/api/watchdog/programs
     - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
@@ -1135,6 +1136,15 @@ runtime:
     # Why: deprecated; unread since v0.4.0.
     # From: Issue #1683 | PR #2020
     - STATUS_FILE=@STATUS_DIR@/status.json
+    # What: socket of the watchdog REST routes, 0600.
+    # Why: ui and CLI call it; services and ui mount it.
+    # From: Issue #1683 | PR #2020
+    - WATCHDOG_SOCKET_DIR=/var/run/watchdog-api
+    - WATCHDOG_SOCKET=@WATCHDOG_SOCKET_DIR@/watchdog.sock
+    # What: wait of a call for the watchdog answer.
+    # Why: a tidy step reads and packs whole log trees.
+    # From: Issue #1683 | PR #2020
+    - WATCHDOG_API_TIMEOUT_SECONDS=600
     # What: syslog-ng log root and its allowed prefix.
     # Why: the watchdog prunes logs only inside it.
     # From: Issue #1683 | PR #2020
@@ -1621,6 +1631,10 @@ runtime:
     # Why: the exec rows and the program menu name it once.
     # From: Issue #1683 | PR #2017
     - SERVICE_CONTROL_PROGRAM=rc-service
+    # What: the program that lists the services it runs.
+    # Why: the watchdog offers what OpenRC runs, no list.
+    # From: Issue #1683 | PR #2020
+    - SERVICE_LIST_PROGRAM=rc-update
     # What: the command that reads the state of chronyd.
     # Why: the statistics show stratum and offset.
     # From: Issue #1683 | PR #2017
@@ -1852,10 +1866,6 @@ runtime:
     # Why: the dashboard keeps this many rows.
     # From: Issue #1683 | PR #2020
     - UI_RECENT_REQUESTS=50
-    # What: programs per container in the menus.
-    # Why: reload and restart act on one program.
-    # From: Issue #1683 | PR #2020
-    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:dnsdist dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
     # What: status poll interval of the pages, seconds.
     # Why: the dots and the dashboard refresh by it.
     # From: Issue #1683 | PR #2020
@@ -2227,7 +2237,6 @@ runtime:
     - UI_PUBLIC_URL=text?;;;fixed;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui
     - UI_REQUEST_BODY_MAX_BYTES=uint;1024;104857600;restart;ui
-    - UI_SERVICES=list;;;fixed;ui
     - UI_STATUS_REFRESH=uint;1;3600;live;ui
     - UI_AUTH_USER=text;;;live;ui
     - UPSTREAM_DHCP_IP=ip?;;;reload;dhcp
@@ -2306,7 +2315,7 @@ runtime:
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP HTTPS_OFF_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR STACK_ENV_DIR STACK_ENV_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
+  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR WATCHDOG_SOCKET_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP HTTPS_OFF_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR STACK_ENV_DIR STACK_ENV_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912
