@@ -11196,12 +11196,12 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         }
 
         // What: UDP port of an SNMP agent.
-        // Why: fixed by RFC 3411; a target may omit it.
+        // Why: RFC 3417 sets UDP 161; a target may omit it.
         // From: Issue #1683 | PR #2020
         const DEFAULT_PORT: u16 = 161;
 
-        // What: text of one varbind, as snmpget wrote it.
-        // Why: the reader takes the first word as a number.
+        // What: text of one varbind value.
+        // Why: rrd takes the first word as a number.
         // From: Issue #1683 | PR #2020
         fn value_text(v: &snmp2::Value<'_>) -> String {
             use snmp2::Value;
