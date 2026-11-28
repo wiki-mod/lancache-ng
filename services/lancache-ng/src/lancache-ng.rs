@@ -429,10 +429,7 @@ mod cachehamster {
             Req::Get(query) => client.get(&url).query(query),
             Req::Post(form) => client.post(&url).form(form),
         };
-        let resp = call
-            .send()
-            .await
-            .map_err(|e| format!("{method}: {}", http::error_chain(&e)))?;
+        let resp = call.send().await.map_err(|e| http::failed(method, &e))?;
         let status = resp.status();
         let eresult = resp
             .headers()
@@ -1040,7 +1037,7 @@ mod cachehamster {
             .timeout(http::timeout(&c.s)?)
             .send()
             .await
-            .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
+            .map_err(|e| http::failed(&url, &e))?;
         let head = |k: &str| {
             resp.headers()
                 .get(k)
@@ -1968,7 +1965,7 @@ mod cachehamster {
                 .get(dl.url(&url)?)
                 .send()
                 .await
-                .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
+                .map_err(|e| http::failed(&url, &e))?;
             if !resp.status().is_success() {
                 eprintln!("cachehamster: {url}: HTTP {}", resp.status());
                 skipped.push(format!("depot {depot}: HTTP {}", resp.status()));
@@ -7953,7 +7950,7 @@ mod shared {
             let mut out = Vec::new();
             let mut body = resp.bytes_stream();
             while let Some(chunk) = body.next().await {
-                let chunk = chunk.map_err(|e| format!("{what}: {}", error_chain(&e)))?;
+                let chunk = chunk.map_err(|e| failed(what, &e))?;
                 let n = (out.len() + chunk.len()) as u64;
                 if n > max {
                     return Err(over(n));
@@ -8090,6 +8087,13 @@ mod shared {
                 .build("HTTP client")
         }
 
+        // What: a failed request as "target: cause chain".
+        // Why: every request error names its target alike.
+        // From: Issue #1683 | PR #2020
+        pub fn failed(target: impl std::fmt::Display, error: &dyn std::error::Error) -> String {
+            format!("{target}: {}", error_chain(error))
+        }
+
         // What: error text with every source cause.
         // Why: reqwest hides the cause in source().
         // From: Issue #1683 | PR #1980
@@ -8121,7 +8125,7 @@ mod shared {
                 .get(url)
                 .send()
                 .await
-                .map_err(|e| format!("{url}: {}", error_chain(&e)))?
+                .map_err(|e| failed(url, &e))?
                 .status();
             if status.is_success() {
                 Ok(())
@@ -8134,16 +8138,12 @@ mod shared {
         // Why: prefill warms the cache; nothing is stored.
         // From: Issue #1683 | PR #1980
         pub async fn drain(client: &reqwest::Client, url: &str) -> Result<(u16, u64), String> {
-            let resp = client
-                .get(url)
-                .send()
-                .await
-                .map_err(|e| format!("{url}: {}", error_chain(&e)))?;
+            let resp = client.get(url).send().await.map_err(|e| failed(url, &e))?;
             let status = resp.status().as_u16();
             let mut total = 0u64;
             let mut body = resp.bytes_stream();
             while let Some(chunk) = body.next().await {
-                let chunk = chunk.map_err(|e| format!("{url}: {}", error_chain(&e)))?;
+                let chunk = chunk.map_err(|e| failed(url, &e))?;
                 total += chunk.len() as u64;
             }
             Ok((status, total))
@@ -8288,7 +8288,7 @@ mod shared {
                 let resp = req
                     .send()
                     .await
-                    .map_err(|e| format!("{url}: {}", super::http::error_chain(&e)))?;
+                    .map_err(|e| super::http::failed(&url, &e))?;
                 let status = resp.status();
                 let text = super::http::read_text(resp, self.max_body, &url).await?;
                 Ok((url, status, text))
@@ -13242,7 +13242,7 @@ end
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| format!("{url}: {}", crate::shared::http::error_chain(&e)))?;
+                .map_err(|e| crate::shared::http::failed(&url, &e))?;
             let resp = resp.error_for_status().map_err(|e| format!("{url}: {e}"))?;
             let max = crate::shared::http::max_body(s)?;
             let body = crate::shared::http::read_text(resp, max, &url).await?;
