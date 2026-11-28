@@ -7170,6 +7170,19 @@ mod shared {
             place: Place,
             owner: Owner,
         ) -> io::Result<()> {
+            write_with(path, mode, place, owner, |file| file.write_all(contents))
+        }
+
+        // What: write; fill streams bytes into the temp.
+        // Why: big files need no copy in memory.
+        // From: Issue #1683 | PR #2020
+        pub fn write_with(
+            path: &Path,
+            mode: u32,
+            place: Place,
+            owner: Owner,
+            fill: impl FnOnce(&mut File) -> io::Result<()>,
+        ) -> io::Result<()> {
             if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
                 fs::create_dir_all(dir)?;
             }
@@ -7187,8 +7200,7 @@ mod shared {
                 .create_new(true)
                 .mode(mode)
                 .open(&tmp)?;
-            let result = file
-                .write_all(contents)
+            let result = fill(&mut file)
                 .and_then(|()| set_owner(&file, owner, None))
                 .and_then(|()| file.sync_all())
                 .and_then(|()| match place {
@@ -7202,7 +7214,7 @@ mod shared {
                         }
                         let mut target =
                             OpenOptions::new().write(true).truncate(true).open(path)?;
-                        target.write_all(contents)?;
+                        io::copy(&mut File::open(&tmp)?, &mut target)?;
                         target.sync_all()
                     }),
                 });
@@ -16197,57 +16209,62 @@ end
         // Why: the source goes only after dst is complete.
         // From: Issue #1683 | PR #2020
         fn pack_one(src: &Path, dst: &Path, preset: u64) -> Result<(), String> {
+            use super::fs::{Owner, Place};
             use std::io::{BufWriter, Write};
-            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
             let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
             let level = u32::try_from(preset)
                 .ok()
                 .filter(|p| *p <= 9)
                 .ok_or_else(|| format!("xz preset {preset} is not 0 to 9"))?;
-            let tmp = super::fs::with_suffix(dst, ".part");
-            let made = (|| -> std::io::Result<()> {
+            let meta = std::fs::metadata(src).map_err(|e| err(src, e))?;
+            // What: the .xz file keeps owner and mode.
+            // Why: log folder readers can read it.
+            // From: Issue #1683 | PR #2020
+            let (uid, gid) = (rustix::process::geteuid(), rustix::process::getegid());
+            let owner = Owner {
+                uid: (meta.uid() != uid.as_raw()).then_some(meta.uid()),
+                gid: (meta.gid() != gid.as_raw()).then_some(meta.gid()),
+            };
+            let mode = meta.permissions().mode() & 0o7777;
+            let encode = |file: &mut std::fs::File| -> std::io::Result<()> {
                 let mut input = std::fs::File::open(src)?;
-                let meta = input.metadata()?;
-                let out = std::fs::File::create(&tmp)?;
                 let options = lzma_rust2::XzOptions::with_preset(level);
-                let mut xz = lzma_rust2::XzWriter::new(BufWriter::new(out), options)?;
+                let mut xz = lzma_rust2::XzWriter::new(BufWriter::new(file), options)?;
                 std::io::copy(&mut input, &mut xz)?;
-                let mut out = xz.finish()?;
-                out.flush()?;
-                let out = out.into_inner().map_err(|e| e.into_error())?;
-                // What: the .xz file keeps owner and mode.
-                // Why: log folder readers can read it.
-                // From: Issue #1683 | PR #2020
-                let (uid, gid) = (meta.uid(), meta.gid());
-                if std::fs::metadata(&tmp)?.uid() != uid || std::fs::metadata(&tmp)?.gid() != gid {
-                    std::os::unix::fs::fchown(&out, Some(uid), Some(gid))?;
-                }
-                out.set_permissions(meta.permissions())?;
-                out.sync_all()?;
+                xz.finish()?.flush()
+            };
+            if dst.exists() {
+                // What: append the stream to the .xz.
+                // Why: xz will not overwrite a file.
+                // From: Issue #1683 | PR #1985
+                let part = super::fs::with_suffix(dst, ".part");
+                let joined = super::fs::write_with(&part, mode, Place::Replace, owner, encode)
+                    .map_err(|e| err(&part, e))
+                    .and_then(|()| {
+                        let mut from = std::fs::File::open(&part).map_err(|e| err(&part, e))?;
+                        let mut to = std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(dst)
+                            .map_err(|e| err(dst, e))?;
+                        std::io::copy(&mut from, &mut to).map_err(|e| err(dst, e))?;
+                        to.sync_all().map_err(|e| err(dst, e))
+                    });
+                let left = super::fs::delete_if_present(&part).map_err(|e| err(&part, e));
+                joined.and(left)?;
+            } else {
+                super::fs::write_with(dst, mode, Place::Replace, owner, encode)
+                    .map_err(|e| err(dst, e))?;
                 // What: the .xz file keeps the log's time.
                 // Why: age rules read the .xz time.
                 // From: Issue #1683 | PR #2020
-                out.set_modified(meta.modified()?)?;
-                Ok(())
-            })();
-            let finished = made.map_err(|e| err(&tmp, e)).and_then(|()| {
-                if dst.exists() {
-                    // What: append the stream to the .xz.
-                    // Why: xz will not overwrite a file.
-                    // From: Issue #1683 | PR #1985
-                    let mut from = std::fs::File::open(&tmp).map_err(|e| err(&tmp, e))?;
-                    let mut to = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(dst)
-                        .map_err(|e| err(dst, e))?;
-                    std::io::copy(&mut from, &mut to).map_err(|e| err(dst, e))?;
-                    to.sync_all().map_err(|e| err(dst, e))
-                } else {
-                    std::fs::rename(&tmp, dst).map_err(|e| err(dst, e))
-                }
-            });
-            let left = super::fs::delete_if_present(&tmp).map_err(|e| err(&tmp, e));
-            finished.and(left)?;
+                let when = meta.modified().map_err(|e| err(src, e))?;
+                std::fs::File::options()
+                    .write(true)
+                    .open(dst)
+                    .and_then(|f| f.set_modified(when))
+                    .map_err(|e| err(dst, e))?;
+            }
             super::fs::delete_if_present(src).map_err(|e| err(src, e))
         }
 
