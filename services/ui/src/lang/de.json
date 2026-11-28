@@ -492,6 +492,7 @@
   "alarm_check_streak": "{state}, Prüfung {count} von {after}",
   "alarm_restart_limit": "{state}; Grenze der Neustarts erreicht",
   "alarm_restarted": "{state}; neu gestartet",
+  "alarm_stopped_wish": "läuft, obwohl ausgeschaltet; gestoppt",
   "alarm_restart_failed": "{state}; Neustart fehlgeschlagen: {error}",
   "alarm_log_budget": "Logs belegen {size} Bytes, mehr als erlaubt",
   "alarm_logs_unread": "Logdateien nicht lesbar: {files}",

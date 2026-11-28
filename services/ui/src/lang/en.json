@@ -492,6 +492,7 @@
   "alarm_check_streak": "{state}, check {count} of {after}",
   "alarm_restart_limit": "{state}; restart limit reached",
   "alarm_restarted": "{state}; restarted",
+  "alarm_stopped_wish": "running though switched off; stopped",
   "alarm_restart_failed": "{state}; restart failed: {error}",
   "alarm_log_budget": "log size {size} bytes is over the budget",
   "alarm_logs_unread": "log files not read: {files}",

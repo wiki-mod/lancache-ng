@@ -4087,7 +4087,7 @@ mod dhcp {
     use crate::dns::{chosen_lan_zone, main_domain_fields};
     use crate::shared::Fault;
     use crate::shared::dhcp::{Mode as DhcpMode, ipv4_of, off_service, option_data};
-    use crate::shared::{docker, http, kea, kea_conf, secret, snapshot};
+    use crate::shared::{http, kea, kea_conf, secret, snapshot};
     use crate::stack::{Fields, Stack, commit};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
@@ -4702,24 +4702,21 @@ mod dhcp {
         }
     }
 
-    // What: in mode off a running dhcp is stopped again.
+    // What: in mode off the watchdog stops dhcp again.
     // Why: compose up may start it after the ui.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn stays_off(app: &Stack, s: &Settings) -> Result<Option<String>, String> {
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn stays_off(s: &Settings) -> Result<Option<String>, String> {
+        use crate::shared::http::{Body, Peer, call};
         let Some(service) = off_service(s)? else {
             return Ok(None);
         };
-        let (grace, limit) = app.limits(s)?;
-        let list = app.docker.stack(s).await?;
-        let running = docker::rows_of(&list, &service).find(|c| docker::is_running(c));
-        let Some(name) = running.and_then(docker::name_of) else {
-            return Ok(None);
-        };
-        let r = app
-            .docker
-            .act(name, docker::Action::Stop, grace, limit)
-            .await;
-        Ok(Some(format!("mode off, stop {name} {r:?}")))
+        let to = s.text("UI_ROUTE_WATCHDOG_CONVERGE")?;
+        let route = crate::shared::fill(to, &[("service", service)]);
+        let v = call(s, Peer::Watchdog, &route, Body::Form(vec![])).await?;
+        Ok(match v["done"].as_str() {
+            Some("kept") | None => None,
+            Some(done) => Some(format!("mode off, {done}")),
+        })
     }
 
     // What: one DHCP probe; the report as JSON.
@@ -9981,13 +9978,6 @@ mod shared {
             service: &'a str,
         ) -> impl Iterator<Item = &'a serde_json::Value> {
             list.iter().filter(move |r| service_of(r) == Some(service))
-        }
-
-        // What: true if a list row says the container runs.
-        // Why: list rows carry State; inspect has its own.
-        // From: Issue #1683 | PR #2020
-        pub fn is_running(row: &serde_json::Value) -> bool {
-            row["State"].as_str() == Some(RUNNING)
         }
 
         // What: one stack container with its full state.
@@ -17355,7 +17345,7 @@ mod stack {
         let dhcp = new.text("DHCP_SERVICE")?;
         if crate::shared::dhcp::off_service(new)?.is_some() {
             plan.remove(&dhcp);
-            match stays_off(app, new).await {
+            match stays_off(new).await {
                 Ok(Some(done)) => report.push(format!("{dhcp}: {done}").into()),
                 Ok(None) => {}
                 Err(e) => report.push(format!("{dhcp}: mode off, {e}").into()),
@@ -17527,18 +17517,17 @@ mod stack {
             ));
         }
         commit_with(app, |s| list_change(s, "SERVICES_STOPPED", service, !run)).await?;
-        let (grace, limit) = app.limits(&s)?;
-        let name = container_of(app, &s, service).await?;
-        let action = if run {
-            docker::Action::Start
-        } else {
-            docker::Action::Stop
-        };
-        Ok(app
-            .docker
-            .act(&name, action, grace, limit)
-            .await
-            .map_err(|e| e.to_string())?)
+        // What: the watchdog brings the container to it.
+        // Why: it runs and knows every start and stop.
+        // From: Issue #1683 | PR #2020
+        let s = app.settings();
+        let route = crate::shared::fill(
+            s.text("UI_ROUTE_WATCHDOG_CONVERGE")?,
+            &[("service", service.to_string())],
+        );
+        let body = crate::shared::http::Body::Form(vec![]);
+        crate::shared::http::call(&s, crate::shared::http::Peer::Watchdog, &route, body).await?;
+        Ok(())
     }
 }
 
@@ -17548,7 +17537,7 @@ mod stack {
 mod ui {
     use crate::cachehamster::{Rest, rest_of};
     use crate::config::{self, Settings};
-    use crate::dhcp::{kea_change, kea_snapshots, kea_state, kea_store, probe_cli, stays_off};
+    use crate::dhcp::{kea_change, kea_snapshots, kea_state, kea_store, probe_cli};
     use crate::dns::{
         LanDomainEdit, answers_aa, commit_and_prune, delete_peer_records, ensure_zones,
         flush_on_transfer, hosted_now, lan_domain_action, main_domain_fields, ns_change, peer_kit,
@@ -19459,11 +19448,6 @@ mod ui {
             for e in sample_round(&app, &s).await {
                 eprintln!("ui: stats: {e}");
             }
-            match stays_off(&app, &s).await {
-                Ok(Some(done)) => eprintln!("ui: dhcp: {done}"),
-                Ok(None) => {}
-                Err(e) => eprintln!("ui: dhcp: {e}"),
-            }
             tokio::time::sleep(Duration::from_secs(step)).await;
         }
     }
@@ -21154,6 +21138,57 @@ mod watchdog {
         }
     }
 
+    // What: bring one container to its wish.
+    // Why: start a wanted one, stop an unwanted one.
+    // From: Issue #1683 | PR #2020
+    async fn converge(
+        api: &docker::Api,
+        s: &Settings,
+        m: &docker::Member,
+    ) -> Result<&'static str, String> {
+        let inspect = m.inspect.clone()?;
+        let running = !matches!(Health::from_inspect(&inspect), Health::Stopped(_));
+        let action = match (m.wanted(), running) {
+            (true, false) => docker::Action::Start,
+            (false, true) => docker::Action::Stop,
+            _ => return Ok("kept"),
+        };
+        let grace = s.num::<u32>("WATCHDOG_STOP_GRACE")?;
+        api.act(&m.name, action, grace, docker::timeout(s)?)
+            .await
+            .map_err(|e| format!("{}: {e}", m.name))?;
+        Ok(match action {
+            docker::Action::Start => "started",
+            _ => "stopped",
+        })
+    }
+
+    // What: POST UI_ROUTE_WATCHDOG_CONVERGE.
+    // Why: ui and CLI ask; the wish is SERVICES_STOPPED.
+    // From: Issue #1683 | PR #2020
+    async fn api_converge(
+        axum::extract::Path(service): axum::extract::Path<String>,
+    ) -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                let s = settings()?;
+                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
+                let api = docker::client(&s).map_err(bad)?;
+                let members = docker::members(&api, &s).await.map_err(bad)?;
+                let Some(m) = members.iter().find(|m| m.service == service) else {
+                    let no = Fault::key("err_no_container", [("service", service.clone())]);
+                    return Err((StatusCode::NOT_FOUND, no));
+                };
+                let done = converge(&api, &s, m).await.map_err(bad)?;
+                let body = serde_json::json!({"service": service, "done": done});
+                Ok(axum::Json(body).into_response())
+            }
+            .await,
+        )
+    }
+
     // What: check every container; heal on a streak.
     // Why: one miss is noise; RESTART_AFTER is a fault.
     // From: Issue #1683 | PR #1980
@@ -21183,6 +21218,16 @@ mod watchdog {
             }));
             if health == Health::Degraded {
                 f.warn(service, Fault::key("alarm_degraded", []));
+            }
+            // What: a running unwanted one is stopped.
+            // Why: the round converges like the REST call.
+            // From: Issue #1683 | PR #2020
+            if heal && !wanted {
+                match converge(&api, s, &member).await {
+                    Ok("stopped") => f.warn(service, Fault::key("alarm_stopped_wish", [])),
+                    Ok(_) => {}
+                    Err(e) => f.crit(service, e),
+                }
             }
             if !wanted || !health.failing() {
                 m.streak.remove(name);
@@ -22006,7 +22051,8 @@ mod watchdog {
             .route(&s.text("UI_ROUTE_WATCHDOG_PROCESSED")?, get(api_processed))
             .route(&s.text("UI_ROUTE_WATCHDOG_PROGRAMS")?, get(api_programs))
             .route(&s.text("UI_ROUTE_WATCHDOG_TIDY")?, post(api_tidy))
-            .route(&s.text("UI_ROUTE_SERVICE_ACTION")?, post(api_program)))
+            .route(&s.text("UI_ROUTE_SERVICE_ACTION")?, post(api_program))
+            .route(&s.text("UI_ROUTE_WATCHDOG_CONVERGE")?, post(api_converge)))
     }
 
     // What: what one watchdog command does.
@@ -22018,12 +22064,13 @@ mod watchdog {
         Alarms,
         Check,
         Processed,
+        Converge,
     }
 
     // What: every watchdog command but the tidy steps.
     // Why: help, errors and the choice read this table.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 5] = [
         (
             "healthcheck",
             crate::shared::cli::row(Op::Healthcheck, "healthcheck"),
@@ -22033,6 +22080,10 @@ mod watchdog {
         (
             "processed",
             crate::shared::cli::row(Op::Processed, "processed"),
+        ),
+        (
+            "converge",
+            crate::shared::cli::row(Op::Converge, "converge <service>"),
         ),
     ];
 
@@ -22081,6 +22132,21 @@ mod watchdog {
                 let s = Settings::from_process()?;
                 let route = s.text("UI_ROUTE_WATCHDOG_PROCESSED")?;
                 let v = http::call(&s, http::Peer::Watchdog, &route, http::Body::None).await?;
+                println!("{v}");
+                return Ok(());
+            }
+            // What: one container brought to its wish.
+            // Why: the same call the ui makes after a save.
+            // From: Issue #1683 | PR #2020
+            (_, Some(Op::Converge)) => {
+                let s = Settings::from_process()?;
+                let [_, service] = args else {
+                    return Err(cli::usage(&COMMANDS, |o| *o == Op::Converge));
+                };
+                let to = s.text("UI_ROUTE_WATCHDOG_CONVERGE")?;
+                let route = crate::shared::fill(to, &[("service", service.clone())]);
+                let body = http::Body::Form(vec![]);
+                let v = http::call(&s, http::Peer::Watchdog, &route, body).await?;
                 println!("{v}");
                 return Ok(());
             }
