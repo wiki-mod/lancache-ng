@@ -4507,7 +4507,9 @@ mod dhcp {
         // Why: a rollback can itself be rolled back.
         // From: Issue #1683 | PR #2020
         save_kea(&store, &live_config(&api).await?)?;
-        apply_kea(&api, &store, &cfg).await
+        apply_kea(&api, &store, &cfg).await?;
+        crate::stack::state_after(s).await;
+        Ok(())
     }
 
     // What: the running Kea config without its hash.
@@ -4542,7 +4544,9 @@ mod dhcp {
         let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
         kea_conf::set_subnets(&mut cfg, subnets);
-        Ok(apply_kea(&api, &kea_store(s)?, &cfg).await?)
+        apply_kea(&api, &kea_store(s)?, &cfg).await?;
+        crate::stack::state_after(s).await;
+        Ok(())
     }
 
     // What: Kea subnet from typed subnet input.
@@ -5471,7 +5475,9 @@ mod dns {
             ));
         }
         let rows: Vec<Value> = zone_store(s, zone)?.read(id)?;
-        Ok(restore_zone(s, zone, &rows).await?)
+        restore_zone(s, zone, &rows).await?;
+        crate::stack::state_after(s).await;
+        Ok(())
     }
 
     // What: write saved rows into a zone, keep, flush.
@@ -5820,6 +5826,7 @@ mod dns {
                 write_rrset(s, &api, &rz, (&rev, "PTR"), 0, &[]).await?;
             }
         }
+        crate::stack::state_after(s).await;
         Ok(())
     }
 
@@ -5883,7 +5890,9 @@ mod dns {
             contents.push(pdns::zone_id(&input.hostname));
         }
         let api = peer::own_api(s)?;
-        Ok(write_rrset(s, &api, &zone, (&name, "PTR"), ttl, &contents).await?)
+        write_rrset(s, &api, &zone, (&name, "PTR"), ttl, &contents).await?;
+        crate::stack::state_after(s).await;
+        Ok(())
     }
 
     // What: saves secondaries as name@address rows.
@@ -18430,20 +18439,6 @@ mod ui {
                 .map_err(|e| say(&e)),
             DnsOp::TsigRotate => rotate_tsig(&app).await,
         };
-        // What: record and zone changes keep the state.
-        // Why: settings changes keep it in commit_with.
-        // From: Issue #1683 | PR #2020
-        let zone_change = matches!(
-            op,
-            DnsOp::LanAdd
-                | DnsOp::LanRemove
-                | DnsOp::PtrAdd
-                | DnsOp::PtrRemove
-                | DnsOp::ZoneRollback
-        );
-        if result.is_ok() && zone_change {
-            crate::stack::state_after(&app.settings()).await;
-        }
         finish(result, &s.text("UI_PAGE_DOMAINS")?)
     }
 
@@ -18742,16 +18737,6 @@ mod ui {
                 Err(e) => Err(e),
             },
         };
-        // What: Kea changes keep the state.
-        // Why: settings changes keep it in commit_with.
-        // From: Issue #1683 | PR #2020
-        let kea = !matches!(
-            op,
-            DhcpOp::Mode | DhcpOp::Ddns | DhcpOp::Proxy | DhcpOp::Relay
-        );
-        if result.is_ok() && kea {
-            crate::stack::state_after(&app.settings()).await;
-        }
         finish(result, &s.text("UI_PAGE_DHCP")?)
     }
 
