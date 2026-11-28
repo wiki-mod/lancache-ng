@@ -4039,9 +4039,7 @@ mod config {
             (Some(op @ (Op::Set | Op::Validate)), pairs) if !pairs.is_empty() => {
                 let mut body = serde_json::Map::new();
                 for pair in pairs {
-                    let (k, v) = pair
-                        .split_once('=')
-                        .ok_or_else(|| format!("{pair}: needs KEY=VALUE"))?;
+                    let (k, v) = crate::shared::cli::pair(pair, "KEY=VALUE")?;
                     body.insert(k.to_string(), v.into());
                 }
                 // What: validate posts as a dry run.
@@ -6965,6 +6963,14 @@ mod shared {
     // Why: help, errors and the choice read one table.
     // From: Issue #1683 | PR #2020
     pub mod cli {
+        // What: name and value of a NAME=VALUE argument.
+        // Why: the CLI forms read their pairs one way.
+        // From: Issue #1683 | PR #2020
+        pub fn pair<'a>(arg: &'a str, shape: &str) -> Result<(&'a str, &'a str), String> {
+            arg.split_once('=')
+                .ok_or_else(|| format!("{arg}: needs {shape}"))
+        }
+
         // What: the words of a table with a separator.
         // Why: the help names what the table can run.
         // From: Issue #1683 | PR #2020
@@ -7887,9 +7893,7 @@ mod shared {
             let key = keys.iter().find(|k| word(k) == *name).ok_or_else(usage)?;
             let mut form = Vec::new();
             for pair in pairs {
-                let (k, v) = pair
-                    .split_once('=')
-                    .ok_or_else(|| format!("{pair}: needs field=value"))?;
+                let (k, v) = crate::shared::cli::pair(pair, "field=value")?;
                 form.push((k.to_string(), v.to_string()));
             }
             let v = ui_socket(s, &s.text(key)?, Body::Form(form)).await?;
