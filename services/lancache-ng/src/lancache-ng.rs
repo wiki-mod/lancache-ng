@@ -4067,11 +4067,10 @@ mod dhcp {
     use crate::dns::{chosen_lan_zone, main_domain_fields};
     use crate::shared::Fault;
     use crate::shared::dhcp::{Mode as DhcpMode, ipv4_of, off_service, option_data};
-    use crate::shared::{docker, fs, http, kea, kea_conf, secret, snapshot};
+    use crate::shared::{docker, http, kea, kea_conf, secret, snapshot};
     use crate::stack::{Fields, Stack, commit};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
 
     // What: Kea subnets per LAN zone, by domain-name.
     // Why: the DNS page shows which subnet uses a domain.
@@ -4223,14 +4222,12 @@ mod dhcp {
     // Why: each subnet change can be undone.
     // From: Issue #1683 | PR #1980
     pub(crate) fn kea_store(s: &Settings) -> Result<snapshot::Store, String> {
-        let dir = PathBuf::from(s.text("KEA_CONFIG_SNAPSHOT_DIR")?);
-        let keep = s.num::<usize>("KEA_SNAPSHOT_KEEP")?;
-        Ok(snapshot::Store {
-            dir,
-            keep,
-            owner: fs::Owner::default(),
-            file: Some(s.text("KEA_CONFIG_SNAPSHOT_FILE")?),
-        })
+        snapshot::Store::from_keys(
+            s,
+            "KEA_CONFIG_SNAPSHOT_DIR",
+            "KEA_SNAPSHOT_KEEP",
+            Some("KEA_CONFIG_SNAPSHOT_FILE"),
+        )
     }
 
     // What: the fields of one Kea subnet.
@@ -4493,7 +4490,7 @@ mod dhcp {
     // Why: one reader for the page, REST and CLI.
     // From: Issue #1683 | PR #2020
     pub(crate) fn kea_snapshots(s: &Settings) -> Result<Value, String> {
-        Ok(json!({"snapshots": kea_store(s)?.rows()?}))
+        kea_store(s)?.listing()
     }
 
     // What: put the Kea config back to a snapshot.
@@ -5416,15 +5413,14 @@ mod dns {
         s: &Settings,
         zone: &str,
     ) -> Result<crate::shared::snapshot::Store, String> {
-        let dir = Path::new(&s.text("DNS_SNAPSHOT_DIR")?).join(crate::shared::dns::bare_zone(zone));
-        let keep = s.num::<usize>("DNS_SNAPSHOT_KEEP")?;
-        let owner = fs::Owner::default();
-        Ok(crate::shared::snapshot::Store {
-            dir,
-            keep,
-            owner,
-            file: None,
-        })
+        let mut store = crate::shared::snapshot::Store::from_keys(
+            s,
+            "DNS_SNAPSHOT_DIR",
+            "DNS_SNAPSHOT_KEEP",
+            None,
+        )?;
+        store.dir.push(crate::shared::dns::bare_zone(zone));
+        Ok(store)
     }
 
     // What: keep the zone's records after a change.
@@ -10991,6 +10987,23 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: a store saves, lists, reads, prunes.
         // From: Issue #1683 | PR #2020
         impl Store {
+            // What: a store from the SOT keys of its place.
+            // Why: Kea, zones and states open one way.
+            // From: Issue #1683 | PR #2020
+            pub fn from_keys(
+                s: &crate::config::Settings,
+                dir: &str,
+                keep: &str,
+                file: Option<&str>,
+            ) -> Result<Self, String> {
+                Ok(Self {
+                    dir: PathBuf::from(s.text(dir)?),
+                    keep: s.num::<usize>(keep)?,
+                    owner: Owner::default(),
+                    file: file.map(|key| s.text(key)).transpose()?,
+                })
+            }
+
             // What: the file that holds snapshot id.
             // Why: flat file, or one dir per id with name.
             // From: Issue #1683 | PR #1980
@@ -11041,6 +11054,13 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                     rows.push(serde_json::json!({"id": id, "created_unix": created}));
                 }
                 Ok(rows)
+            }
+
+            // What: {"snapshots":[{id,created_unix}]}.
+            // Why: Kea and stack states answer one shape.
+            // From: Issue #1683 | PR #2020
+            pub fn listing(&self) -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({"snapshots": self.rows()?}))
             }
 
             // What: one snapshot, parsed as JSON.
@@ -16433,12 +16453,12 @@ mod stack {
     // Why: one file per state; count from the SOT.
     // From: Issue #1683 | PR #2020
     pub(crate) fn state_store(s: &Settings) -> Result<crate::shared::snapshot::Store, String> {
-        Ok(crate::shared::snapshot::Store {
-            dir: PathBuf::from(s.text("STACK_SNAPSHOT_DIR")?),
-            keep: s.num::<usize>("STACK_SNAPSHOT_KEEP")?,
-            owner: crate::shared::fs::Owner::default(),
-            file: Some(s.text("STACK_SNAPSHOT_FILE")?),
-        })
+        crate::shared::snapshot::Store::from_keys(
+            s,
+            "STACK_SNAPSHOT_DIR",
+            "STACK_SNAPSHOT_KEEP",
+            Some("STACK_SNAPSHOT_FILE"),
+        )
     }
 
     // What: the state of the stack now as one value.
@@ -19539,8 +19559,8 @@ mod ui {
     // Why: a restore picks one of them by id.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn stack_snapshots_api(State(app): Shared) -> Response {
-        let rows = crate::stack::state_store(&app.settings()).and_then(|st| st.rows());
-        json_reply(rows.map(|r| Some(json!({"snapshots": r}))), "")
+        let list = crate::stack::state_store(&app.settings()).and_then(|st| st.listing());
+        json_reply(list.map(Some), "")
     }
 
     // What: POST UI_ROUTE_STACK_SNAPSHOT_RESTORE id=...
