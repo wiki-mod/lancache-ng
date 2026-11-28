@@ -9154,10 +9154,13 @@ mod shared {
         pub fn query(id: u16, name: &str, qtype: u16, rd: bool) -> Result<Vec<u8>, String> {
             let mut q = id.to_be_bytes().to_vec();
             q.extend_from_slice(&[u8::from(rd), 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+            // What: the name is read by the one name rule.
+            // Why: '_' for SRV; a question has no '*'.
+            // From: Issue #1683 | PR #2020
+            if !is_dns_name(name, true, false) {
+                return Err(format!("{name:?} is no DNS name"));
+            }
             for label in bare_zone(name).split('.') {
-                if label.is_empty() || label.len() > 63 {
-                    return Err(format!("zone {name:?} is no DNS name"));
-                }
                 q.push(label.len() as u8);
                 q.extend_from_slice(label.as_bytes());
             }
