@@ -19406,16 +19406,24 @@ mod ui {
         Ok(v)
     }
 
+    // What: one watchdog command in services; JSON answer.
+    // Why: check, processed and tidy steps run it alike.
+    // From: Issue #1683 | PR #2020
+    async fn watchdog_json(app: &Stack, args: &[&str]) -> Result<(i64, Value), Fail> {
+        let s = app.settings();
+        let program = s.text("SERVICES_PROGRAM")?;
+        let mut cmd = vec![program.as_str(), "watchdog"];
+        cmd.extend_from_slice(args);
+        exec_json(app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
+            .await
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))
+    }
+
     // What: GET UI_ROUTE_WATCHDOG_CHECK: checks now.
     // Why: REST runs the watchdog check in services.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn watchdog_check(State(app): Shared) -> Page {
-        let s = app.settings();
-        let program = s.text("SERVICES_PROGRAM")?;
-        let cmd = [program.as_str(), "watchdog", "check"];
-        let (_, v) = exec_json(&app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
+        let (_, v) = watchdog_json(&app, &["check"]).await?;
         Ok(axum::Json(v).into_response())
     }
 
@@ -19423,12 +19431,7 @@ mod ui {
     // Why: REST asks services what the CLI asks there.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn watchdog_processed(State(app): Shared) -> Page {
-        let s = app.settings();
-        let program = s.text("SERVICES_PROGRAM")?;
-        let cmd = [program.as_str(), "watchdog", "processed"];
-        let (code, v) = exec_json(&app, &s, &s.text("SERVICES_SERVICE")?, &cmd)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
+        let (code, v) = watchdog_json(&app, &["processed"]).await?;
         if code != 0 {
             let why = v["error"].as_str().unwrap_or("syslog-ng did not answer");
             return Err(Fail(StatusCode::BAD_GATEWAY, why.to_string()));
@@ -19450,16 +19453,11 @@ mod ui {
         if !crate::watchdog::TIDY_STEPS.contains(&op.as_str()) {
             return Err(Fail(StatusCode::NOT_FOUND, "no such step".into()));
         }
-        let s = app.settings();
-        let program = s.text("SERVICES_PROGRAM")?;
-        let mut cmd = vec![program.as_str(), "watchdog", op.as_str()];
+        let mut args = vec![op.as_str()];
         if field(&query, "dry_run") == "1" {
-            cmd.push("--dry-run");
+            args.push("--dry-run");
         }
-        let service = s.text("SERVICES_SERVICE")?;
-        let (_, v) = exec_json(&app, &s, &service, &cmd)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, say(&e)))?;
+        let (_, v) = watchdog_json(&app, &args).await?;
         Ok(axum::Json(v).into_response())
     }
 
