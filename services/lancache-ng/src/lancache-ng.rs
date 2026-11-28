@@ -7248,6 +7248,16 @@ mod shared {
             }
         }
 
+        // What: removes a folder tree; missing is fine.
+        // Why: absent is the state the caller wants.
+        // From: Issue #1683 | PR #2020
+        pub fn delete_tree_if_present(path: &Path) -> io::Result<()> {
+            match fs::remove_dir_all(path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        }
+
         // What: file bytes, or None if the file is absent.
         // Why: a missing file is a normal first state.
         // From: Issue #1683 | PR #2020
@@ -10995,8 +11005,8 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 for id in self.list()?.into_iter().skip(self.keep.max(1)) {
                     let path = self.dir.join(&id);
                     let gone = match self.file {
-                        Some(_) => std::fs::remove_dir_all(&path),
-                        None => std::fs::remove_file(&path),
+                        Some(_) => fs::delete_tree_if_present(&path),
+                        None => fs::delete_if_present(&path),
                     };
                     gone.map_err(|e| format!("{}: {e}", path.display()))?;
                 }
@@ -14202,7 +14212,8 @@ end
                     file.extension().and_then(|x| x.to_str()),
                     Some("crt" | "key")
                 ) {
-                    std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+                    crate::shared::fs::delete_if_present(&file)
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
                 }
             }
             crate::shared::fs::write(
@@ -16237,7 +16248,7 @@ end
             });
             let left = super::fs::delete_if_present(&tmp).map_err(|e| err(&tmp, e));
             finished.and(left)?;
-            std::fs::remove_file(src).map_err(|e| err(src, e))
+            super::fs::delete_if_present(src).map_err(|e| err(src, e))
         }
 
         // What: is a daily job due by its stamp.
