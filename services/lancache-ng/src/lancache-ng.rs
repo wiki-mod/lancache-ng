@@ -15167,22 +15167,41 @@ end
             }))
         }
 
+        // What: what the logs command does.
+        // Why: help and usage read the table.
+        // From: Issue #1683 | PR #2020
+        #[derive(Clone, Copy, PartialEq)]
+        enum Op {
+            Help,
+        }
+
+        // What: the one word of the logs group.
+        // Why: program and number are positions, not words.
+        // From: Issue #1683 | PR #2020
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 1] = [(
+            "help",
+            crate::shared::cli::row(Op::Help, "logs [program] [n]"),
+        )];
+
         // What: lancache-ng logs [program] [n] as JSON.
         // Why: a read; it needs no running ui.
         // From: Issue #1683 | PR #2020
         pub fn run(args: &[String]) -> Result<(), String> {
+            use crate::shared::cli;
             let s = crate::config::Settings::from_process()?;
-            let usage = "usage: logs [program] [n]";
+            let usage = cli::usage(&COMMANDS, |o| *o == Op::Help);
             let (program, n) = match args {
                 [] => (None, None),
-                [h] if h == "help" => return Err(usage.into()),
+                [_] if cli::op_of(&COMMANDS, args.first()) == Some(Op::Help) => {
+                    return Err(usage);
+                }
                 [p] if p.parse::<usize>().is_ok() => (None, p.parse().ok()),
                 [p] => (Some(p.as_str()), None),
                 [p, n] => (
                     Some(p.as_str()),
                     Some(n.parse().map_err(|_| format!("{n}: no number"))?),
                 ),
-                _ => return Err(usage.into()),
+                _ => return Err(usage),
             };
             println!("{}", program_logs(&s, program, n)?);
             Ok(())
@@ -22389,10 +22408,8 @@ mod watchdog {
             // From: Issue #1683 | PR #2020
             (Some(_), None) => {
                 let steps = TIDY_STEPS.join(" | ");
-                let own = cli::forms(&COMMANDS, " | ");
-                return Err(format!(
-                    "commands: {own} | {steps} [--dry-run] (none: check loop)"
-                ));
+                let own = cli::help(&COMMANDS);
+                return Err(format!("{own} | {steps} [--dry-run] (none: check loop)"));
             }
         }
         use tokio::signal::unix::{SignalKind, signal};
