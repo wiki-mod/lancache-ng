@@ -1587,6 +1587,7 @@ mod cachehamster {
         last_beat: std::time::Instant,
         queue: std::collections::VecDeque<Frame>,
         limit: Duration,
+        max_body: u64,
     }
 
     // What: methods of the CM session Cm.
@@ -1623,6 +1624,7 @@ mod cachehamster {
                 last_beat: std::time::Instant::now(),
                 queue: Default::default(),
                 limit: cfg.limit,
+                max_body: cfg.max_body,
             };
             // What: own login id per CM connection.
             // Why: jobs logged each other off (eresult 34)
@@ -1717,12 +1719,11 @@ mod cachehamster {
                 .ok_or("Multi without body")?
                 .to_vec();
             let data = if pb_int(&multi, 1).unwrap_or(0) > 0 {
-                use std::io::Read as _;
-                let mut out = Vec::new();
-                flate2::read::GzDecoder::new(packed.as_slice())
-                    .read_to_end(&mut out)
-                    .map_err(|e| format!("Multi gzip: {e}"))?;
-                out
+                http::read_unpacked(
+                    flate2::read::GzDecoder::new(packed.as_slice()),
+                    self.max_body,
+                    "Multi gzip",
+                )?
             } else {
                 packed
             };
@@ -1871,19 +1872,18 @@ mod cachehamster {
     // What: chunk ids from a zipped binary manifest.
     // Why: chunk SHA-1 names CDN URL; data stays unread.
     // From: Issue #871 | PR #1858
-    fn chunks_of(zipped: &[u8]) -> Result<Vec<(String, u64)>, String> {
-        use std::io::Read as _;
+    fn chunks_of(zipped: &[u8], max: u64) -> Result<Vec<(String, u64)>, String> {
         // What: magic number of a manifest payload.
         // Why: a manifest without it is no manifest.
         // From: Issue #1683 | PR #2020
         const PAYLOAD_MAGIC: u32 = 0x71F6_17D0;
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zipped))
             .map_err(|e| format!("manifest zip: {e}"))?;
-        let mut raw = Vec::new();
-        zip.by_index(0)
-            .map_err(|e| format!("manifest zip: {e}"))?
-            .read_to_end(&mut raw)
-            .map_err(|e| format!("manifest zip: {e}"))?;
+        let raw = http::read_unpacked(
+            zip.by_index(0).map_err(|e| format!("manifest zip: {e}"))?,
+            max,
+            "manifest zip",
+        )?;
         let word = |at: usize| le32(&raw, at, "manifest");
         if word(0)? != PAYLOAD_MAGIC {
             return Err("manifest payload magic missing".into());
@@ -1972,7 +1972,7 @@ mod cachehamster {
                 continue;
             }
             let body = http::read_body(resp, cfg.max_body, &url).await?;
-            for (sha, n) in chunks_of(&body)? {
+            for (sha, n) in chunks_of(&body, cfg.max_body)? {
                 urls.push(format!(
                     "http://{}{DEPOT_PATH}{depot}/chunk/{sha}",
                     cfg.cdn_host
@@ -7938,6 +7938,26 @@ mod shared {
         // From: Issue #1683 | PR #2020
         pub fn max_body(s: &Settings) -> Result<u64, String> {
             s.uint("HTTP_RESPONSE_MAX_BYTES")
+        }
+
+        // What: unpacked bytes of a reader, at most max.
+        // Why: a packed answer must not outgrow the limit.
+        // From: Issue #1683 | PR #2020
+        pub fn read_unpacked(
+            mut from: impl std::io::Read,
+            max: u64,
+            what: &str,
+        ) -> Result<Vec<u8>, String> {
+            use std::io::Read as _;
+            let mut out = Vec::new();
+            (&mut from)
+                .take(max.saturating_add(1))
+                .read_to_end(&mut out)
+                .map_err(|e| format!("{what}: {e}"))?;
+            if out.len() as u64 > max {
+                return Err(format!("{what}: unpacked over {max} bytes, limit {max}"));
+            }
+            Ok(out)
         }
 
         // What: a whole answer body, at most max bytes.
