@@ -4079,7 +4079,7 @@ mod dhcp {
             .filter(|o| o.get("code").is_some())
             .collect();
         json!({
-            "id": sn["id"],
+            "id": sn["id"].as_u64(),
             "subnet": sn["subnet"],
             "gateway": option_data(sn, ROUTERS.name),
             "dns_primary": dns.first().cloned().unwrap_or_default(),
@@ -4130,7 +4130,7 @@ mod dhcp {
         for sn in kea_conf::subnets(cfg) {
             for r in sn["reservations"].as_array().into_iter().flatten() {
                 reservations.push(json!({
-                    "subnet_id": sn["id"], "mac": r["hw-address"],
+                    "subnet_id": sn["id"].as_u64(), "mac": r["hw-address"],
                     "ip": r["ip-address"], "hostname": r["hostname"],
                 }));
             }
@@ -4152,7 +4152,7 @@ mod dhcp {
             let ends = l["cltt"].as_u64().unwrap_or(0) + l["valid-lft"].as_u64().unwrap_or(0);
             leases.push(json!({
                 "ip": l["ip-address"], "mac": l["hw-address"], "hostname": l["hostname"],
-                "subnet_id": l["subnet-id"], "expires": ends.to_string(),
+                "subnet_id": l["subnet-id"].as_u64(), "expires": ends.to_string(),
             }));
         }
         Ok(Some(json!({
