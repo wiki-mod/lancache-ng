@@ -10620,15 +10620,27 @@ mod shared {
             let (&[y, m, d], &[hh, mm, ss]) = (&n[..], &c[..]) else {
                 return Err(bad());
             };
-            // What: days since 1970-01-01 (civil calendar).
-            // Why: no date crate; Hinnant's days_from_civil
-            // From: Issue #1683 | PR #1980
-            let y = if m <= 2 { y - 1 } else { y };
-            let era = y.div_euclid(400);
-            let yoe = y - era * 400;
-            let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-            let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
-            let end = days * 86_400 + hh * 3_600 + mm * 60 + ss;
+            // What: the end as unix seconds (UTC) and days.
+            // Why: jiff owns calendar math; no own days.
+            // From: Issue #1683 | PR #2020
+            let part = |v: i64| i8::try_from(v).map_err(|_| bad());
+            let stamp = i16::try_from(y)
+                .map_err(|_| bad())
+                .and_then(|y| {
+                    jiff::civil::DateTime::new(
+                        y,
+                        part(m)?,
+                        part(d)?,
+                        part(hh)?,
+                        part(mm)?,
+                        part(ss)?,
+                        0,
+                    )
+                    .map_err(|_| bad())
+                })
+                .and_then(|dt| jiff::tz::TimeZone::UTC.to_timestamp(dt).map_err(|_| bad()))?;
+            let end = stamp.as_second();
+            let days = end.div_euclid(86_400);
             let now =
                 i64::try_from(crate::shared::clock::unix_secs()).map_err(|e| e.to_string())?;
             let day_secs = i64::try_from(crate::shared::tidy::DAY).map_err(|e| e.to_string())?;
