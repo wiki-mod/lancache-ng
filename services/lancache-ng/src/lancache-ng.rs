@@ -3100,7 +3100,18 @@ mod config {
         // Why: container keys are host paths, fixed SOT.
         // From: Issue #1683 | PR #2020
         pub fn writable(self) -> bool {
-            !matches!(self, Self::Container | Self::Fixed)
+            self.refusal().is_none()
+        }
+
+        // What: why a save may not set this effect's key.
+        // Why: writable and the refusal read one rule.
+        // From: Issue #1683 | PR #2020
+        pub fn refusal(self) -> Option<&'static str> {
+            match self {
+                Self::Container => Some("a container setting; setup.sh sets it"),
+                Self::Fixed => Some("fixed by the SOT; no setting changes it"),
+                _ => None,
+            }
         }
 
         // What: the SOT word of an effect.
@@ -3471,20 +3482,11 @@ mod config {
                     over.display()
                 ));
             }
-            // What: a container setting is refused here.
-            // Why: in .env the name is a Compose host path.
-            // From: Issue #1683 | PR #2017
-            if current
-                .spec(key)
-                .is_some_and(|s| s.effect == Effect::Container)
-            {
-                return Err(format!("{key}: a container setting; setup.sh sets it"));
-            }
-            // What: a fixed setting is refused here.
-            // Why: no save sets a command or a fence.
+            // What: a container or fixed key is refused.
+            // Why: host paths and commands are no input.
             // From: Issue #1683 | PR #2020
-            if current.spec(key).is_some_and(|s| s.effect == Effect::Fixed) {
-                return Err(format!("{key}: fixed by the SOT; no setting changes it"));
+            if let Some(why) = current.spec(key).and_then(|s| s.effect.refusal()) {
+                return Err(format!("{key}: {why}"));
             }
             if !raw.is_empty() {
                 current.validate(key, raw)?;
