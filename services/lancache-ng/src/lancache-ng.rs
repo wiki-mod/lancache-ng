@@ -4892,7 +4892,7 @@ mod dns {
             // Why: a dead upstream must not restart dns.
             // From: Issue #1683 | PR #2020
             Op::Healthcheck => healthcheck(&Settings::from_process()?).await,
-            // What: soa-probe ZONE [http/https/auth/ip#n]
+            // What: soa-probe ZONE [http/https/auth/ip]
             // Why: the serial one server holds; no ui.
             // From: Issue #1683 | PR #2020
             Op::SoaProbe => match &args[1..] {
@@ -4905,9 +4905,9 @@ mod dns {
                         _ => Err(format!("soa-probe: {} does not serve {zone}", v["server"])),
                     }
                 }
-                _ => Err("usage: soa-probe <zone> [http|https|auth|ip#port]".into()),
+                _ => Err("usage: soa-probe <zone> [http|https|auth|ip[:port]]".into()),
             },
-            // What: query NAME TYPE [http/https/auth/ip#n]
+            // What: query NAME TYPE [http/https/auth/ip]
             // Why: a real DNS answer; needs no running ui.
             // From: Issue #1683 | PR #2020
             Op::Query => match &args[1..] {
@@ -4917,7 +4917,7 @@ mod dns {
                     println!("{}", query(&s, n, ty, target).await?);
                     Ok(())
                 }
-                _ => Err("usage: query <name> <type> [http|https|auth|ip#port]".into()),
+                _ => Err("usage: query <name> <type> [http|https|auth|ip[:port]]".into()),
             },
             // What: DNSSEC anchors, proven zones, NTAs.
             // Why: a read; it needs no running ui.
@@ -6189,7 +6189,7 @@ mod dns {
     // From: Issue #1683 | PR #2020
     fn target_addr(s: &Settings, target: &str) -> Result<(SocketAddr, bool, Duration), String> {
         let port = s.num::<u16>("DNS_PORT")?;
-        // What: http, https, auth or an address.
+        // What: http, https, auth or ip[:port], [v6]:port.
         // Why: the SOT names each server; auth gets no RD.
         // From: Issue #1683 | PR #2020
         let (host, port, rd) = match target {
@@ -6203,13 +6203,10 @@ mod dns {
                 s.num::<u16>("PDNS_AUTH_PORT")?,
                 false,
             ),
-            other => match other.rsplit_once('#') {
-                Some((ip, p)) => {
-                    let p = p.parse().map_err(|_| format!("{p}: no port number"))?;
-                    (ip.to_string(), p, true)
-                }
-                None => (other.to_string(), port, true),
-            },
+            other => {
+                let (ip, p) = crate::shared::dns::parse_endpoint(other, false)?;
+                (ip, p.unwrap_or(port), true)
+            }
         };
         let addr = SocketAddr::new(crate::shared::dns::parse_ip(&host)?, port);
         let wait = Duration::from_secs(s.uint("DNS_QUERY_WAIT_SECONDS")?);
