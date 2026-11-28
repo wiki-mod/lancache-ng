@@ -2341,6 +2341,17 @@ mod cachehamster {
             window,
             zone: PathBuf::from(c.s.text("LOCALTIME_FILE")?),
         };
+        // What: the REST route on CACHEHAMSTER_SOCKET.
+        // Why: ui and CLI reach the daemon, not exec.
+        // From: Issue #871 | PR #2020
+        let route = c.s.text("UI_ROUTE_HAMSTER_API")?;
+        let router = axum::Router::new().route(&route, axum::routing::post(api));
+        let serve = http::serve_unix(c.s.text("CACHEHAMSTER_SOCKET")?, router);
+        tokio::spawn(async move {
+            if let Err(e) = serve.await {
+                eprintln!("cachehamster: REST socket: {e}");
+            }
+        });
         let mut last = clock::unix_secs();
         let mut shown = (0usize, 0u64);
         loop {
@@ -2401,6 +2412,8 @@ mod cachehamster {
         Plain,
         AppId,
         Url,
+        Id,
+        Job,
     }
 
     // What: a command row: the action and its REST use.
@@ -2441,7 +2454,7 @@ mod cachehamster {
             crate::shared::cli::row(
                 Cmd {
                     op: Op::Healthcheck,
-                    rest: Rest::No,
+                    rest: Rest::Plain,
                 },
                 "healthcheck",
             ),
@@ -2481,7 +2494,7 @@ mod cachehamster {
             crate::shared::cli::row(
                 Cmd {
                     op: Op::Logout,
-                    rest: Rest::No,
+                    rest: Rest::Plain,
                 },
                 "logout",
             ),
@@ -2561,7 +2574,7 @@ mod cachehamster {
             crate::shared::cli::row(
                 Cmd {
                     op: Op::Add,
-                    rest: Rest::No,
+                    rest: Rest::Job,
                 },
                 "add <name> <now|later|at:UNIX> <app:ID|URL,URL>",
             ),
@@ -2571,7 +2584,7 @@ mod cachehamster {
             crate::shared::cli::row(
                 Cmd {
                     op: Op::Start,
-                    rest: Rest::No,
+                    rest: Rest::Id,
                 },
                 "start <id>",
             ),
@@ -2581,7 +2594,7 @@ mod cachehamster {
             crate::shared::cli::row(
                 Cmd {
                     op: Op::Cancel,
-                    rest: Rest::No,
+                    rest: Rest::Id,
                 },
                 "cancel <id>",
             ),
@@ -2591,7 +2604,7 @@ mod cachehamster {
             crate::shared::cli::row(
                 Cmd {
                     op: Op::Remove,
-                    rest: Rest::No,
+                    rest: Rest::Id,
                 },
                 "remove <id>",
             ),
@@ -2605,23 +2618,102 @@ mod cachehamster {
         crate::shared::cli::pick(&COMMANDS, word).map_or(Rest::No, |c| c.op.rest)
     }
 
+    // What: the command of one REST call: op and fields.
+    // Why: ui, CLI and REST reach a command one way.
+    // From: Issue #871 | PR #2020
+    fn rest_args(op: &str, f: &BTreeMap<String, String>) -> Option<Vec<String>> {
+        let get = |k: &str| f.get(k).cloned().unwrap_or_default();
+        let one = |w: &str, v: String| Some(vec![w.to_string(), v]);
+        match op.split_once('-') {
+            // What: lookup-ID and evict-ID name one app.
+            // Why: a library row checks or frees a game.
+            // From: Issue #871 | PR #1991
+            Some((cmd, id)) if rest_of(cmd) == Rest::AppId => one(cmd, id.to_string()),
+            _ => match rest_of(op) {
+                Rest::Plain => Some(vec![op.to_string()]),
+                Rest::Url if !get("url").is_empty() => one(op, get("url")),
+                Rest::Id if !get("id").is_empty() => one(op, get("id")),
+                Rest::Job => Some(vec![op.to_string(), get("name"), get("when"), get("what")]),
+                _ => None,
+            },
+        }
+    }
+
+    // What: REST path word and fields of CLI words.
+    // Why: the CLI asks the daemon; rest_args reads it.
+    // From: Issue #871 | PR #2020
+    fn rest_call(args: &[String]) -> Option<(String, Vec<(String, String)>)> {
+        let word = args.first()?;
+        let field = |k: &str, i: usize| args.get(i).map(|v| (k.to_string(), v.clone()));
+        match rest_of(word) {
+            Rest::No => None,
+            Rest::Plain => Some((word.clone(), vec![])),
+            Rest::AppId => Some((format!("{word}-{}", args.get(1)?), vec![])),
+            Rest::Url => Some((word.clone(), vec![field("url", 1)?])),
+            Rest::Id => Some((word.clone(), vec![field("id", 1)?])),
+            Rest::Job => Some((
+                word.clone(),
+                vec![field("name", 1)?, field("when", 2)?, field("what", 3)?],
+            )),
+        }
+    }
+
+    // What: POST UI_ROUTE_HAMSTER_API in the daemon.
+    // Why: commands run where the jobs and token live.
+    // From: Issue #871 | PR #2020
+    async fn api(
+        axum::extract::Path(op): axum::extract::Path<String>,
+        axum::Form(fields): axum::Form<BTreeMap<String, String>>,
+    ) -> axum::response::Response {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        let Some(args) = rest_args(&op, &fields) else {
+            let body = json!({"error": "no such call"});
+            return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+        };
+        let done = match (Ctx::load(), op_of(&args)) {
+            (Ok(c), Ok(op)) => act(c, op, &args).await,
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        };
+        match done {
+            Ok(v) => axum::Json(v).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": e}))).into_response(),
+        }
+    }
+
     // What: run one command and answer as JSON.
-    // Why: the UI calls these through docker exec.
+    // Why: the daemon REST route and the CLI run it.
     // From: Issue #871 | PR #1980
     async fn command(c: Ctx, args: &[String]) -> Result<Value, String> {
+        match op_of(args)? {
+            Op::Daemon => daemon(c).await.map(|()| Value::Null),
+            op => act(c, op, args).await,
+        }
+    }
+
+    // What: the command word of the arguments.
+    // Why: none runs the daemon; a wrong one lists all.
+    // From: Issue #871 | PR #2020
+    fn op_of(args: &[String]) -> Result<Op, String> {
         use crate::shared::cli;
-        let op = match args.first().map(String::as_str) {
-            None => Op::Daemon,
+        match args.first().map(String::as_str) {
+            None => Ok(Op::Daemon),
             Some(word) => cli::pick(&COMMANDS, word)
                 .map(|row| row.op.op)
-                .ok_or_else(|| cli::help(&COMMANDS))?,
-        };
+                .ok_or_else(|| cli::help(&COMMANDS)),
+        }
+    }
+
+    // What: one command but the daemon, as JSON.
+    // Why: the REST route never starts a daemon.
+    // From: Issue #871 | PR #2020
+    async fn act(c: Ctx, op: Op, args: &[String]) -> Result<Value, String> {
         // What: the HTTP client, built when one is needed.
         // Why: the daemon and local commands need none.
         // From: Issue #871 | PR #2020
         let client = || http::client(&c.s);
         match op {
-            Op::Daemon => daemon(c).await.map(|()| Value::Null),
+            Op::Daemon => Err("the daemon runs only as the service".into()),
             Op::Status => status(&c),
             // What: probe: the daemon wrote jobs lately.
             // Why: the same rule as daemon_running.
@@ -2668,9 +2760,32 @@ mod cachehamster {
             println!("{}", crate::shared::cli::help(&COMMANDS));
             return std::process::ExitCode::SUCCESS;
         }
-        let result = match Ctx::load() {
-            Err(e) => Err(e),
-            Ok(c) => command(c, &args).await,
+        // What: REST commands go to the running daemon.
+        // Why: they run where jobs and token live.
+        // From: Issue #871 | PR #2020
+        let result = match (
+            rest_of(args.first().map_or("", String::as_str)),
+            rest_call(&args),
+        ) {
+            (Rest::No, _) => match Ctx::load() {
+                Err(e) => Err(e),
+                Ok(c) => command(c, &args).await,
+            },
+            (_, None) => Err(match op_of(&args) {
+                Ok(op) => crate::shared::cli::usage(&COMMANDS, |c| c.op == op),
+                Err(e) => e,
+            }),
+            (_, Some((word, fields))) => match Settings::from_process() {
+                Err(e) => Err(e),
+                Ok(s) => match s.text("UI_ROUTE_HAMSTER_API") {
+                    Err(e) => Err(e),
+                    Ok(to) => {
+                        let route = crate::shared::fill(to, &[("op", word)]);
+                        let body = http::Body::Form(fields);
+                        http::call(&s, http::Peer::Cachehamster, &route, body).await
+                    }
+                },
+            },
         };
         match result {
             // What: a check with "ok": false exits 1.
@@ -7894,6 +8009,7 @@ mod shared {
         pub enum Peer {
             Ui,
             Watchdog,
+            Cachehamster,
         }
 
         impl Peer {
@@ -7907,6 +8023,11 @@ mod shared {
                         "WATCHDOG_SOCKET",
                         "WATCHDOG_API_TIMEOUT_SECONDS",
                         "watchdog",
+                    ),
+                    Peer::Cachehamster => (
+                        "CACHEHAMSTER_SOCKET",
+                        "CACHEHAMSTER_API_TIMEOUT_SECONDS",
+                        "cachehamster",
                     ),
                 }
             }
@@ -17104,22 +17225,8 @@ mod stack {
         Ok((cmd.iter().map(|c| c.to_string()).collect(), code, text))
     }
 
-    // What: run a command; read its last JSON line.
-    // Why: cachehamster and watchdog answer in JSON.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn exec_json(
-        app: &Stack,
-        s: &Settings,
-        service: &str,
-        cmd: &[&str],
-    ) -> Result<(i64, Value), Fault> {
-        let (code, out) = exec_in(app, s, service, cmd).await?;
-        let v = last_json(&out).map_err(|e| format!("{}: {e}", cmd.join(" ")))?;
-        Ok((code, v))
-    }
-
     // What: the last JSON line of a command output.
-    // Why: one reader for exec_json and exec_row users.
+    // Why: exec_row users read the answer so.
     // From: Issue #1683 | PR #2020
     pub(crate) fn last_json(out: &str) -> Result<Value, String> {
         let line = out
@@ -17535,7 +17642,6 @@ mod stack {
 // Why: owns settings; renders and applies configs.
 // From: Issue #1683 | PR #1858
 mod ui {
-    use crate::cachehamster::{Rest, rest_of};
     use crate::config::{self, Settings};
     use crate::dhcp::{kea_change, kea_snapshots, kea_state, kea_store, probe_cli};
     use crate::dns::{
@@ -17551,7 +17657,7 @@ mod ui {
     use crate::shared::{access, docker, fs, http, human, render, secret};
     use crate::stack::Stack;
     use crate::stack::{
-        Fields, apply_all, apply_now, check_change, commit, commit_with, container_of, exec_json,
+        Fields, apply_all, apply_now, check_change, commit, commit_with, container_of,
         issue_and_reload, list_change, render_now, render_plan, set_wanted, single_field,
     };
     use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
@@ -19542,31 +19648,26 @@ mod ui {
         })
     }
 
-    // What: one cachehamster command; JSON answer.
-    // Why: it runs in the services container.
-    // From: Issue #871 | PR #1980
-    pub(crate) async fn hamster(app: &Stack, args: &[&str]) -> Result<Value, String> {
-        let s = app.settings();
-        let program = s.text("CACHEHAMSTER_PROGRAM")?;
-        let mut cmd = vec![program.as_str(), "cachehamster"];
-        cmd.extend_from_slice(args);
-        let (code, v) = exec_json(app, &s, &s.text("CACHEHAMSTER_SERVICE")?, &cmd)
+    // What: one cachehamster REST call; JSON answer.
+    // Why: the daemon runs it; the ui only asks.
+    // From: Issue #871 | PR #2020
+    pub(crate) async fn hamster(
+        s: &Settings,
+        op: &str,
+        fields: Vec<(String, String)>,
+    ) -> Result<Value, Fail> {
+        use crate::shared::http::{Body, Peer, send};
+        let route = crate::shared::fill(s.text("UI_ROUTE_HAMSTER_API")?, &[("op", op.to_string())]);
+        let (status, text) = send(s, Peer::Cachehamster, &route, Body::Form(fields))
             .await
-            .map_err(|e| say(&e))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let v: Value = serde_json::from_str(&text).unwrap_or_default();
         if let Some(e) = v.get("error").and_then(Value::as_str) {
             // What: service text behind a translated lead.
             // Why: Steam details stay as the service wrote.
             // From: Issue #871 | PR #1980
-            return Err(format!("{} {e}", tr("hamster_says")));
-        }
-        // What: a failed check still answers its JSON.
-        // Why: REST shows which part failed.
-        // From: Issue #871 | PR #2020
-        if code != 0 && v.get("ok") != Some(&Value::Bool(false)) {
-            return Err(crate::shared::fill(
-                tr("hamster_exit"),
-                &[("x", code.to_string())],
-            ));
+            return Err(Fail(code, format!("{} {e}", tr("hamster_says"))));
         }
         Ok(v)
     }
@@ -19613,9 +19714,9 @@ mod ui {
     // From: Issue #871 | PR #1980
     pub(crate) async fn cachehamster(State(app): Shared, Extension(csrf): Extension<Csrf>) -> Page {
         let mut ctx = Context::new();
-        match hamster(&app, &["status"]).await {
+        match hamster(&app.settings(), "status", vec![]).await {
             Ok(v) => ctx.insert("hamster", &v),
-            Err(e) => ctx.insert("hamster_error", &e),
+            Err(Fail(_, e)) => ctx.insert("hamster_error", &e),
         }
         app.page("cachehamster.html", ctx, &csrf)
     }
@@ -19650,18 +19751,28 @@ mod ui {
         if matches!(op, HamsterOp::Add) && what.trim().is_empty() {
             return Err(bad_request(tr("err_hamster_empty")));
         }
-        // What: the cachehamster command of each action.
-        // Why: daemon protocol names commands, not paths.
-        // From: Issue #871 | PR #1985
-        let args: Vec<&str> = match op {
-            HamsterOp::Add => vec!["add", &name, &when, &what],
-            HamsterOp::Start => vec!["start", &id],
-            HamsterOp::Cancel => vec!["cancel", &id],
-            HamsterOp::Remove => vec!["remove", &id],
-            HamsterOp::Logout => vec!["logout"],
+        // What: the cachehamster REST call of each action.
+        // Why: the daemon reads its fields by the word.
+        // From: Issue #871 | PR #2020
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let (word, fields) = match op {
+            HamsterOp::Add => (
+                "add",
+                vec![
+                    pair("name", &name),
+                    pair("when", &when),
+                    pair("what", &what),
+                ],
+            ),
+            HamsterOp::Start => ("start", vec![pair("id", &id)]),
+            HamsterOp::Cancel => ("cancel", vec![pair("id", &id)]),
+            HamsterOp::Remove => ("remove", vec![pair("id", &id)]),
+            HamsterOp::Logout => ("logout", vec![]),
         };
-        let back = app.settings().text("UI_PAGE_CACHEHAMSTER")?;
-        finish(hamster(&app, &args).await.map(drop), &back)
+        let s = app.settings();
+        let back = s.text("UI_PAGE_CACHEHAMSTER")?;
+        let done = hamster(&s, word, fields).await.map(drop);
+        finish(done.map_err(|Fail(_, e)| e), &back)
     }
 
     // What: JSON calls: QR login and library.
@@ -19676,23 +19787,11 @@ mod ui {
     ) -> Page {
         csrf.check_header(&headers)?;
         let url = field(&query, "url");
-        // What: lookup-ID and evict-ID carry one app id.
-        // Why: the library row checks or frees one game.
-        // From: Issue #871 | PR #1991
-        let args: Vec<&str> = match op.split_once('-') {
-            Some((cmd, id)) if rest_of(cmd) == Rest::AppId && id.parse::<u32>().is_ok() => {
-                vec![cmd, id]
-            }
-            // What: fetch-check?url= probes one address.
-            // Why: REST runs the CLI check of the owner.
-            // From: Issue #871 | PR #2020
-            _ if rest_of(&op) == Rest::Url && !url.is_empty() => vec![op.as_str(), &url],
-            _ if rest_of(&op) == Rest::Plain => vec![op.as_str()],
-            _ => return Err(Fail(StatusCode::NOT_FOUND, "no such call".into())),
+        let fields = match url.is_empty() {
+            true => vec![],
+            false => vec![("url".to_string(), url)],
         };
-        let v = hamster(&app, &args)
-            .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
+        let v = hamster(&app.settings(), &op, fields).await?;
         // What: freed bytes leave the shown sum at once.
         // Why: the sum must not lag behind a wipe.
         // From: Issue #871 | PR #1991

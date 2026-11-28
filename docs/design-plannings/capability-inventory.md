@@ -199,7 +199,7 @@ Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/
   `processes`) and only while it runs; `/api/watchdog/programs` lists them;
   `docker::Api` also reads container state and statistics.
 - **Watchdog REST.** The watchdog serves check, processed, programs, tidy
-  steps and program actions on `WATCHDOG_SOCKET` (volume `watchdog-api`,
+  steps and program actions on `WATCHDOG_SOCKET` (volume `services-api`,
   services and ui only); `lancache-ng watchdog ...` and `lancache-ng system
   service|programs` call it there, so they run only in the watchdog, also
   without a running ui.

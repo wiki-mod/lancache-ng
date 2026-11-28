@@ -168,10 +168,10 @@ services:
       # From: Issue #1683 | PR #2017
       - .:${SOT_STACK_ENV_DIR}:ro
       - watchdog-status:${SOT_STATUS_DIR}
-      # What: the watchdog REST socket, shared with ui.
-      # Why: ui and CLI call the watchdog, no exec.
+      # What: watchdog and cachehamster REST sockets.
+      # Why: ui and CLI call them, no exec.
       # From: Issue #1683 | PR #2020
-      - watchdog-api:${SOT_WATCHDOG_SOCKET_DIR}
+      - services-api:${SOT_SERVICES_API_DIR}
       # What: stack CA, read only, for the expiry check.
       # Why: WATCHDOG_CERT_FILES names it; it was missing.
       # From: Issue #1683 | PR #1980
@@ -392,10 +392,10 @@ services:
       - *mount-kea-data
       - ${SYSLOG_NG_LOG_DIR:?SYSLOG_NG_LOG_DIR is required}:${SOT_SYSLOG_LOG_ROOT}:ro
       - watchdog-status:${SOT_STATUS_DIR}:ro
-      # What: the watchdog REST socket, shared with ui.
-      # Why: ui and CLI call the watchdog, no exec.
+      # What: watchdog and cachehamster REST sockets.
+      # Why: ui and CLI call them, no exec.
       # From: Issue #1683 | PR #2020
-      - watchdog-api:${SOT_WATCHDOG_SOCKET_DIR}
+      - services-api:${SOT_SERVICES_API_DIR}
       # What: pages, texts and css from the checkout.
       # Why: page edits need no image build.
       # From: Issue #1683 | PR #1991
@@ -436,7 +436,7 @@ volumes:
   proxy-certs:
   dns-config-snapshots:
   watchdog-status:
-  watchdog-api:
+  services-api:
   retention-state:
   ui-data:
   lancache-config:
