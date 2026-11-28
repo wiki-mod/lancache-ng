@@ -10927,21 +10927,61 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
                 out += &format!("logmatch {name} {file} {every} {regex}\n");
             }
             if s.flag("SNMP_TRAPS")? {
+                let sink = transport(&text("SNMP_TRAP_SINK")?)
+                    .map(|t| snmpd_text(&t))
+                    .map_err(|e| format!("SNMP_TRAP_SINK: {e}"))?;
                 out += &format!(
-                    "trap2sink {} {community}\ndefaultMonitors yes\nlinkUpDownNotifications yes\n",
-                    text("SNMP_TRAP_SINK")?
+                    "trap2sink {sink} {community}\ndefaultMonitors yes\nlinkUpDownNotifications yes\n"
                 );
             }
             Ok(out)
         }
 
-        // What: host and port of an SNMP target text.
-        // Why: the endpoint reader checks the host name.
+        // What: an SNMP transport: prefix, host, port.
+        // Why: queries and trap2sink read one form.
+        // From: Issue #1683 | PR #2020
+        struct Transport {
+            prefix: Option<&'static str>,
+            host: String,
+            port: Option<u16>,
+        }
+
+        // What: read [udp:|udp6:|tcp:|tcp6:]host[:port].
+        // Why: the host goes through the endpoint reader.
+        // From: Issue #1683 | PR #2020
+        fn transport(text: &str) -> Result<Transport, String> {
+            let (prefix, rest) = ["udp", "udp6", "tcp", "tcp6"]
+                .into_iter()
+                .find_map(|p| Some((Some(p), text.strip_prefix(p)?.strip_prefix(':')?)))
+                .unwrap_or((None, text));
+            let (host, port) = crate::shared::dns::parse_endpoint(rest, true)?;
+            Ok(Transport { prefix, host, port })
+        }
+
+        // What: the transport target in snmpd's own text.
+        // Why: an IPv6 address gets brackets.
+        // From: Issue #1683 | PR #2020
+        fn snmpd_text(t: &Transport) -> String {
+            let at = match t.port {
+                Some(port) => crate::shared::dns::host_port(&t.host, port),
+                None if crate::shared::dns::is_ipv6_text(&t.host) => format!("[{}]", t.host),
+                None => t.host.clone(),
+            };
+            match t.prefix {
+                Some(p) => format!("{p}:{at}"),
+                None => at,
+            }
+        }
+
+        // What: host and port of an SNMP target to query.
+        // Why: snmp2 asks over UDP only; tcp is refused.
         // From: Issue #1683 | PR #2020
         fn target_of(target: &str) -> Result<(String, u16), String> {
-            let rest = target.strip_prefix("udp:").unwrap_or(target);
-            let (host, port) = crate::shared::dns::parse_endpoint(rest, true)?;
-            Ok((host, port.unwrap_or(DEFAULT_PORT)))
+            let t = transport(target)?;
+            if matches!(t.prefix, Some("tcp" | "tcp6")) {
+                return Err(format!("SNMP target {target}: queries use UDP only"));
+            }
+            Ok((t.host, t.port.unwrap_or(DEFAULT_PORT)))
         }
 
         // What: UDP port of an SNMP agent.
