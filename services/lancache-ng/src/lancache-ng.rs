@@ -11498,7 +11498,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
             let allowed = s.list("NTP_ALLOWED_CLIENT_CIDRS")?;
             let drift = s.text("NTP_DRIFT_FILE")?;
             let makestep = s.text("NTP_MAKESTEP")?;
-            if !drift.starts_with('/') || !crate::config::safe(HOSTISH, &drift) {
+            if !crate::config::safe(Syntax::Path, &drift) || !crate::config::safe(HOSTISH, &drift) {
                 return Err(format!("NTP_DRIFT_FILE={drift} is no plain absolute path"));
             }
             if !crate::config::safe(Syntax::Line, &makestep) {
@@ -15722,7 +15722,10 @@ end
                         .find(|g| g.name == *name)
                         .ok_or_else(|| format!("{name}: no such graph"))?;
                     let png = png(&s, &g, range, false)?;
-                    std::fs::write(out, &png).map_err(|e| format!("{out}: {e}"))?;
+                    use crate::shared::fs::{self, Owner, Place};
+                    let mode = s.mode("STATS_GRAPH_FILE_MODE")?;
+                    fs::write(Path::new(out), &png, mode, Place::Replace, Owner::default())
+                        .map_err(|e| format!("{out}: {e}"))?;
                     println!(
                         "{}",
                         serde_json::json!({"graph": name, "file": out, "bytes": png.len()})
@@ -16057,8 +16060,8 @@ end
         // Why: a bad setting must never clean elsewhere.
         // From: Issue #1683 | PR #1980
         pub fn inside(raw: &str, prefix: &str) -> Result<PathBuf, String> {
-            if !raw.starts_with('/') {
-                return Err(format!("{raw} is not an absolute path"));
+            if !crate::config::safe(crate::config::Syntax::Path, raw) {
+                return Err(format!("{raw} is not a plain absolute path"));
             }
             let real = resolved(Path::new(raw)).map_err(|e| format!("{raw}: {e}"))?;
             let prefix = Path::new(prefix);
@@ -18201,7 +18204,11 @@ mod ui {
     ) -> Page {
         csrf.check(&form)?;
         let s = app.settings();
-        let is_on = |p: &String| form.get(&format!("on_{p}")).is_some_and(|v| v == "true");
+        let is_on = |p: &String| {
+            form.get(&format!("on_{p}"))
+                .and_then(|v| config::parse_true_false(v))
+                == Some(true)
+        };
         let muted: Vec<String> = s
             .list("SYSLOG_PROGRAMS")?
             .into_iter()

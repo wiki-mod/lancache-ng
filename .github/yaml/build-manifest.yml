@@ -1753,6 +1753,7 @@ runtime:
     - STATS_SERVICE_GRAPHS=machine.network:in=host:rx=DERIVE+out=host:tx=DERIVE proxy.requests:per_s=nginx:requests=DERIVE proxy.connections:active=nginx:active=GAUGE+waiting=nginx:waiting=GAUGE @DNS_SERVICE@.queries:recursor=recursor:questions=DERIVE+upstream=recursor:all-outqueries=DERIVE+auth=auth:udp-queries=DERIVE @DNS_SERVICE@.cache:hits=recursor:cache-hits=DERIVE+misses=recursor:cache-misses=DERIVE @DHCP_SERVICE@.packets:received=kea:pkt4-received=DERIVE+acks=kea:pkt4-ack-sent=DERIVE+naks=kea:pkt4-nak-sent=DERIVE @CACHEHAMSTER_SERVICE@.time:offset_ms=chrony:offset=GAUGE=1000+stratum=chrony:stratum=GAUGE
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
     - STATS_SNMP_TIMEOUT=5
+    - STATS_GRAPH_FILE_MODE=0644
     - STATS_STEP=60
     # What: gap between two cache usage scans.
     # Why: the dashboard counts the cache use by it.
@@ -2178,6 +2179,7 @@ runtime:
     - STATS_SERVICE_GRAPHS=list;;;live;ui
     - STATS_SNMP_TARGET=text;;;fixed;ui
     - STATS_SNMP_TIMEOUT=uint;1;60;live;ui
+    - STATS_GRAPH_FILE_MODE=text;;;fixed;ui
     - STATS_STEP=uint;10;3600;live;ui
     - CACHE_USAGE_SCAN_SECONDS=uint;30;86400;live;ui
     - STATS_WIDTH=text;;;live;ui
