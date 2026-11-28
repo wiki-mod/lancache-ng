@@ -17120,7 +17120,7 @@ mod stack {
         // What: what each apply step did, for the caller.
         // Why: a failed step shows; the next still runs.
         // From: Issue #1683 | PR #1980
-        let (grace, limit) = app.limits(new)?;
+        let (_, limit) = app.limits(new)?;
         // What: a new file runs the commands of its daemon.
         // Why: the daemons do not watch their file.
         // From: Issue #1683 | PR #2002
@@ -17182,6 +17182,42 @@ mod stack {
         // What: skip an owner that has no container yet.
         // Why: at stack start it reads new files anyway.
         // From: Issue #1683 | PR #1980
+        let (names, restarted) = run_plan(app, new, plan, &mut report).await?;
+
+        // What: after a dns restart wait for the pdns API.
+        // Why: a page must not load before pdns runs.
+        // From: Issue #1683 | PR #1980
+        if names
+            .get(&new.text("DNS_SERVICE")?)
+            .is_some_and(|n| restarted.contains(n))
+        {
+            let until = Instant::now() + limit;
+            let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
+            while let Err(e) = ensure_zones(new).await {
+                if Instant::now() >= until {
+                    report.push(format!("dns api: {e}").into());
+                    break;
+                }
+                tokio::time::sleep(poll).await;
+            }
+        }
+        // What: issue missing certs after the restarts.
+        // Why: many leaves take time; dns must not wait.
+        // From: Issue #1683 | PR #1980
+        report.extend(issue_and_reload(app, new).await?);
+        Ok(report)
+    }
+
+    // What: run a plan in its containers and report.
+    // Why: apply and cert renewal end the same way.
+    // From: Issue #1683 | PR #2020
+    async fn run_plan(
+        app: &Stack,
+        new: &Settings,
+        mut plan: BTreeMap<String, config::Effect>,
+        report: &mut Vec<Fault>,
+    ) -> Result<(BTreeMap<String, String>, Vec<String>), String> {
+        let (grace, limit) = app.limits(new)?;
         let (names, skipped) = plan_containers(app, new, &mut plan).await;
         report.extend(skipped);
         let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
@@ -17219,29 +17255,7 @@ mod stack {
                 None => report.push(format!("{name}: not healthy in time").into()),
             }
         }
-
-        // What: after a dns restart wait for the pdns API.
-        // Why: a page must not load before pdns runs.
-        // From: Issue #1683 | PR #1980
-        if names
-            .get(&new.text("DNS_SERVICE")?)
-            .is_some_and(|n| restarted.contains(n))
-        {
-            let until = Instant::now() + limit;
-            let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
-            while let Err(e) = ensure_zones(new).await {
-                if Instant::now() >= until {
-                    report.push(format!("dns api: {e}").into());
-                    break;
-                }
-                tokio::time::sleep(poll).await;
-            }
-        }
-        // What: issue missing certs after the restarts.
-        // Why: many leaves take time; dns must not wait.
-        // From: Issue #1683 | PR #1980
-        report.extend(issue_and_reload(app, new).await?);
-        Ok(report)
+        Ok((names, restarted))
     }
 
     // What: issue missing certs; reload the proxy.
@@ -17260,16 +17274,8 @@ mod stack {
             Ok(0) => {}
             Ok(n) => {
                 report.push(format!("certs: {n} issued").into());
-                let (grace, limit) = app.limits(new)?;
-                let rx = new.list("RELOAD_EXEC")?;
-                let mut plan = apply::owner_effects(&[proxy_reload(new, "certs")?]);
-                let (names, _) = plan_containers(app, new, &mut plan).await;
-                let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-                for (owner, result) in
-                    apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await
-                {
-                    report.push(format!("{owner}: {result:?}").into());
-                }
+                let plan = apply::owner_effects(&[proxy_reload(new, "certs")?]);
+                run_plan(app, new, plan, &mut report).await?;
             }
             Err(e) => report.push(format!("certs: {e}").into()),
         }
