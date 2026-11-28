@@ -14205,9 +14205,9 @@ end
             if old.as_deref() == Some(print.as_bytes()) {
                 return Ok(());
             }
-            let list = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            for entry in list {
-                let file = entry.map_err(|e| e.to_string())?.path();
+            let list = crate::shared::fs::entries_if_present(dir)
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            for file in list {
                 if matches!(
                     file.extension().and_then(|x| x.to_str()),
                     Some("crt" | "key")
