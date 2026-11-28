@@ -4160,8 +4160,15 @@ mod dhcp {
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_set(s: &Settings, cfg: Value) -> Result<(), String> {
         let api = kea_api_in_kea_mode(s)?.ok_or("DHCP_MODE is not kea now")?;
+        apply_kea(&api, &kea_store(s)?, &cfg).await
+    }
+
+    // What: apply a Kea config and keep it as newest.
+    // Why: set, restore and edit end the same way.
+    // From: Issue #1683 | PR #2020
+    async fn apply_kea(api: &kea::Api, store: &snapshot::Store, cfg: &Value) -> Result<(), String> {
         api.set_config(cfg.clone()).await?;
-        save_kea(&kea_store(s)?, &cfg)
+        save_kea(store, cfg)
     }
 
     // What: the Kea API; none if the mode is not Kea.
@@ -4502,11 +4509,7 @@ mod dhcp {
         // Why: a rollback can itself be rolled back.
         // From: Issue #1683 | PR #2020
         save_kea(&store, &live_config(&api).await?)?;
-        api.set_config(cfg.clone()).await?;
-        // What: the restored state is the newest snapshot.
-        // Why: as for DNS: newest snapshot is what runs.
-        // From: Issue #1683 | PR #2020
-        save_kea(&store, &cfg)
+        apply_kea(&api, &store, &cfg).await
     }
 
     // What: the running Kea config without its hash.
@@ -4541,8 +4544,7 @@ mod dhcp {
         let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
         kea_conf::set_subnets(&mut cfg, subnets);
-        api.set_config(cfg.clone()).await?;
-        Ok(save_kea(&kea_store(s)?, &cfg)?)
+        Ok(apply_kea(&api, &kea_store(s)?, &cfg).await?)
     }
 
     // What: Kea subnet from typed subnet input.
