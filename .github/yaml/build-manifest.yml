@@ -831,6 +831,8 @@ runtime:
     - UI_ROUTE_WATCHDOG_PROCESSED=/api/watchdog/processed
     - UI_ROUTE_WATCHDOG_PROGRAMS=/api/watchdog/programs
     - UI_ROUTE_WATCHDOG_CONVERGE=/api/watchdog/converge/{service}
+    - UI_ROUTE_WATCHDOG_APPLY=/api/watchdog/apply
+    - UI_ROUTE_WATCHDOG_EXEC=/api/watchdog/exec/{key}/{owner}
     - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
     - UI_ROUTE_CDN=/api/cdn
     - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema

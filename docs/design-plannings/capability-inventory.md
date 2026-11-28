@@ -186,10 +186,14 @@ Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/
   of the current state first. `setup.sh reset-to-last-known-good-config
   stack` runs the same CLI in the ui container.
 - **Config rendering.** `render::all` renders every config from the SOT and the
-  settings into the `lancache-config` volume; `apply::owner_effects` and `apply::run` reload
-  or restart only the owners with changes, through `docker::Api`. A reload runs
-  the commands of `RELOAD_EXEC` in the owner container (`reload_exec`); an owner
-  without a command, or a failed reload, is restarted.
+  settings into the `lancache-config` volume; `apply::owner_effects` plans
+  only the owners with changes and the ui sends the plan to the watchdog
+  (`UI_ROUTE_WATCHDOG_APPLY`, `watchdog::run_plan`), which reloads or
+  restarts them through `docker::Api`, retries a 409 and waits for health.
+  A reload runs the commands of `RELOAD_EXEC` in the owner container
+  (`watchdog::reload_exec`); an owner without a command, or a failed
+  reload, is restarted. A new daemon file runs its SOT exec rows through
+  `UI_ROUTE_WATCHDOG_EXEC`.
 - **Container actions.** `/api/container/{service}` sets a desired state,
   `/api/restart-ui` restarts the UI,
   `/api/service/{container}/{program}/{action}` restarts or reloads one

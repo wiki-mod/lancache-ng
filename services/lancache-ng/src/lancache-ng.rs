@@ -3176,7 +3176,7 @@ mod config {
         // What: effect from its SOT word.
         // Why: an unknown word is an error, never Live.
         // From: Issue #1683 | PR #1980
-        fn parse(word: &str) -> Result<Self, String> {
+        pub fn parse(word: &str) -> Result<Self, String> {
             Self::WORDS
                 .iter()
                 .find_map(|(w, effect)| (*w == word).then_some(*effect))
@@ -10061,6 +10061,21 @@ mod shared {
             row["Names"][0].as_str().map(|n| n.trim_start_matches('/'))
         }
 
+        // What: container name of one compose service.
+        // Why: ui and watchdog act on the real name.
+        // From: Issue #1683 | PR #2020
+        pub async fn container_name(
+            api: &Api,
+            s: &crate::config::Settings,
+            service: &str,
+        ) -> Result<String, crate::shared::Fault> {
+            let list = api.stack(s).await?;
+            let hit = rows_of(&list, service).next();
+            hit.and_then(name_of).map(str::to_string).ok_or_else(|| {
+                crate::shared::Fault::key("err_no_container", [("service", service.to_string())])
+            })
+        }
+
         // What: the rows of one compose service in a list.
         // Why: each lookup by service reads the label so.
         // From: Issue #1683 | PR #2020
@@ -14084,9 +14099,8 @@ end
     // From: Issue #1683 | PR #1980
     pub mod apply {
         use crate::config::{Change, Effect};
-        use crate::shared::docker::{Action, Api, Error};
+        use crate::shared::docker::Action;
         use std::collections::BTreeMap;
-        use std::time::Duration;
 
         // What: strongest effect per owning container.
         // Why: one restart already covers a reload.
@@ -14102,21 +14116,10 @@ end
             out
         }
 
-        // What: result for one owner.
-        // Why: the ui shows it; Recreate needs compose.
-        // From: Issue #1683 | PR #1980
-        #[derive(Debug)]
-        pub enum Outcome {
-            Live,
-            Done(Action),
-            NeedsRecreate,
-            Failed(Error),
-        }
-
         // What: the container action a change needs.
         // Why: live and recreate need none here.
         // From: Issue #1683 | PR #1980
-        fn action_of(effect: Effect) -> Option<Action> {
+        pub fn action_of(effect: Effect) -> Option<Action> {
             match effect {
                 Effect::Live | Effect::Fixed | Effect::Recreate => None,
                 Effect::Reload => Some(Action::Reload),
@@ -14142,87 +14145,6 @@ end
             owner: &'a str,
         ) -> impl Iterator<Item = Vec<&'a str>> {
             exec_rows(exec).filter_map(move |(o, cmd)| (o == owner).then_some(cmd))
-        }
-
-        // What: run every reload command; stop at first.
-        // Why: a failed reload is shown, never hidden.
-        // From: Issue #1683 | PR #2020
-        pub async fn reload_exec(
-            api: &Api,
-            name: &str,
-            exec: &[String],
-            owner: &str,
-            limit: Duration,
-        ) -> Outcome {
-            for cmd in exec_cmds(exec, owner) {
-                match api.exec(name, &cmd, limit).await {
-                    Ok((0, _)) => {}
-                    Ok((code, out)) => {
-                        let text = format!("{} exit {code}: {}", cmd.join(" "), out.trim());
-                        return Outcome::Failed(Error::Transport(text));
-                    }
-                    Err(e) => return Outcome::Failed(e),
-                }
-            }
-            Outcome::Done(Action::Reload)
-        }
-
-        // What: one Docker action, reported as an outcome.
-        // Why: run reports every action the same way.
-        // From: Issue #1683 | PR #2017
-        async fn acted(
-            api: &Api,
-            name: &str,
-            action: Action,
-            grace: u32,
-            limit: Duration,
-        ) -> Outcome {
-            match api.act(name, action, grace, limit).await {
-                Ok(()) => Outcome::Done(action),
-                Err(e) => Outcome::Failed(e),
-            }
-        }
-
-        // What: carry out the plan: exec or restart.
-        // Why: openrc-init drops HUP; reload runs commands.
-        // From: Issue #1683 | PR #1980
-        pub async fn run(
-            api: &Api,
-            plan: &BTreeMap<String, Effect>,
-            exec: &[String],
-            container_of: &(dyn Fn(&str) -> String + Sync),
-            grace: u32,
-            limit: Duration,
-        ) -> Vec<(String, Outcome)> {
-            let mut out = Vec::with_capacity(plan.len());
-            for (owner, &effect) in plan {
-                let outcome = match action_of(effect) {
-                    None if effect == Effect::Recreate => Outcome::NeedsRecreate,
-                    None => Outcome::Live,
-                    // What: owner reload commands via exec.
-                    // Why: a reload must not restart it.
-                    // From: Issue #1683 | PR #1985
-                    Some(Action::Reload) if exec_cmds(exec, owner).next().is_some() => {
-                        let name = container_of(owner);
-                        match reload_exec(api, &name, exec, owner, limit).await {
-                            // What: failed reload: restart.
-                            // Why: else old file runs on.
-                            // From: Issue #1683 | PR #1985
-                            Outcome::Failed(e) => {
-                                eprintln!("apply: {owner}: reload failed ({e}); restart");
-                                acted(api, &name, Action::Restart, grace, limit).await
-                            }
-                            done => done,
-                        }
-                    }
-                    Some(Action::Reload) => {
-                        acted(api, &container_of(owner), Action::Restart, grace, limit).await
-                    }
-                    Some(a) => acted(api, &container_of(owner), a, grace, limit).await,
-                };
-                out.push((owner.clone(), outcome));
-            }
-            out
         }
     }
 
@@ -16877,25 +16799,45 @@ mod stack {
         }
     }
 
-    // What: run one owner's exec rows in its container.
+    // What: one owner's exec rows, run by the watchdog.
     // Why: daemon reloads and dnsmasq run them one way.
     // From: Issue #1683 | PR #2020
     async fn reload_owner(
-        app: &Stack,
         s: &Settings,
         owner: &str,
-        ex: &[String],
+        key: &str,
         tag: &str,
-        limit: Duration,
-    ) -> (Option<apply::Outcome>, Fault) {
-        match container_of(app, s, owner).await {
-            Ok(name) => {
-                let r = apply::reload_exec(&app.docker, &name, ex, owner, limit).await;
-                let line = format!("{owner} {tag}: {r:?}").into();
-                (Some(r), line)
-            }
-            Err(e) => (None, Fault::lead(format!("{owner} {tag}: skipped, "), e)),
+    ) -> (Option<bool>, Fault) {
+        use crate::shared::http::{Body, Peer, call};
+        let lead = format!("{owner} {tag}: ");
+        let route = match s.text("UI_ROUTE_WATCHDOG_EXEC") {
+            Ok(to) => crate::shared::fill(
+                to,
+                &[("key", key.to_string()), ("owner", owner.to_string())],
+            ),
+            Err(e) => return (None, Fault::lead(lead, e.into())),
+        };
+        match call(s, Peer::Watchdog, &route, Body::Form(vec![])).await {
+            Ok(v) if v["skipped"] == true => (None, line_fault(&lead, &v["line"])),
+            Ok(v) => (Some(v["failed"] == true), line_fault(&lead, &v["line"])),
+            Err(e) => (None, Fault::lead(lead, e.into())),
         }
+    }
+
+    // What: a watchdog report line as a failure.
+    // Why: its key shows in the page language.
+    // From: Issue #1683 | PR #2020
+    pub(crate) fn line_fault(lead: &str, v: &Value) -> Fault {
+        let lead = format!("{lead}{}", v["lead"].as_str().unwrap_or_default());
+        let text = match v["key"].as_str() {
+            Some(key) => {
+                let vals: Vec<(String, String)> =
+                    serde_json::from_value(v["vals"].clone()).unwrap_or_default();
+                crate::shared::fill(crate::ui::tr(key), &vals)
+            }
+            None => v["text"].as_str().unwrap_or_default().to_string(),
+        };
+        Fault::Plain(format!("{lead}{text}"))
     }
 
     // What: SOT keys and values of one change.
@@ -17135,11 +17077,7 @@ mod stack {
         s: &Settings,
         service: &str,
     ) -> Result<String, Fault> {
-        let list = app.docker.stack(s).await?;
-        let hit = docker::rows_of(&list, service).next();
-        hit.and_then(docker::name_of)
-            .map(str::to_string)
-            .ok_or_else(|| Fault::key("err_no_container", [("service", service.to_string())]))
+        docker::container_name(&app.docker, s, service).await
     }
 
     // What: run a command in a service container.
@@ -17301,27 +17239,6 @@ mod stack {
         Ok(stale)
     }
 
-    // What: container name per plan owner; others drop out.
-    // Why: an owner without a container has nothing to do.
-    // From: Issue #1683 | PR #2017
-    pub(crate) async fn plan_containers<V>(
-        app: &Stack,
-        s: &Settings,
-        plan: &mut BTreeMap<String, V>,
-    ) -> (BTreeMap<String, String>, Vec<Fault>) {
-        let (mut names, mut skipped) = (BTreeMap::new(), Vec::new());
-        for owner in plan.keys() {
-            match container_of(app, s, owner).await {
-                Ok(name) => {
-                    names.insert(owner.clone(), name);
-                }
-                Err(e) => skipped.push(Fault::lead(format!("{owner}: skipped, "), e)),
-            }
-        }
-        plan.retain(|owner, _| names.contains_key(owner));
-        (names, skipped)
-    }
-
     // What: render with the live chain, then write.
     // Why: apply and start share one way to the files.
     // From: Issue #1683 | PR #2019
@@ -17361,10 +17278,6 @@ mod stack {
             eprintln!("ui: removed stale {}", path.display());
         }
         changes.extend(prune_change(new, &removed)?);
-        // What: what each apply step did, for the caller.
-        // Why: a failed step shows; the next still runs.
-        // From: Issue #1683 | PR #1980
-        let (_, limit) = app.limits(new)?;
         // What: a new file runs the commands of its daemon.
         // Why: the daemons do not watch their file.
         // From: Issue #1683 | PR #2002
@@ -17380,7 +17293,7 @@ mod stack {
             let ex = new.list(exec)?;
             let owners: BTreeSet<&str> = apply::exec_rows(&ex).map(|(owner, _)| owner).collect();
             for owner in owners {
-                report.push(reload_owner(app, new, owner, &ex, tag, limit).await.1);
+                report.push(reload_owner(new, owner, exec, tag).await.1);
             }
         }
         // What: at start zones_at_start owns this step.
@@ -17417,8 +17330,8 @@ mod stack {
         let (was, now) = (DhcpMode::from_settings(old)?, DhcpMode::from_settings(new)?);
         let ex = new.list("DNSMASQ_RESTART_EXEC")?;
         if was.is_dnsmasq() && now.is_dnsmasq() && plan.contains_key(&dhcp) && !ex.is_empty() {
-            let (r, line) = reload_owner(app, new, &dhcp, &ex, "dnsmasq", limit).await;
-            if r.is_some_and(|r| !matches!(r, apply::Outcome::Failed(_))) {
+            let (failed, line) = reload_owner(new, &dhcp, "DNSMASQ_RESTART_EXEC", "dnsmasq").await;
+            if failed == Some(false) {
                 plan.remove(&dhcp);
             }
             report.push(line);
@@ -17426,15 +17339,13 @@ mod stack {
         // What: skip an owner that has no container yet.
         // Why: at stack start it reads new files anyway.
         // From: Issue #1683 | PR #1980
-        let (names, restarted) = run_plan(app, new, plan, &mut report).await?;
+        let restarted = run_plan(new, plan, &mut report).await?;
+        let limit = crate::shared::docker::timeout(new)?;
 
         // What: after a dns restart wait for the pdns API.
         // Why: a page must not load before pdns runs.
         // From: Issue #1683 | PR #1980
-        if names
-            .get(&new.text("DNS_SERVICE")?)
-            .is_some_and(|n| restarted.contains(n))
-        {
+        if restarted.contains(&new.text("DNS_SERVICE")?) {
             let until = Instant::now() + limit;
             let poll = Duration::from_secs(new.uint("APPLY_HEALTH_POLL_SECONDS")?);
             while let Err(e) = ensure_zones(new).await {
@@ -17448,67 +17359,41 @@ mod stack {
         // What: issue missing certs after the restarts.
         // Why: many leaves take time; dns must not wait.
         // From: Issue #1683 | PR #1980
-        report.extend(issue_and_reload(app, new).await?);
+        report.extend(issue_and_reload(new).await?);
         Ok(report)
     }
 
-    // What: run a plan in its containers and report.
+    // What: a plan run by the watchdog; its report.
     // Why: apply and cert renewal end the same way.
     // From: Issue #1683 | PR #2020
     async fn run_plan(
-        app: &Stack,
         new: &Settings,
-        mut plan: BTreeMap<String, config::Effect>,
+        plan: BTreeMap<String, config::Effect>,
         report: &mut Vec<Fault>,
-    ) -> Result<(BTreeMap<String, String>, Vec<String>), String> {
-        let (grace, limit) = app.limits(new)?;
-        let (names, skipped) = plan_containers(app, new, &mut plan).await;
-        report.extend(skipped);
-        let lookup = |owner: &str| names.get(owner).cloned().unwrap_or_default();
-        let rx = new.list("RELOAD_EXEC")?;
-        let mut restarted = Vec::new();
-        let mut results = apply::run(&app.docker, &plan, &rx, &lookup, grace, limit).await;
-        // What: one more try for owners that got a 409.
-        // Why: compose may recreate a container meanwhile.
-        // From: Issue #1683 | PR #1980
-        let conflict =
-            |r: &apply::Outcome| matches!(r, apply::Outcome::Failed(docker::Error::Status(409)));
-        if results.iter().any(|(_, r)| conflict(r)) {
-            tokio::time::sleep(limit).await;
-            let again: BTreeMap<_, _> = plan
-                .iter()
-                .filter(|(o, _)| results.iter().any(|(x, r)| x == *o && conflict(r)))
-                .map(|(o, e)| (o.clone(), *e))
-                .collect();
-            let retried = apply::run(&app.docker, &again, &rx, &lookup, grace, limit).await;
-            for (owner, r) in retried {
-                if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
-                    slot.1 = r;
-                }
-            }
+    ) -> Result<Vec<String>, String> {
+        use crate::shared::http::{Body, Peer, call};
+        let words: BTreeMap<&String, &str> = plan.iter().map(|(o, e)| (o, e.word())).collect();
+        let body = Body::Json(json!({"plan": words}));
+        let v = call(
+            new,
+            Peer::Watchdog,
+            &new.text("UI_ROUTE_WATCHDOG_APPLY")?,
+            body,
+        )
+        .await?;
+        for l in v["report"].as_array().into_iter().flatten() {
+            report.push(line_fault("", l));
         }
-        for (owner, result) in results {
-            if matches!(result, apply::Outcome::Done(docker::Action::Restart)) {
-                restarted.push(lookup(&owner));
-            }
-            report.push(format!("{owner}: {result:?}").into());
-        }
-        for (name, cause) in wait_healthy(app, new, &restarted, limit).await? {
-            match cause {
-                Some(e) => report.push(format!("{name}: not healthy in time, inspect: {e}").into()),
-                None => report.push(format!("{name}: not healthy in time").into()),
-            }
-        }
-        Ok((names, restarted))
+        let restarted = v["restarted"].as_array().into_iter().flatten();
+        Ok(restarted
+            .filter_map(|o| o.as_str().map(str::to_string))
+            .collect())
     }
 
     // What: issue missing certs; reload the proxy.
     // Why: apply and cert renewal share the step.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn issue_and_reload(
-        app: &Stack,
-        new: &Settings,
-    ) -> Result<Vec<Fault>, String> {
+    pub(crate) async fn issue_and_reload(new: &Settings) -> Result<Vec<Fault>, String> {
         let mut report = Vec::new();
         let s = new.clone();
         let issued = tokio::task::spawn_blocking(move || render::issue_certs(&s))
@@ -17519,46 +17404,11 @@ mod stack {
             Ok(n) => {
                 report.push(format!("certs: {n} issued").into());
                 let plan = apply::owner_effects(&[proxy_reload(new, "certs")?]);
-                run_plan(app, new, plan, &mut report).await?;
+                run_plan(new, plan, &mut report).await?;
             }
             Err(e) => report.push(format!("certs: {e}").into()),
         }
         Ok(report)
-    }
-
-    // What: wait until restarted containers are healthy.
-    // Why: "done" must mean the service answers again.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn wait_healthy(
-        app: &Stack,
-        s: &Settings,
-        names: &[String],
-        limit: Duration,
-    ) -> Result<Vec<(String, Option<String>)>, String> {
-        let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
-        let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
-        let end = Instant::now() + wait;
-        let mut late = Vec::new();
-        for name in names {
-            loop {
-                let (health, cause) = match app.docker.inspect(name, limit).await {
-                    Ok(state) => (Some(docker::Health::from_inspect(&state)), None),
-                    Err(e) => (None, Some(e.to_string())),
-                };
-                if matches!(
-                    health,
-                    Some(docker::Health::Healthy | docker::Health::Degraded)
-                ) {
-                    break;
-                }
-                if Instant::now() >= end {
-                    late.push((name.clone(), cause));
-                    break;
-                }
-                tokio::time::sleep(poll).await;
-            }
-        }
-        Ok(late)
     }
 
     // What: start or stop a container for the user.
@@ -17703,7 +17553,7 @@ mod ui {
     // What: one text in the request language.
     // Why: form errors speak the language of the page.
     // From: Issue #1683 | PR #1980
-    fn tr(key: &str) -> String {
+    pub(crate) fn tr(key: &str) -> String {
         let code = LANG.try_with(Clone::clone).unwrap_or_default();
         let all = all_texts();
         all.get(&code)
@@ -19825,7 +19675,7 @@ mod ui {
         csrf.check_header(&headers)?;
         let s = app.settings();
         let dropped = render::delete_expiring(&s).map_err(bad_request)?;
-        let report = say_all(&issue_and_reload(&app, &s).await?);
+        let report = say_all(&issue_and_reload(&s).await?);
         let v = json!({"renewed": dropped, "report": report, "certs": render::cert_list(&s)?});
         Ok(axum::Json(v).into_response())
     }
@@ -22135,6 +21985,284 @@ mod watchdog {
         )
     }
 
+    // What: result for one owner of a plan.
+    // Why: the report names it; Recreate needs compose.
+    // From: Issue #1683 | PR #1980
+    #[derive(Debug)]
+    enum Outcome {
+        Live,
+        Done(docker::Action),
+        NeedsRecreate,
+        Failed(docker::Error),
+    }
+
+    // What: one report line: lead, text, key, values.
+    // Why: the ui shows it in the page language.
+    // From: Issue #1683 | PR #2020
+    #[derive(Serialize)]
+    struct Line {
+        lead: String,
+        text: String,
+        key: Option<&'static str>,
+        vals: Vec<(&'static str, String)>,
+    }
+
+    // What: a report line from a lead and a failure.
+    // Why: plain lines and keyed ones travel alike.
+    // From: Issue #1683 | PR #2020
+    fn line(lead: &str, what: Fault) -> Line {
+        let (text, key, vals) = worded(what);
+        Line {
+            lead: lead.to_string(),
+            text,
+            key,
+            vals,
+        }
+    }
+
+    // What: run every exec row of an owner; stop at first.
+    // Why: a failed reload is shown, never hidden.
+    // From: Issue #1683 | PR #2020
+    async fn reload_exec(
+        api: &docker::Api,
+        name: &str,
+        exec: &[String],
+        owner: &str,
+        limit: Duration,
+    ) -> Outcome {
+        for cmd in crate::shared::apply::exec_cmds(exec, owner) {
+            match api.exec(name, &cmd, limit).await {
+                Ok((0, _)) => {}
+                Ok((code, out)) => {
+                    let text = format!("{} exit {code}: {}", cmd.join(" "), out.trim());
+                    return Outcome::Failed(docker::Error::Transport(text));
+                }
+                Err(e) => return Outcome::Failed(e),
+            }
+        }
+        Outcome::Done(docker::Action::Reload)
+    }
+
+    // What: one Docker action, reported as an outcome.
+    // Why: a plan reports every action the same way.
+    // From: Issue #1683 | PR #2017
+    async fn acted(
+        api: &docker::Api,
+        name: &str,
+        action: docker::Action,
+        grace: u32,
+        limit: Duration,
+    ) -> Outcome {
+        match api.act(name, action, grace, limit).await {
+            Ok(()) => Outcome::Done(action),
+            Err(e) => Outcome::Failed(e),
+        }
+    }
+
+    // What: carry out a plan: exec or restart.
+    // Why: openrc-init drops HUP; reload runs commands.
+    // From: Issue #1683 | PR #1980
+    async fn act_plan(
+        api: &docker::Api,
+        plan: &BTreeMap<String, crate::config::Effect>,
+        exec: &[String],
+        names: &BTreeMap<String, String>,
+        grace: u32,
+        limit: Duration,
+    ) -> Vec<(String, Outcome)> {
+        use crate::config::Effect;
+        use docker::Action;
+        let mut out = Vec::with_capacity(plan.len());
+        for (owner, &effect) in plan {
+            let name = names.get(owner).cloned().unwrap_or_default();
+            let has_exec = crate::shared::apply::exec_cmds(exec, owner)
+                .next()
+                .is_some();
+            let outcome = match crate::shared::apply::action_of(effect) {
+                None if effect == Effect::Recreate => Outcome::NeedsRecreate,
+                None => Outcome::Live,
+                // What: owner reload commands via exec.
+                // Why: a reload must not restart it.
+                // From: Issue #1683 | PR #1985
+                Some(Action::Reload) if has_exec => {
+                    match reload_exec(api, &name, exec, owner, limit).await {
+                        // What: failed reload: restart.
+                        // Why: else old file runs on.
+                        // From: Issue #1683 | PR #1985
+                        Outcome::Failed(e) => {
+                            eprintln!("watchdog: {owner}: reload failed ({e}); restart");
+                            acted(api, &name, Action::Restart, grace, limit).await
+                        }
+                        done => done,
+                    }
+                }
+                Some(Action::Reload) => acted(api, &name, Action::Restart, grace, limit).await,
+                Some(a) => acted(api, &name, a, grace, limit).await,
+            };
+            out.push((owner.clone(), outcome));
+        }
+        out
+    }
+
+    // What: wait until restarted containers are healthy.
+    // Why: "done" must mean the service answers again.
+    // From: Issue #1683 | PR #1980
+    async fn wait_healthy(
+        api: &docker::Api,
+        s: &Settings,
+        names: &[String],
+        limit: Duration,
+    ) -> Result<Vec<(String, Option<String>)>, String> {
+        use tokio::time::Instant;
+        let wait = Duration::from_secs(s.uint("APPLY_HEALTH_WAIT_SECONDS")?);
+        let poll = Duration::from_secs(s.uint("APPLY_HEALTH_POLL_SECONDS")?);
+        let end = Instant::now() + wait;
+        let mut late = Vec::new();
+        for name in names {
+            loop {
+                let (health, cause) = match api.inspect(name, limit).await {
+                    Ok(state) => (Some(Health::from_inspect(&state)), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+                if matches!(health, Some(Health::Healthy | Health::Degraded)) {
+                    break;
+                }
+                if Instant::now() >= end {
+                    late.push((name.clone(), cause));
+                    break;
+                }
+                tokio::time::sleep(poll).await;
+            }
+        }
+        Ok(late)
+    }
+
+    // What: a plan of the ui: run, retry 409, wait.
+    // Why: the watchdog does every restart and reload.
+    // From: Issue #1683 | PR #2020
+    async fn run_plan(
+        s: &Settings,
+        mut plan: BTreeMap<String, crate::config::Effect>,
+    ) -> Result<(Vec<Line>, Vec<String>), String> {
+        let api = docker::client(s)?;
+        let (grace, limit) = (s.num::<u32>("UI_STOP_GRACE")?, docker::timeout(s)?);
+        let (mut names, mut report) = (BTreeMap::new(), Vec::new());
+        for owner in plan.keys() {
+            match docker::container_name(&api, s, owner).await {
+                Ok(name) => {
+                    names.insert(owner.clone(), name);
+                }
+                Err(e) => report.push(line(&format!("{owner}: skipped, "), e)),
+            }
+        }
+        plan.retain(|owner, _| names.contains_key(owner));
+        let rx = s.list("RELOAD_EXEC")?;
+        let mut results = act_plan(&api, &plan, &rx, &names, grace, limit).await;
+        // What: one more try for owners that got a 409.
+        // Why: compose may recreate a container meanwhile.
+        // From: Issue #1683 | PR #1980
+        let conflict = |r: &Outcome| matches!(r, Outcome::Failed(docker::Error::Status(409)));
+        if results.iter().any(|(_, r)| conflict(r)) {
+            tokio::time::sleep(limit).await;
+            let again: BTreeMap<_, _> = plan
+                .iter()
+                .filter(|(o, _)| results.iter().any(|(x, r)| x == *o && conflict(r)))
+                .map(|(o, e)| (o.clone(), *e))
+                .collect();
+            let retried = act_plan(&api, &again, &rx, &names, grace, limit).await;
+            for (owner, r) in retried {
+                if let Some(slot) = results.iter_mut().find(|(x, _)| *x == owner) {
+                    slot.1 = r;
+                }
+            }
+        }
+        let mut restarted = Vec::new();
+        for (owner, result) in results {
+            if matches!(result, Outcome::Done(docker::Action::Restart)) {
+                restarted.push(owner.clone());
+            }
+            report.push(line("", format!("{owner}: {result:?}").into()));
+        }
+        let held: Vec<String> = restarted
+            .iter()
+            .filter_map(|o| names.get(o).cloned())
+            .collect();
+        for (name, cause) in wait_healthy(&api, s, &held, limit).await? {
+            let text = match cause {
+                Some(e) => format!("{name}: not healthy in time, inspect: {e}"),
+                None => format!("{name}: not healthy in time"),
+            };
+            report.push(line("", text.into()));
+        }
+        Ok((report, restarted))
+    }
+
+    // What: POST UI_ROUTE_WATCHDOG_APPLY: {"plan": {..}}.
+    // Why: the ui writes files; the watchdog acts.
+    // From: Issue #1683 | PR #2020
+    async fn api_apply(axum::Json(body): axum::Json<Value>) -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                let bad = |e: String| (StatusCode::BAD_REQUEST, Fault::from(e));
+                let mut plan = BTreeMap::new();
+                for (owner, word) in body["plan"].as_object().into_iter().flatten() {
+                    let word = word
+                        .as_str()
+                        .ok_or_else(|| bad(format!("{owner}: no effect")))?;
+                    let effect = crate::config::Effect::parse(word).map_err(bad)?;
+                    plan.insert(owner.clone(), effect);
+                }
+                let s = settings()?;
+                let (report, restarted) = run_plan(&s, plan)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                let body = serde_json::json!({"report": report, "restarted": restarted});
+                Ok(axum::Json(body).into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: POST UI_ROUTE_WATCHDOG_EXEC: one key, owner.
+    // Why: a new daemon file runs its SOT exec rows.
+    // From: Issue #1683 | PR #2020
+    async fn api_exec(
+        axum::extract::Path((key, owner)): axum::extract::Path<(String, String)>,
+    ) -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                // What: only an *_EXEC row list of the SOT.
+                // Why: a caller names rows, not commands.
+                // From: Issue #1683 | PR #2020
+                let s = settings()?;
+                let rows = match key.ends_with("_EXEC") {
+                    true => s.list(&key).ok(),
+                    false => None,
+                };
+                let Some(rows) = rows else {
+                    return Err((StatusCode::NOT_FOUND, Fault::from("no such exec rows")));
+                };
+                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
+                let api = docker::client(&s).map_err(bad)?;
+                let limit = docker::timeout(&s).map_err(bad)?;
+                let body = match docker::container_name(&api, &s, &owner).await {
+                    Ok(name) => {
+                        let r = reload_exec(&api, &name, &rows, &owner, limit).await;
+                        let failed = matches!(r, Outcome::Failed(_));
+                        serde_json::json!({"line": line("", format!("{r:?}").into()), "failed": failed})
+                    }
+                    Err(e) => serde_json::json!({"line": line("skipped, ", e), "skipped": true}),
+                };
+                Ok(axum::Json(body).into_response())
+            }
+            .await,
+        )
+    }
+
     // What: the watchdog REST routes from the SOT.
     // Why: ui and CLI reach them on WATCHDOG_SOCKET.
     // From: Issue #1683 | PR #2020
@@ -22146,7 +22274,9 @@ mod watchdog {
             .route(&s.text("UI_ROUTE_WATCHDOG_PROGRAMS")?, get(api_programs))
             .route(&s.text("UI_ROUTE_WATCHDOG_TIDY")?, post(api_tidy))
             .route(&s.text("UI_ROUTE_SERVICE_ACTION")?, post(api_program))
-            .route(&s.text("UI_ROUTE_WATCHDOG_CONVERGE")?, post(api_converge)))
+            .route(&s.text("UI_ROUTE_WATCHDOG_CONVERGE")?, post(api_converge))
+            .route(&s.text("UI_ROUTE_WATCHDOG_APPLY")?, post(api_apply))
+            .route(&s.text("UI_ROUTE_WATCHDOG_EXEC")?, post(api_exec)))
     }
 
     // What: what one watchdog command does.

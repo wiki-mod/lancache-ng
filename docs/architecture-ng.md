@@ -31,14 +31,23 @@ One owner per decision. No component undoes the work of another.
 | Who | Does | Does not |
 | --- | --- | --- |
 | `mod shared` (`services/lancache-ng/src/lancache-ng.rs`) | Building blocks: render configs, Docker calls, file tidy-up | Decide anything |
-| ui | Saves settings, renders and writes every config, wakes the owner container, records user start/stop in `SERVICES_STOPPED` | Run check loops or cleanup |
-| Watchdog | Decides *when*: health checks, restarts sick containers, daily cleanup, writes the alarm file | Write configs |
+| ui | Saves settings, renders and writes every config, records user start/stop in `SERVICES_STOPPED`, tells the watchdog which owners need a restart or reload | Start, stop, restart or reload programs and containers; run check loops or cleanup |
+| Watchdog | Carries out every start, stop, restart and reload of programs and containers (after a save, on demand and when healing); decides *when*: health checks, restarts sick containers, keeps containers to their wish, daily cleanup, writes the alarm file | Write configs |
 | OpenRC (inside a container) | Keeps the programs of its container alive | Touch other containers |
 | Docker healthcheck | Tells Docker whether the programs really answer | Restart anything |
 
 A container the user stopped in the ui is listed in `SERVICES_STOPPED`.
-The watchdog never restarts a container on that list. This prevents the
-loop "user stops, watchdog starts, user stops again".
+The watchdog never restarts a container on that list and stops one that
+runs against it. This prevents the loop "user stops, watchdog starts,
+user stops again".
+
+The ui and the CLI reach the watchdog and the cachehamster daemon only
+through their REST routes on Unix sockets (`WATCHDOG_SOCKET`,
+`CACHEHAMSTER_SOCKET`) in the volume `services-api`, which only the
+`services` and `ui` containers mount. A command such as
+`lancache-ng watchdog ...` sends its request there and runs nowhere
+else; without the socket it fails with "is the watchdog running?". The
+watchdog works without the ui.
 
 ## Failure handling
 
@@ -75,8 +84,12 @@ Healthchecks:
 2. The ui renders every config from the SOT and the saved settings
    (`shared::render::all` in `services/lancache-ng/src/lancache-ng.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.
-3. The ui wakes only the owners with changes, with the strongest needed
-   action (reload or restart, `apply::owner_effects`).
+3. The ui plans only the owners with changes, with the strongest needed
+   action (reload or restart, `apply::owner_effects`), and sends the plan
+   to the watchdog (`UI_ROUTE_WATCHDOG_APPLY`); a new daemon file sends its
+   SOT exec rows (`UI_ROUTE_WATCHDOG_EXEC`). The watchdog runs the reloads
+   and restarts, retries a 409, waits for health and answers with the
+   report.
 4. The owner containers mount `lancache-config` read-only and start their
    programs with the SOT config paths.
 5. After a successful change the ui keeps the new stack state: the storable
