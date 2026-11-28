@@ -21049,14 +21049,13 @@ mod watchdog {
                 use axum::http::StatusCode;
                 use axum::response::IntoResponse;
                 let s = settings()?;
-                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
-                let api = docker::client(&s).map_err(bad)?;
-                let members = docker::members(&api, &s).await.map_err(bad)?;
+                let api = docker::client(&s).map_err(gateway)?;
+                let members = docker::members(&api, &s).await.map_err(gateway)?;
                 let Some(m) = members.iter().find(|m| m.service == service) else {
                     let no = Fault::key("err_no_container", [("service", service.clone())]);
                     return Err((StatusCode::NOT_FOUND, no));
                 };
-                let done = converge(&api, &s, m).await.map_err(bad)?;
+                let done = converge(&api, &s, m).await.map_err(gateway)?;
                 let body = serde_json::json!({"service": service, "done": done});
                 Ok(axum::Json(body).into_response())
             }
@@ -21741,6 +21740,50 @@ mod watchdog {
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.into()))
     }
 
+    // What: a failure of a far end as a 502 refusal.
+    // Why: Docker, chronyc and syslog-ng answer so.
+    // From: Issue #1683 | PR #2020
+    fn gateway(e: impl ToString) -> Refused {
+        (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Fault::from(e.to_string()),
+        )
+    }
+
+    // What: a blocking step on its own thread.
+    // Why: files and programs must not stall the API.
+    // From: Issue #1683 | PR #2020
+    async fn blocking<T: Send + 'static>(
+        step: impl FnOnce() -> Result<T, String> + Send + 'static,
+        code: axum::http::StatusCode,
+    ) -> Result<T, Refused> {
+        let internal = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+        tokio::task::spawn_blocking(step)
+            .await
+            .map_err(|e| (internal, Fault::from(e.to_string())))?
+            .map_err(|e| (code, Fault::from(e)))
+    }
+
+    // What: one command in a container; output or why.
+    // Why: rc-service, rc-update and exec rows run so.
+    // From: Issue #1683 | PR #2020
+    async fn run_in(
+        api: &docker::Api,
+        name: &str,
+        cmd: &[&str],
+        limit: Duration,
+    ) -> Result<String, docker::Error> {
+        let (code, out) = api.exec(name, cmd, limit).await?;
+        match code {
+            0 => Ok(out),
+            code => Err(docker::Error::Transport(format!(
+                "{name}: {} exit {code}: {}",
+                cmd.join(" "),
+                out.trim()
+            ))),
+        }
+    }
+
     // What: name of this process, e.g. lancache-watchdog.
     // Why: it never restarts itself; it would not answer.
     // From: Issue #1683 | PR #2020
@@ -21761,14 +21804,9 @@ mod watchdog {
         name: &str,
     ) -> Result<Vec<String>, String> {
         let list = s.text("SERVICE_LIST_PROGRAM")?;
-        let cmd = [list.as_str(), "show"];
-        let (code, out) = api
-            .exec(name, &cmd, docker::timeout(s)?)
+        let out = run_in(api, name, &[list.as_str(), "show"], docker::timeout(s)?)
             .await
-            .map_err(|e| format!("{name}: {e}"))?;
-        if code != 0 {
-            return Err(format!("{name}: {list} exit {code}: {out}"));
-        }
+            .map_err(|e| e.to_string())?;
         let own = own_program();
         let names: std::collections::BTreeSet<String> = out
             .lines()
@@ -21785,13 +21823,11 @@ mod watchdog {
     async fn api_programs() -> axum::response::Response {
         answer(
             async {
-                use axum::http::StatusCode;
                 use axum::response::IntoResponse;
                 let s = settings()?;
-                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
-                let api = docker::client(&s).map_err(bad)?;
+                let api = docker::client(&s).map_err(gateway)?;
                 let (mut programs, mut errors) = (Vec::new(), Vec::new());
-                for m in docker::members(&api, &s).await.map_err(bad)? {
+                for m in docker::members(&api, &s).await.map_err(gateway)? {
                     match programs_in(&api, &s, &m.name).await {
                         Ok(list) => {
                             programs.extend(list.into_iter().map(|p| format!("{}:{p}", m.service)))
@@ -21825,43 +21861,31 @@ mod watchdog {
                     return Err((StatusCode::BAD_REQUEST, no));
                 }
                 let s = settings()?;
-                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
-                let api = docker::client(&s).map_err(bad)?;
-                let members = docker::members(&api, &s).await.map_err(bad)?;
-                let Some(m) = members.iter().find(|m| m.service == service) else {
-                    let no = Fault::key("err_no_container", [("service", service.clone())]);
-                    return Err((StatusCode::NOT_FOUND, no));
-                };
-                if !programs_in(&api, &s, &m.name)
+                let api = docker::client(&s).map_err(gateway)?;
+                let name = docker::container_name(&api, &s, &service)
                     .await
-                    .map_err(bad)?
+                    .map_err(|no| (StatusCode::NOT_FOUND, no))?;
+                if !programs_in(&api, &s, &name)
+                    .await
+                    .map_err(gateway)?
                     .contains(&program)
                 {
                     let no = Fault::key("err_program_not_offered", []);
                     return Err((StatusCode::NOT_FOUND, no));
                 }
-                let control = s.text("SERVICE_CONTROL_PROGRAM").map_err(bad)?;
-                let limit = docker::timeout(&s).map_err(bad)?;
+                let control = s.text("SERVICE_CONTROL_PROGRAM").map_err(gateway)?;
+                let limit = docker::timeout(&s).map_err(gateway)?;
                 // What: only a running program is touched.
                 // Why: no restart starts kea for dnsmasq.
                 // From: Issue #1683 | PR #1985
                 let status = [control.as_str(), program.as_str(), "status"];
-                let (code, _) = api
-                    .exec(&m.name, &status, limit)
-                    .await
-                    .map_err(|e| bad(e.to_string()))?;
+                let (code, _) = api.exec(&name, &status, limit).await.map_err(gateway)?;
                 if code != 0 {
                     let no = Fault::key("err_program_not_running", []);
                     return Err((StatusCode::CONFLICT, no));
                 }
                 let cmd = [control.as_str(), program.as_str(), action.as_str()];
-                let (code, out) = api
-                    .exec(&m.name, &cmd, limit)
-                    .await
-                    .map_err(|e| bad(e.to_string()))?;
-                if code != 0 {
-                    return Err(bad(format!("{control} exit {code}: {out}")));
-                }
+                run_in(&api, &name, &cmd, limit).await.map_err(gateway)?;
                 Ok(StatusCode::NO_CONTENT.into_response())
             }
             .await,
@@ -21893,15 +21917,8 @@ mod watchdog {
                 use axum::http::StatusCode;
                 use axum::response::IntoResponse;
                 let s = settings()?;
-                let n = tokio::task::spawn_blocking(move || tidy::syslog_processed(&s))
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Fault::from(e.to_string()),
-                        )
-                    })?
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                let n =
+                    blocking(move || tidy::syslog_processed(&s), StatusCode::BAD_GATEWAY).await?;
                 Ok(axum::Json(serde_json::json!({"processed": n})).into_response())
             }
             .await,
@@ -21924,15 +21941,8 @@ mod watchdog {
                 }
                 let dry = query.get("dry_run").map(String::as_str) == Some("1");
                 let s = settings()?;
-                let t = tokio::task::spawn_blocking(move || tidy_now(&s, &op, dry))
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Fault::from(e.to_string()),
-                        )
-                    })?
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Fault::from(e)))?;
+                let step = move || tidy_now(&s, &op, dry);
+                let t = blocking(step, StatusCode::INTERNAL_SERVER_ERROR).await?;
                 Ok(axum::Json(t).into_response())
             }
             .await,
@@ -21985,13 +21995,8 @@ mod watchdog {
         limit: Duration,
     ) -> Outcome {
         for cmd in crate::shared::apply::exec_cmds(exec, owner) {
-            match api.exec(name, &cmd, limit).await {
-                Ok((0, _)) => {}
-                Ok((code, out)) => {
-                    let text = format!("{} exit {code}: {}", cmd.join(" "), out.trim());
-                    return Outcome::Failed(docker::Error::Transport(text));
-                }
-                Err(e) => return Outcome::Failed(e),
+            if let Err(e) = run_in(api, name, &cmd, limit).await {
+                return Outcome::Failed(e);
             }
         }
         Outcome::Done(docker::Action::Reload)
@@ -22169,9 +22174,7 @@ mod watchdog {
                     plan.insert(owner.clone(), effect);
                 }
                 let s = settings()?;
-                let (report, restarted) = run_plan(&s, plan)
-                    .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                let (report, restarted) = run_plan(&s, plan).await.map_err(gateway)?;
                 let body = serde_json::json!({"report": report, "restarted": restarted});
                 Ok(axum::Json(body).into_response())
             }
@@ -22200,9 +22203,8 @@ mod watchdog {
                 let Some(rows) = rows else {
                     return Err((StatusCode::NOT_FOUND, Fault::from("no such exec rows")));
                 };
-                let bad = |e: String| (StatusCode::BAD_GATEWAY, Fault::from(e));
-                let api = docker::client(&s).map_err(bad)?;
-                let limit = docker::timeout(&s).map_err(bad)?;
+                let api = docker::client(&s).map_err(gateway)?;
+                let limit = docker::timeout(&s).map_err(gateway)?;
                 let body = match docker::container_name(&api, &s, &owner).await {
                     Ok(name) => {
                         let r = reload_exec(&api, &name, &rows, &owner, limit).await;
@@ -22226,15 +22228,8 @@ mod watchdog {
                 use axum::http::StatusCode;
                 use axum::response::IntoResponse;
                 let s = settings()?;
-                let v = tokio::task::spawn_blocking(move || crate::shared::ntp::tracking_now(&s))
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Fault::from(e.to_string()),
-                        )
-                    })?
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                let step = move || crate::shared::ntp::tracking_now(&s);
+                let v = blocking(step, StatusCode::BAD_GATEWAY).await?;
                 Ok(axum::Json(v).into_response())
             }
             .await,
@@ -22247,10 +22242,9 @@ mod watchdog {
     async fn api_time() -> axum::response::Response {
         answer(
             async {
-                use axum::http::StatusCode;
                 use axum::response::IntoResponse;
                 let s = settings()?;
-                let v = clock::report(&s).map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                let v = clock::report(&s).map_err(gateway)?;
                 Ok(axum::Json(v).into_response())
             }
             .await,
