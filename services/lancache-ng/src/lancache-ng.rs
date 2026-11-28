@@ -4020,15 +4020,15 @@ mod config {
     // From: Issue #1683 | PR #2020
     pub async fn run(args: &[String]) -> Result<(), String> {
         let s = Settings::from_process()?;
-        let op = crate::shared::cli::op_of(&COMMANDS, args.first());
-        match (op, args.get(1..).unwrap_or_default()) {
+        let (op, rest) = crate::shared::cli::split(&COMMANDS, args);
+        match (op, rest.as_slice()) {
             (Some(Op::Show), []) => println!("{}", s.view_json()),
             // What: schema row and origin of every setting.
             // Why: type, limits and why a value is set.
             // From: Issue #1683 | PR #2020
             (Some(Op::Schema), []) => println!("{}", s.describe(None)?),
             (Some(Op::Schema), [key]) => println!("{}", s.describe(Some(key))?),
-            (Some(Op::Show), [key]) => match s.view().get(key) {
+            (Some(Op::Show), [key]) => match s.view().get(*key) {
                 Some(v) => println!("{v}"),
                 None => return Err(format!("{key}: no such setting or a secret")),
             },
@@ -7022,6 +7022,17 @@ mod shared {
             word: Option<&String>,
         ) -> Option<T> {
             pick(table, word?).map(|row| row.op)
+        }
+
+        // What: the action of a command, its other words.
+        // Why: group commands match both in one place.
+        // From: Issue #1683 | PR #2020
+        pub fn split<'a, T: Copy>(
+            table: &[(&'static str, Entry<T>)],
+            args: &'a [String],
+        ) -> (Option<T>, Vec<&'a str>) {
+            let rest = args.iter().skip(1).map(String::as_str).collect();
+            (op_of(table, args.first()), rest)
         }
 
         // What: the forms of a table with a separator.
@@ -10019,13 +10030,11 @@ mod shared {
             let s = crate::config::Settings::from_process()?;
             use crate::shared::cli;
             use crate::shared::http::Body;
-            let words: Vec<&str> = args.iter().map(String::as_str).collect();
-            let op = cli::op_of(&COMMANDS, args.first());
-            let rest = words.get(1..).unwrap_or_default();
+            let (op, rest) = cli::split(&COMMANDS, args);
             // What: start/stop/restart/reload go to the ui.
             // Why: the ui keeps SERVICES_STOPPED.
             // From: Issue #1683 | PR #2020
-            let (route, body) = match (op, rest) {
+            let (route, body) = match (op, rest.as_slice()) {
                 (Some(Op::Status), []) => {
                     let v = status_json(&client(&s)?, &s).await;
                     println!("{v}");
@@ -15302,11 +15311,9 @@ end
             use crate::shared::http::{Body, ui_socket};
             let s = Settings::from_process()?;
             use crate::shared::cli;
-            let words: Vec<&str> = args.iter().map(String::as_str).collect();
-            let op = cli::op_of(&COMMANDS, args.first());
-            let rest = words.get(1..).unwrap_or_default();
+            let (op, rest) = cli::split(&COMMANDS, args);
             let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
-            let (key, form) = match (op, rest) {
+            let (key, form) = match (op, rest.as_slice()) {
                 (Some(Op::List), []) => {
                     println!("{}", listing(&s)?);
                     return Ok(());
@@ -15697,9 +15704,8 @@ end
         pub async fn run(args: &[String]) -> Result<(), String> {
             let s = Settings::from_process()?;
             use crate::shared::cli;
-            let words: Vec<&str> = args.iter().map(String::as_str).collect();
-            let op = cli::op_of(&COMMANDS, args.first());
-            match (op, words.get(1..).unwrap_or_default()) {
+            let (op, rest) = cli::split(&COMMANDS, args);
+            match (op, rest.as_slice()) {
                 (Some(Op::List), []) => println!("{}", listing(&s)?),
                 (Some(Op::Graph), [name, range, out]) => {
                     let g = all(&s)?
