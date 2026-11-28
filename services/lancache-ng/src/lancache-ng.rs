@@ -2099,24 +2099,6 @@ mod cachehamster {
         Ok(json!({"apps": apps, "apps_human": human, "ok": errors.is_empty(), "errors": errors}))
     }
 
-    // What: empty the whole cache of every service.
-    // Why: a full wipe stands next to the per-game evict.
-    // From: Issue #871 | PR #1991
-    fn wipe(c: &Ctx) -> Result<Value, String> {
-        use crate::shared::tidy;
-        let (all, mut errors) = tidy::files(&tidy::cache_root(&c.s)?);
-        let (freed, failed) = tidy::delete(&all);
-        let files = all.len() - failed.len();
-        errors.extend(failed);
-        Ok(json!({
-            "freed": freed,
-            "freed_human": human::bytes(freed),
-            "files": files,
-            "ok": errors.is_empty(),
-            "errors": errors,
-        }))
-    }
-
     // What: depots of one app from PICS, then saved.
     // Why: games never preloaded have no saved depots.
     // From: Issue #871 | PR #1991
@@ -2392,7 +2374,6 @@ mod cachehamster {
         Logout,
         Library,
         Cached,
-        Wipe,
         FetchCheck,
         SteamCheck,
         Lookup,
@@ -2428,7 +2409,7 @@ mod cachehamster {
     // What: every command cachehamster takes.
     // Why: help, errors, choice and REST read this table.
     // From: Issue #871 | PR #2020
-    const COMMANDS: [(&str, crate::shared::cli::Entry<Cmd>); 18] = [
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Cmd>); 17] = [
         (
             "daemon",
             crate::shared::cli::row(
@@ -2517,16 +2498,6 @@ mod cachehamster {
                     rest: Rest::Plain,
                 },
                 "cached",
-            ),
-        ),
-        (
-            "wipe",
-            crate::shared::cli::row(
-                Cmd {
-                    op: Op::Wipe,
-                    rest: Rest::Plain,
-                },
-                "wipe",
             ),
         ),
         (
@@ -2732,7 +2703,6 @@ mod cachehamster {
             Op::Cached => cached(&c),
             Op::FetchCheck => fetch_check(&c, &args[1..]).await,
             Op::SteamCheck => steam_check(&c).await,
-            Op::Wipe => wipe(&c),
             Op::Lookup => app_cache(&c, &args[1..], false).await,
             Op::Evict => app_cache(&c, &args[1..], true).await,
             Op::Add => submit(&c, &parse_add(&args[1..])?),
@@ -16464,16 +16434,13 @@ end
         #[derive(Clone, Copy, PartialEq)]
         enum Op {
             Usage,
-            Wipe,
         }
 
         // What: every command of the cache group.
         // Why: help, errors and the choice read this table.
         // From: Issue #1683 | PR #2020
-        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 2] = [
-            ("usage", crate::shared::cli::row(Op::Usage, "usage")),
-            ("wipe", crate::shared::cli::row(Op::Wipe, "wipe")),
-        ];
+        const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 1] =
+            [("usage", crate::shared::cli::row(Op::Usage, "usage"))];
 
         // What: lancache-ng cache usage: counts, then JSON.
         // Why: cache reads have their CLI with their owner.
@@ -16489,20 +16456,6 @@ end
                         true => Ok(()),
                         false => Err(format!("cache usage: not read: {}", errs.join("; "))),
                     }
-                }
-                // What: wipe goes to the ui, as the button.
-                // Why: the ui lowers the shown sum at once.
-                // From: Issue #1683 | PR #2020
-                Some(Op::Wipe) => {
-                    let r = crate::shared::fill(
-                        s.text("UI_ROUTE_HAMSTER_API")?,
-                        &[("op", "wipe".into())],
-                    );
-                    let body = crate::shared::http::Body::Form(vec![]);
-                    let v = crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &r, body)
-                        .await?;
-                    println!("{v}");
-                    Ok(())
                 }
                 None => Err(crate::shared::cli::help(&COMMANDS)),
             }
@@ -19626,6 +19579,21 @@ mod ui {
     // Why: the watchdog runs it; errors in page words.
     // From: Issue #1683 | PR #2020
     async fn to_watchdog(s: &Settings, route: &str, body: crate::shared::http::Body) -> Page {
+        let (code, v) = ask_watchdog(s, route, body).await?;
+        Ok(match v {
+            Some(v) => (code, axum::Json(v)).into_response(),
+            None => code.into_response(),
+        })
+    }
+
+    // What: status and JSON of one watchdog call.
+    // Why: an error comes back in the page language.
+    // From: Issue #1683 | PR #2020
+    async fn ask_watchdog(
+        s: &Settings,
+        route: &str,
+        body: crate::shared::http::Body,
+    ) -> Result<(StatusCode, Option<Value>), Fail> {
         use crate::shared::http::{Peer, send};
         let (status, text) = send(s, Peer::Watchdog, route, body)
             .await
@@ -19642,10 +19610,20 @@ mod ui {
             };
             return Err(Fail(code, why));
         }
-        Ok(match v {
-            Some(v) => (code, axum::Json(v)).into_response(),
-            None => code.into_response(),
-        })
+        Ok((code, v))
+    }
+
+    // What: freed bytes leave the shown sum at once.
+    // Why: the sum must not lag behind a wipe or evict.
+    // From: Issue #871 | PR #1991
+    fn lower_cache_sum(app: &App, v: &Value) {
+        if let Some(freed) = v.get("freed").and_then(Value::as_u64) {
+            let _ = app
+                .cache_used
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    (n != u64::MAX).then(|| n.saturating_sub(freed))
+                });
+        }
     }
 
     // What: one cachehamster REST call; JSON answer.
@@ -19706,7 +19684,10 @@ mod ui {
         if field(&query, "dry_run") == "1" {
             route.push_str("?dry_run=1");
         }
-        to_watchdog(&s, &route, crate::shared::http::Body::Form(vec![])).await
+        let (code, v) = ask_watchdog(&s, &route, crate::shared::http::Body::Form(vec![])).await?;
+        let v = v.unwrap_or_default();
+        lower_cache_sum(&app, &v);
+        Ok((code, axum::Json(v)).into_response())
     }
 
     // What: cachehamster page.
@@ -19792,16 +19773,7 @@ mod ui {
             false => vec![("url".to_string(), url)],
         };
         let v = hamster(&app.settings(), &op, fields).await?;
-        // What: freed bytes leave the shown sum at once.
-        // Why: the sum must not lag behind a wipe.
-        // From: Issue #871 | PR #1991
-        if let Some(freed) = v.get("freed").and_then(Value::as_u64) {
-            let _ = app
-                .cache_used
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    (n != u64::MAX).then(|| n.saturating_sub(freed))
-                });
-        }
+        lower_cache_sum(&app, &v);
         Ok(axum::Json(v).into_response())
     }
 
@@ -21413,7 +21385,7 @@ mod watchdog {
     // What: the tidy steps the CLI and REST offer.
     // Why: one list for the command and the route.
     // From: Issue #1683 | PR #2020
-    pub(crate) const TIDY_STEPS: [&str; 3] = [PURGE, PRUNE, PACK];
+    pub(crate) const TIDY_STEPS: [&str; 4] = [PURGE, PRUNE, PACK, WIPE];
 
     // What: CLI names of the three tidy steps.
     // Why: list, dispatch and answers read these.
@@ -21421,6 +21393,7 @@ mod watchdog {
     const PURGE: &str = "purge-cache";
     const PRUNE: &str = "prune-logs";
     const PACK: &str = "pack-logs";
+    const WIPE: &str = "wipe-cache";
 
     // What: what one tidy step picked and did.
     // Why: round, CLI and REST read one answer.
@@ -21440,6 +21413,10 @@ mod watchdog {
         budget: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         owner_fixed: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        freed: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        freed_human: Option<String>,
     }
 
     // What: the answer for the picked files.
@@ -21493,6 +21470,23 @@ mod watchdog {
             eprintln!("watchdog: cache purge removed {removed} files");
             t.errors.extend(failed);
             tidy::save_stamp(&stamp, now)?;
+        }
+        Ok(Some(t))
+    }
+
+    // What: on demand: drop every cache file.
+    // Why: a full wipe stands next to the per-game evict.
+    // From: Issue #871 | PR #2020
+    fn wipe_cache(s: &Settings, when: When) -> Result<Option<Tidied>, String> {
+        let (all, unread) = tidy::files(&tidy::cache_root(s)?);
+        let mut t = picked(s, WIPE, when, &all)?;
+        t.errors = unread;
+        if when != When::Dry {
+            let (freed, failed) = tidy::delete(&all);
+            t.count -= failed.len();
+            t.errors.extend(failed);
+            t.freed = Some(freed);
+            t.freed_human = Some(crate::shared::human::bytes(freed));
         }
         Ok(Some(t))
     }
@@ -21567,6 +21561,7 @@ mod watchdog {
             PURGE => purge_cache(s, now, when)?,
             PRUNE => prune_logs(s, now, when)?,
             PACK => pack_logs(s, now, when)?,
+            WIPE => wipe_cache(s, when)?,
             _ => return Err(format!("{step}: steps: {}", TIDY_STEPS.join(" "))),
         };
         let mut t = done.ok_or("step did not run")?;

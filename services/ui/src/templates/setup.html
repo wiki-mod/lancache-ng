@@ -116,7 +116,7 @@
     <div class="section-title">{{ t.cache_wipe_title }}</div>
     <p class="section-sub">{{ t.cache_wipe_hint }}</p>
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-      <button type="button" class="btn btn-danger" data-cache-wipe="{{ routes.hamster_api | replace(from="{op}", to="wipe") | safe }}">{{ t.cache_wipe }}</button>
+      <button type="button" class="btn btn-danger" data-cache-wipe="{{ routes.watchdog_tidy | replace(from="{op}", to="wipe-cache") | safe }}">{{ t.cache_wipe }}</button>
       <span class="field-hint" data-cache-wipe-state style="margin:0;"></span>
     </div>
     <div class="section-title">{{ t.sign_in }}</div>
