@@ -17699,13 +17699,20 @@ mod ui {
         s.text_or_empty("UI_AUTH_PASSWORD_HASH")
     }
 
+    // What: may the ui run: a login, or the opt-out.
+    // Why: AG-SEC-001: no login needs ALLOW_INSECURE_UI.
+    // From: Issue #1683 | PR #2020
+    fn open_allowed(s: &Settings) -> Result<bool, String> {
+        Ok(!password_hash(s).is_empty() || s.flag("ALLOW_INSECURE_UI")?)
+    }
+
     // What: Basic auth; no hash needs ALLOW_INSECURE_UI.
     // Why: AG-SEC-001 holds at each login, not at start.
     // From: Issue #1683 | PR #1858
     pub(crate) async fn login_ok(s: &Settings, headers: &HeaderMap) -> bool {
         let hash = password_hash(s);
         if hash.is_empty() {
-            return s.flag("ALLOW_INSECURE_UI").unwrap_or(false);
+            return open_allowed(s).unwrap_or(false);
         }
         let Some((user, pass)) = basic_credentials(headers) else {
             return false;
@@ -20768,8 +20775,7 @@ mod ui {
         // What: no login and no opt-out stops the ui.
         // Why: AG-SEC-001: fail closed unless opted out.
         // From: Issue #1683 | PR #1985
-        let hash = password_hash(&s);
-        if hash.is_empty() && !s.flag("ALLOW_INSECURE_UI")? {
+        if !open_allowed(&s)? {
             return Err("Admin-UI authentication is required".into());
         }
         let dir = secret::dir(&s)?;
