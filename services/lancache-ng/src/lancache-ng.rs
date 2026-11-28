@@ -9172,30 +9172,19 @@ mod shared {
                 .ok_or_else(|| format!("{word}: unknown record type"))
         }
 
-        // What: end of a DNS name at offset at.
-        // Why: answers use labels and compression pointers.
-        // From: Issue #1683 | PR #2017
-        fn name_end(msg: &[u8], mut at: usize) -> Result<usize, String> {
-            loop {
-                let len = *msg.get(at).ok_or("DNS name is cut off")?;
-                match len & 0xc0 {
-                    0 if len == 0 => return Ok(at + 1),
-                    0 => at += 1 + usize::from(len),
-                    0xc0 if at + 1 < msg.len() => return Ok(at + 2),
-                    _ => return Err("DNS name is cut off or bad".into()),
-                }
-            }
-        }
-
-        // What: a dotted DNS name at offset at.
+        // What: a DNS name at offset at and where it ends.
         // Why: answers hold names with compression.
         // From: Issue #1683 | PR #2020
-        fn name_text(msg: &[u8], mut at: usize) -> Result<String, String> {
+        fn name_at(msg: &[u8], mut at: usize) -> Result<(String, usize), String> {
             let mut out = Vec::new();
+            let mut end = None;
             for _ in 0..128 {
                 let len = *msg.get(at).ok_or("DNS name is cut off")?;
                 match len & 0xc0 {
-                    0 if len == 0 => return Ok(format!("{}.", out.join("."))),
+                    0 if len == 0 => {
+                        let text = format!("{}.", out.join("."));
+                        return Ok((text, end.unwrap_or(at + 1)));
+                    }
                     0 => {
                         let l = msg
                             .get(at + 1..at + 1 + usize::from(len))
@@ -9205,6 +9194,7 @@ mod shared {
                     }
                     0xc0 => {
                         let lo = *msg.get(at + 1).ok_or("DNS name is cut off")?;
+                        end.get_or_insert(at + 2);
                         at = (usize::from(len & 0x3f) << 8) | usize::from(lo);
                     }
                     _ => return Err("DNS name is bad".into()),
@@ -9256,12 +9246,12 @@ mod shared {
             }
             let mut at = HEADER_LEN;
             for _ in 0..word(4)? {
-                at = name_end(msg, at)? + 4;
+                at = name_at(msg, at)?.1 + 4;
             }
             let mut answers = Vec::new();
             for _ in 0..word(6)? {
-                let name = name_text(msg, at)?;
-                at = name_end(msg, at)?;
+                let (name, after) = name_at(msg, at)?;
+                at = after;
                 let rtype = word(at)?;
                 let ttl = (u32::from(word(at + 4)?) << 16) | u32::from(word(at + 6)?);
                 let start = at + 10;
@@ -9274,12 +9264,13 @@ mod shared {
                         b.copy_from_slice(rd);
                         std::net::Ipv6Addr::from(b).to_string()
                     }
-                    (TYPE_NS | TYPE_CNAME | TYPE_PTR, _) => name_text(msg, start)?,
+                    (TYPE_NS | TYPE_CNAME | TYPE_PTR, _) => name_at(msg, start)?.0,
                     (TYPE_SOA, _) => {
-                        let p = name_end(msg, name_end(msg, start)?)?;
+                        let (mname, rname) = name_at(msg, start)?;
+                        let p = name_at(msg, rname)?.1;
                         let b = msg.get(p..p + 4).filter(|_| p + 4 <= end).ok_or_else(cut)?;
                         let serial = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-                        format!("{} serial {serial}", name_text(msg, start)?)
+                        format!("{mname} serial {serial}")
                     }
                     _ => rd.iter().map(|b| format!("{b:02x}")).collect(),
                 };
