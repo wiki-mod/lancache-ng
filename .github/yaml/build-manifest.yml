@@ -27,7 +27,6 @@ image_base:
     - lsof
     - nano
     - net-snmp
-    - net-snmp-tools
     - ripgrep
     - rrdtool
     - sed
@@ -65,18 +64,18 @@ services:
     # What: the image.description label ci.sh sets.
     # Why: the Dockerfile holds no label text (AG-CI-023).
     # From: Issue #1683 | PR #1912
-    description: "LanCache-NG services: supervisor for watchdog, retention, syslog-ng and chrony."
+    description: "LanCache-NG services: watchdog, cachehamster, syslog-ng, chrony and snmpd."
     build_type: rust
     # What: crates (cargo -p) the services image builds.
-    # Why: supervisor and cachehamster run in one container.
+    # Why: watchdog and cachehamster run in one container.
     # From: Issue #1683
-    crates: [lancache-watchdog, lancache-cachehamster]
-    # What: processes lancache-watchdog supervise runs.
+    crates: [lancache-ng]
+    # What: OpenRC services of the services image.
     # Why: ci.sh bakes them as LANCACHE_PROCESSES; one list.
     # From: Issue #1683
     processes:
-      - lancache-watchdog=/usr/local/bin/lancache-watchdog
-      - lancache-cachehamster=/usr/local/bin/lancache-cachehamster,daemon
+      - lancache-watchdog=/usr/local/bin/lancache-ng,watchdog
+      - lancache-cachehamster=/usr/local/bin/lancache-ng,cachehamster,daemon
       - syslog-ng=/usr/sbin/syslog-ng,-F,-f,@SYSLOG_CONF_FILE@
       - chronyd=/usr/sbin/chronyd,-d,-f,@CHRONY_CONF_FILE@
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
@@ -166,9 +165,9 @@ services:
     # What: crates (cargo -p) the dns image builds.
     # Why: the dns helper runs in the dns container.
     # From: Issue #1683
-    crates: [lancache-dns]
+    crates: [lancache-ng]
     processes:
-      - lancache-dns=/usr/local/bin/lancache-dns
+      - lancache-dns=/usr/local/bin/lancache-ng,dns
       - pdns=/usr/sbin/pdns_server,--config-dir=@CONFIG_DIR@/dns,--guardian=no,--daemon=no
       - dns-http=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=http,--daemon=no
       - dns-https=/usr/sbin/pdns_recursor,--config-dir=@CONFIG_DIR@/dns,--config-name=https,--daemon=no
@@ -254,34 +253,33 @@ services:
     # What: crates the ui image builds.
     # Why: rust checks target crates, not the build context
     # From: Issue #1683 | PR #1858
-    crates: [lancache-ui]
+    crates: [lancache-ng]
     # What: runtime defaults the Dockerfile takes as args.
     # Why: the image builds with the value; it names none.
     # From: Issue #1683 | PR #1912
-    default_args: [UI_LISTEN_PORT]
+    default_args: [UI_LISTEN_PORT, TEMPLATE_DIR, LANG_DIR, STATIC_DIR]
     # What: OpenRC services of the ui image.
     # Why: one start path; compose names no command.
     # From: Issue #1683
     processes:
-      - lancache-ui=/usr/local/bin/lancache-ui
+      - lancache-ui=/usr/local/bin/lancache-ng,ui
       - snmpd=/usr/sbin/snmpd,-f,-C,-c,@SNMPD_CONF_FILE@
     # What: a command argument runs the ui tool directly.
-    # Why: render-dns, hash-password run without OpenRC.
+    # Why: hash-password, dhcp-probe etc. skip OpenRC.
     # From: Issue #1683
     init_pre:
-      - 'if [ "$#" -gt 0 ] && [ ! -d "@OPENRC_RUNLEVEL_DIR@/$1" ]; then exec /usr/local/bin/lancache-ui "$@"; fi'
+      - 'if [ "$#" -gt 0 ] && [ ! -d "@OPENRC_RUNLEVEL_DIR@/$1" ]; then exec /usr/local/bin/lancache-ng ui "$@"; fi'
       - "rm -rf '@OPENRC_STATE_DIR@'"
     process_pre:
       - 'snmpd=until [ -s @SNMPD_CONF_FILE@ ]; do sleep @PROXY_CONFIG_WAIT_SECONDS@; done'
     # What: final-image apk packages of the ui.
-    # Why: stats run rrdtool, snmpget; certs openssl.
+    # Why: stats run rrdtool; certs openssl.
     # From: Issue #1683 | PR #1980
     packages:
       - openrc
       - openrc-init
       - rrdtool
       - font-dejavu
-      - net-snmp-tools
       - openssl
     setup:
       - group=@LOG_READER_GROUP@:@GID@
@@ -487,22 +485,35 @@ runtime:
   # Why: images bake them; no .env template holds any.
   # From: Issue #1683 | PR #1912
   defaults:
+    # What: pdns API ports of auth and both recursors.
+    # Why: pdns.conf and the recursor ports build on them.
+    # From: Issue #1683 | PR #2020
     - PDNS_AUTH_API_PORT=8081
     - PDNS_HTTP_API_PORT=8082
     - PDNS_HTTPS_API_PORT=8084
-    - PDNS_SOA_REFRESH=30
-    - PDNS_SOA_RETRY=10
-    - PDNS_SOA_RESYNC_INTERVAL=3600
-    - PDNS_XFR_CYCLE_INTERVAL=15
-    - PDNS_SOA_MNAME=localhost.
-    - PDNS_SOA_RNAME=admin.@
-    - PDNS_SOA_EXPIRE=604800
-    - PDNS_SOA_MINIMUM=3600
+    # What: log level of the pdns auth server.
+    # Why: the dns render writes it into pdns.conf.
+    # From: Issue #1683 | PR #2020
     - PDNS_AUTH_LOGLEVEL=3
+    # What: private IPv4 nets of a LAN.
+    # Why: other SOT values name them as @PRIVATE_NETS@.
+    # From: Issue #1683 | PR #2020
     - PRIVATE_NETS=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8
+    # What: older allow list of the DNS API.
+    # Why: no release reads it; PDNS_API_ALLOW_FROM rules.
+    # From: Issue #1683 | PR #2020
     - DNS_API_ALLOW_FROM=@PRIVATE_NETS@
+    # What: clients the recursors answer.
+    # Why: the dns render writes the allow list.
+    # From: Issue #1683 | PR #2020
     - DNS_QUERY_ALLOW_FROM=@PRIVATE_NETS@ fc00::/7
+    # What: loopback written as nets.
+    # Why: setup.sh tells loopback from a LAN address.
+    # From: Issue #1683 | PR #2020
     - LOOPBACK_NETS=127.0.0.0/8 ::1
+    # What: RPZ zone SOA, TTL and policy name.
+    # Why: the recursor RPZ sends cache names to the proxy.
+    # From: Issue #1683 | PR #2020
     - RPZ_SOA_RNAME=admin.rpz.
     - RPZ_TTL=60
     - RPZ_SOA_REFRESH=3600
@@ -511,9 +522,15 @@ runtime:
     - RPZ_SOA_EXPIRE=86400
     - RPZ_SOA_MINIMUM=60
     - RPZ_POLICY_NAME=lancache-rpz
+    # What: root zone copy: URL, refresh and retry.
+    # Why: the recursors keep a local copy of the root.
+    # From: Issue #1683 | PR #2020
     - ROOT_ZONE_MIRROR_URL=https://www.internic.net/domain/root.zone
     - ROOT_ZONE_MIRROR_REFRESH=1800
     - ROOT_ZONE_MIRROR_RETRY=3600
+    # What: recursor cache sizes, TTL rules, log levels.
+    # Why: the dns render writes them into recursor yaml.
+    # From: Issue #1683 | PR #2020
     - RECURSOR_MINIMUM_TTL_OVERRIDE=60
     - RECURSOR_RECORDCACHE_MAX_ENTRIES=1000000
     - RECURSOR_REFRESH_ON_TTL_PERC=10
@@ -524,11 +541,17 @@ runtime:
     - RECURSOR_SERVFAIL_TTL=30
     - RECURSOR_LOGLEVEL=3
     - RECURSOR_LOGLEVEL_QUERIES=6
+    # What: watchdog round, user stops, restarts, disk use.
+    # Why: the watchdog heals and alarms by them.
+    # From: Issue #1683 | PR #2020
     - CHECK_INTERVAL=30
     - SERVICES_STOPPED=
     - RESTART_AFTER=3
     - DISK_WARN_PCT=85
     - DISK_ALARM_PCT=95
+    # What: timings of the old supervisor and Docker calls.
+    # Why: unread in every release; DOCKER_TIMEOUT is used.
+    # From: Issue #1683 | PR #2020
     - DOCKER_API_TIMEOUT=5
     - DOCKER_RESTART_TIMEOUT=30
     - DOCKER_RESTART_GRACE=2
@@ -542,7 +565,13 @@ runtime:
     # Why: covers DHCP_PROBE_WINDOW_MS plus the lease wait.
     # From: Issue #1683 | PR #1985
     - DHCP_PROBE_WAIT_TIMEOUT=30
+    # What: secondary check wait while own pdns is down.
+    # Why: at ui start the dns may not run yet.
+    # From: Issue #1683 | PR #2020
     - PDNS_SOA_COLD_RETRY=5
+    # What: seconds until syslog-ng closes an idle log file.
+    # Why: the syslog render writes it as time-reap.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_TIME_REAP=30
     # What: syslog-ng store modes and transports.
     # Why: readers get group read; forward is reliable.
@@ -551,15 +580,34 @@ runtime:
     - SYSLOG_FILE_PERM=0640
     - SYSLOG_IN_TRANSPORT=udp
     - SYSLOG_FWD_TRANSPORT=tcp
+    # What: HTTP client timeout, pool idle and keepalive.
+    # Why: one shared client builder reads them.
+    # From: Issue #1683 | PR #2020
     - HTTP_CLIENT_TIMEOUT=10
+    # What: most bytes of one answer read into memory.
+    # Why: a far end must not fill the memory (F-139).
+    # From: Issue #1683 | PR #2020
+    - HTTP_RESPONSE_MAX_BYTES=268435456
     - HTTP_POOL_IDLE_TIMEOUT=90
     - HTTP_TCP_KEEPALIVE=60
+    # What: timeout of an older health probe.
+    # Why: unread in every release.
+    # From: Issue #1683 | PR #2020
     - HEALTH_PROBE_TIMEOUT=2
+    # What: compose healthcheck interval, timeout, retries.
+    # Why: compose fills every healthcheck from them.
+    # From: Issue #1683 | PR #2020
     - HEALTHCHECK_INTERVAL=30s
     - HEALTHCHECK_TIMEOUT=5s
     - HEALTHCHECK_RETRIES=3
     - HEALTHCHECK_START_PERIOD=20s
+    # What: wait before a failed log prune runs again.
+    # Why: the watchdog retries the log budget later.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_PRUNE_RETRY_COOLDOWN=3600
+    # What: cachehamster connections and report gap.
+    # Why: cachehamster reads them for each run.
+    # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_CONCURRENCY=8
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=10
     # What: prefill limit in Mbit/s (0 = none), window.
@@ -567,44 +615,95 @@ runtime:
     # From: Issue #871 | PR #1980
     - CACHEHAMSTER_MAX_MBIT=0
     - CACHEHAMSTER_WINDOW=00:00-24:00
+    # What: DHCP lease time, its bounds and the max factor.
+    # Why: the Kea render and the DHCP page use them.
+    # From: Issue #1683 | PR #2020
     - DHCP_LEASE_TIME=86400
     - DHCP_LEASE_TIME_MIN=60
     - DHCP_LEASE_TIME_MAX=604800
     - DHCP_MAX_LEASE_FACTOR=2
+    # What: cache slices, validity, eviction and keep days.
+    # Why: nginx templates and the watchdog purge read them.
+    # From: Issue #1683 | PR #2020
     - CACHE_SLICE_SIZE=8m
     - CACHE_VALID_HIT=@CACHE_VALID_DAYS@d
     - CACHE_VALID_ANY=1m
     - CACHE_INACTIVE=@CACHE_VALID_DAYS@d
     - CACHE_MIN_FREE=1g
     - CACHE_VALID_DAYS=365
+    # What: log budget, keep days and xz level.
+    # Why: the watchdog prunes and packs logs by them.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_MAX_GB=10
     - SYSLOG_RETENTION_DAYS=30
     - SYSLOG_XZ_PRESET=6
+    # What: setup.sh answer for DNS query logging.
+    # Why: DNS_QUERY_LOG takes it as its default.
+    # From: Issue #1683 | PR #2020
     - LOG_QUERIES=0
+    # What: local root zone copy on or off.
+    # Why: the dns render adds the root copy when on.
+    # From: Issue #1683 | PR #2020
     - ROOT_ZONE_MIRROR=1
+    # What: upstream DNS servers and the zones they serve.
+    # Why: the recursors forward these zones there.
+    # From: Issue #1683 | PR #2020
     - DNS_UPSTREAM_SERVERS=
     - DNS_UPSTREAM_ZONES=.
     - DNS_UPSTREAM_UNSIGNED_ZONES=
+    # What: main LAN domain of DHCP and DNS.
+    # Why: zones, SOA and the DHCP domain build on it.
+    # From: Issue #1683 | PR #2020
     - DHCP_DOMAIN=lancache-ng.lan
     # What: more LAN domains beside DHCP_DOMAIN.
     # Why: each gets its own zone; empty = only one.
     # From: Issue #1683
     - DNS_EXTRA_LAN_DOMAINS=
+    # What: setup.sh answer for DHCP DDNS.
+    # Why: DHCP_DDNS takes it as its default.
+    # From: Issue #1683 | PR #2020
     - DHCP_DDNS_ENABLED=false
+    # What: Kea control agent user and port.
+    # Why: the ui calls Kea there with basic auth.
+    # From: Issue #1683 | PR #2020
     - KEA_CTRL_USER=admin
     - KEA_CTRL_PORT=8000
+    # What: Kea config snapshot dir and file name.
+    # Why: the ui keeps rollback points of the Kea config.
+    # From: Issue #1683 | PR #2020
     - KEA_CONFIG_SNAPSHOT_DIR=@KEA_DATA_DIR@/config-snapshots
     - KEA_CONFIG_SNAPSHOT_FILE=dhcp4.json
+    # What: syslog port the stack programs log to.
+    # Why: syslog-ng listens there; the renders send to it.
+    # From: Issue #1683 | PR #2020
     - LANCACHE_LOG_PORT=5514
+    # What: log switches per service of an older layout.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - LOGGING_PROXY_ENABLED=1
     - LOGGING_DNS_ENABLED=1
     - LOGGING_DHCP_ENABLED=1
     - LOGGING_UI_ENABLED=1
+    # What: upstream resolver of the proxy nginx.
+    # Why: nginx must not ask the LanCache DNS.
+    # From: Issue #1683 | PR #2020
     - NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4
+    # What: client ACL mode of the proxy: lazy or strict.
+    # Why: the ui renders the client ACL by it.
+    # From: Issue #1683 | PR #2020
     - PROXY_SECURITY_MODE=lazy
+    # What: upstream NTP servers of chrony.
+    # Why: chrony syncs the stack clock from them.
+    # From: Issue #1683 | PR #2020
     - NTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com
+    # What: cache size on disk and key zone memory.
+    # Why: nginx.conf and the dashboard read them.
+    # From: Issue #1683 | PR #2020
     - CACHE_MAX_GB=50
     - CACHE_MEM_MB=512
+    # What: default DHCP subnet, range, gateway and NTP.
+    # Why: setup.sh and the Kea render start from them.
+    # From: Issue #1683 | PR #2020
     - DHCP_SUBNET=10.0.0.0/24
     - DHCP_SUBNET_ID=1
     - DHCP_RANGE_START=10.0.0.128
@@ -615,9 +714,21 @@ runtime:
     # Why: a new install is usable before a login exists
     # From: Issue #1683 | PR #1985
     - ALLOW_INSECURE_UI=true
+    # What: run dir of the old supervisor.
+    # Why: no release reads it; compose gets it unused.
+    # From: Issue #1683 | PR #2020
     - SUPERVISE_RUN_DIR=/run/lancache
+    # What: shared secret dir of the images.
+    # Why: compose mounts it; the secrets live there.
+    # From: Issue #1683 | PR #2020
     - LANCACHE_SHARED_SECRET_DIR=/var/lib/lancache-secrets
+    # What: data dir of the ui.
+    # Why: compose mounts it; ui files sit below it.
+    # From: Issue #1683 | PR #2020
     - UI_DATA_DIR=/data
+    # What: old desired-state file of the ui.
+    # Why: no release has read it; SERVICES_STOPPED rules.
+    # From: Issue #1683 | PR #2020
     - DESIRED_STATE_FILE=@UI_DATA_DIR@/desired-state.json
     # What: dir and file of the stack .env in the containers
     # Why: one file for setup.sh, Compose and the ui
@@ -628,20 +739,39 @@ runtime:
     # Why: its values move into the stack .env, then it goes
     # From: Issue #1683 | PR #2017
     - UI_SETTINGS_FILE_RETIRED=@UI_DATA_DIR@/lancache-ui-settings.env
+    # What: older ui session secret and database files.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - UI_SESSION_SECRET_FILE=@UI_DATA_DIR@/lancache-ui-session.secret
-    - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
     - UI_DATABASE_FILE=@UI_DATA_DIR@/lancache-ui.db
+    # What: old path of the secondary registration token.
+    # Why: deprecated; the ui keeps it in the secret dir.
+    # From: Issue #1683 | PR #2020
+    - SECONDARY_REGISTRATION_TOKEN_FILE=@UI_DATA_DIR@/lancache-secondary-registration.token
+    # What: older ui log file and log page size.
+    # Why: no program reads them since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - UI_LOG_FILE=/var/log/lancache-ui/ui.log
-    - UI_LISTEN_PORT=8080
     - UI_LOGS_MAX_ENTRIES=200
+    # What: port the ui listens on.
+    # Why: compose and the ui image publish it.
+    # From: Issue #1683 | PR #2020
+    - UI_LISTEN_PORT=8080
+    # What: old ui session lifetime.
+    # Why: only setup.sh and compose read it since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - UI_SESSION_TTL_SECONDS=86400
     # What: wait for one secondary SOA answer, seconds.
     # Why: a silent secondary is a status, not a hang.
     # From: Issue #1683 | PR #1912
     - SECONDARY_PROBE_TIMEOUT=4
+    # What: wait for one answer of dns query, seconds.
+    # Why: a silent server is a result, not a hang.
+    # From: Issue #1683 | PR #2020
+    - DNS_QUERY_WAIT_SECONDS=4
     # What: stored alarm history cap of the ui, newest kept.
-    # Why: an alarm burst must not grow the file unbounded.
-    # From: Issue #1683 | PR #1858
+    # Why: deprecated; no release reads it, v0.1-v0.4.
+    # From: Issue #1683 | PR #2020
     - UI_ALARMS_MAX=50
     # What: every ui page and route path the ui serves.
     # Why: one owner for ui, setup.sh, ci.sh (AG-CODE-011)
@@ -662,7 +792,56 @@ runtime:
     - UI_ROUTE_ADMIN_CSS=/static/admin.css
     - UI_ROUTE_FAVICON=/favicon.ico
     - UI_ROUTE_LOGO_ICON=/static/logo-icon.png
-    - UI_ROUTE_WATCHDOG_STATUS=/api/status
+    - UI_ROUTE_CONTAINER_STATUS=/api/status
+    - UI_ROUTE_ALARMS=/api/alarms
+    - UI_ROUTE_DHCP_STATE=/api/dhcp
+    - UI_ROUTE_SETTINGS=/api/settings
+    - UI_ROUTE_ZONE_SNAPSHOTS=/api/zone-snapshots
+    - UI_ROUTE_KEA_SNAPSHOTS=/api/kea-snapshots
+    - UI_ROUTE_DHCP_STATS=/api/dhcp-stats
+    - UI_ROUTE_PROXY_STATUS=/api/proxy-status
+    - UI_ROUTE_NTP=/api/ntp
+    - UI_ROUTE_NTP_TRACKING=/api/ntp/tracking
+    - UI_ROUTE_SYSTEM_TIME=/api/system/time
+    - UI_ROUTE_DNS_RECORDS=/api/dns/records
+    - UI_ROUTE_DNS_TSIG=/api/dns/tsig
+    - UI_ROUTE_DNS_SOA_PROBE=/api/dns/soa-probe
+    - UI_ROUTE_PROXY_LOG=/api/proxy-log
+    - UI_ROUTE_SECRETS=/api/secrets
+    - UI_ROUTE_CACHE=/api/cache
+    - UI_ROUTE_APPLY_PLAN=/api/apply/plan
+    - UI_ROUTE_APPLY=/api/apply
+    - UI_ROUTE_APPLY_PREVIEW=/api/apply/preview
+    - UI_ROUTE_PROXY_PSL=/api/proxy/psl
+    - UI_ROUTE_DOCKER=/api/system/docker
+    - UI_ROUTE_STATS_LIST=/api/stats
+    - UI_ROUTE_STATS_SAMPLE=/api/stats/sample
+    - UI_ROUTE_STATS_SNMP_CHECK=/api/stats/snmp
+    - UI_ROUTE_LOGS=/api/logs
+    - UI_ROUTE_LANG=/api/ui/lang
+    - UI_ROUTE_UI_ROUTES=/api/ui/routes
+    - UI_ROUTE_UI_TEMPLATES=/api/ui/templates
+    - UI_ROUTE_CSRF=/api/csrf
+    - UI_ROUTE_PROXY_CERTS=/api/proxy/certs
+    - UI_ROUTE_PROXY_CERTS_RENEW=/api/proxy/certs/renew
+    - UI_ROUTE_STACK_SNAPSHOTS=/api/stack/snapshots
+    - UI_ROUTE_STACK_SNAPSHOT_SAVE=/api/stack/snapshots/save
+    - UI_ROUTE_STACK_SNAPSHOT_RESTORE=/api/stack/snapshots/restore
+    - UI_ROUTE_WATCHDOG_CHECK=/api/watchdog/check
+    - UI_ROUTE_WATCHDOG_PROCESSED=/api/watchdog/processed
+    - UI_ROUTE_WATCHDOG_PROGRAMS=/api/watchdog/programs
+    - UI_ROUTE_WATCHDOG_CONVERGE=/api/watchdog/converge/{service}
+    - UI_ROUTE_WATCHDOG_APPLY=/api/watchdog/apply
+    - UI_ROUTE_WATCHDOG_EXEC=/api/watchdog/exec/{key}/{owner}
+    - UI_ROUTE_WATCHDOG_TIDY=/api/watchdog/{op}
+    - UI_ROUTE_CDN=/api/cdn
+    - UI_ROUTE_SETTINGS_SCHEMA=/api/settings/schema
+    - UI_ROUTE_DNS_FLUSH=/api/dns/flush
+    - UI_ROUTE_DNSSEC=/api/dns/dnssec
+    - UI_ROUTE_DNS_API_CHECK=/api/dns/api-check
+    - UI_ROUTE_DNS_STATS=/api/dns/stats
+    - UI_ROUTE_DNS_QUERY=/api/dns/query
+    - UI_ROUTE_DNS_ZONES_ENSURE=/api/dns/zones/ensure
     - UI_ROUTE_DESIRED_STATE=/api/container/{service}
     - UI_ROUTE_RESTART_UI=/api/restart-ui
     - UI_ROUTE_SETUP_SAVE=/setup/save
@@ -698,6 +877,9 @@ runtime:
     # Why: the DNS page shows one zone overview table.
     # From: Issue #1683
     - UI_ROUTE_ZONE_OVERVIEW=/api/zones/overview
+    # What: more ui routes: DHCP, services, stats, register.
+    # Why: the ui serves them; templates name them by key.
+    # From: Issue #1683 | PR #2020
     - UI_ROUTE_DHCP_MODE=/dhcp/mode
     - UI_ROUTE_DHCP_DDNS=/dhcp/ddns
     - UI_ROUTE_DHCP_PROXY=/dhcp/proxy
@@ -717,14 +899,14 @@ runtime:
     - UI_ROUTE_SECONDARY_REGISTER=/api/secondary/register
     - UI_ROUTE_HEALTH=@PROXY_HEALTH_PATH@
     # What: ui page refresh timings, in seconds.
-    # Why: templates read the value; no literal in markup.
-    # From: Issue #1683 | PR #1912
+    # Why: deprecated; no release reads them, v0.1-v0.4.
+    # From: Issue #1683 | PR #2020
     - UI_WATCHDOG_REFRESH_SECONDS=10
     - UI_DASHBOARD_REFRESH_SECONDS=10
     - UI_STATS_REFRESH_SECONDS=3
     # What: restart page poll gap and first wait, seconds.
-    # Why: the page script reads them; no literal in markup.
-    # From: Issue #1683 | PR #1912
+    # Why: deprecated; no code has ever read them.
+    # From: Issue #1683 | PR #2020
     - UI_RESTART_POLL_INTERVAL_SECONDS=1
     - UI_RESTART_POLL_FIRST_DELAY_SECONDS=2
     # What: proxy start wait gap until nginx.conf exists.
@@ -736,7 +918,7 @@ runtime:
     # From: Issue #1683 | PR #1980
     - DNS_CONFIG_WAIT_SECONDS=1
     # What: samples the stats page charts keep per series.
-    # Why: one value for the chart size and the query.
+    # Why: no release has read it.
     # From: Issue #1683 | PR #1912
     - UI_STATS_POINTS=60
     # What: minutes between host convergence runs.
@@ -777,14 +959,17 @@ runtime:
     # What: repo files a secondary keeps in its compose dir.
     # Why: its compose mounts them from its dir.
     # From: Issue #1683 | PR #1858
-    - SETUP_SECONDARY_REPO_FILES=services/dns/cdn-domains.txt services/dns/filter-aaaa.lua
+    - SETUP_SECONDARY_REPO_FILES=services/dns/cdn-domains.txt
     # What: host service paths for systemd and OpenRC.
     # Why: setup.sh reads them here; no path in its code.
     # From: Issue #1683 | PR #1858
     - SYSTEMD_UNIT_DIR=/etc/systemd/system
-    - OPENRC_INIT_DIR=/etc/init.d
     - OPENRC_LOG_DIR=/var/log
     - OPENRC_STOP_TIMEOUT_SECONDS=600
+    # What: OpenRC init.d dir on the host and in images.
+    # Why: setup.sh and ci.sh openrc-setup read one row.
+    # From: Issue #1683
+    - OPENRC_INIT_DIR=/etc/init.d
     # What: 1 = dns answers private PTR zones itself.
     # Why: private PTR answers are opt-in.
     # From: Issue #1918 | PR #1858
@@ -792,15 +977,18 @@ runtime:
     # What: 1 = recursor logs every DNS query.
     # Why: the admin can follow DNS queries in the log.
     # From: Issue #1683 | PR #1980
-    - DNS_QUERY_LOG=0
+    - DNS_QUERY_LOG=@LOG_QUERIES@
     # What: private reverse zones the stack serves.
     # Why: RFC 1918 and ULA ranges; no list in code.
     # From: Issue #1683 | PR #1980
     - DNS_PRIVATE_REVERSE_ZONES=10.in-addr.arpa. 168.192.in-addr.arpa. 16.172.in-addr.arpa. 17.172.in-addr.arpa. 18.172.in-addr.arpa. 19.172.in-addr.arpa. 20.172.in-addr.arpa. 21.172.in-addr.arpa. 22.172.in-addr.arpa. 23.172.in-addr.arpa. 24.172.in-addr.arpa. 25.172.in-addr.arpa. 26.172.in-addr.arpa. 27.172.in-addr.arpa. 28.172.in-addr.arpa. 29.172.in-addr.arpa. 30.172.in-addr.arpa. 31.172.in-addr.arpa. c.f.ip6.arpa. d.f.ip6.arpa.
-    # What: the project address the ui links to.
+    # What: project address setup.sh clones from.
     # Why: setup.sh bootstrap copy; ci.sh checks both.
-    # From: Issue #1683 | PR #1912
+    # From: Issue #1683 | PR #2020
     - LANCACHE_REPO_URL=https://github.com/wiki-mod/lancache-ng
+    # What: Kea data dir, lease file and socket dir.
+    # Why: compose mounts them; the Kea render uses them.
+    # From: Issue #1683 | PR #2020
     - KEA_DATA_DIR=/var/lib/kea
     - KEA_LEASE_FILE=@KEA_DATA_DIR@/kea-leases4.csv
     - KEA_SOCKET_DIR=/run/kea
@@ -808,6 +996,9 @@ runtime:
     # Why: Kea refuses a dir looser than 750.
     # From: Issue #1683 | PR #1980
     - KEA_SOCKET_DIR_MODE=750
+    # What: older Kea dhcp4 and DDNS socket paths.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - KEA4_SOCKET=@KEA_SOCKET_DIR@/kea4.sock
     - KEA_DDNS_SOCKET=@KEA_SOCKET_DIR@/kea-ddns.sock
     # What: TSIG key name and algorithm of DDNS and AXFR.
@@ -816,45 +1007,99 @@ runtime:
     - DDNS_TSIG_NAME=lancache-ddns-key
     - DDNS_TSIG_ALGORITHM=hmac-sha256
     # What: the Docker bridge range of internal clients.
-    # Why: Kea control and proxy ACLs admit the same range.
+    # Why: the proxy nginx ACLs admit this range.
     # From: Issue #1683 | PR #1912
     - DOCKER_BRIDGE_NET=172.16.0.0/12
+    # What: Kea control ACL, firewall chain and realm.
+    # Why: no program reads them in v0.4.0 or later.
+    # From: Issue #1683 | PR #2020
     - KEA_CTRL_ALLOW_FROM=@DOCKER_BRIDGE_NET@ 127.0.0.0/8
     - KEA_CTRL_CHAIN=LANCACHE_KEA_CTRL
     - KEA_CTRL_REALM=kea-control
+    # What: Kea hook root and its search depth.
+    # Why: no release has read them.
+    # From: Issue #1683 | PR #2020
     - KEA_HOOKS_ROOT=/usr/lib
-    - KEA_LEASE_CMDS_HOOK=libdhcp_lease_cmds.so
     - KEA_HOOKS_SEARCH_DEPTH=5
+    # What: Kea lease commands hook file.
+    # Why: the Kea render loads it for the lease API.
+    # From: Issue #1683 | PR #2020
+    - KEA_LEASE_CMDS_HOOK=libdhcp_lease_cmds.so
+    # What: Kea DDNS queue, name prefix and name rule.
+    # Why: the Kea render writes them into the configs.
+    # From: Issue #1683 | PR #2020
     - KEA_NCR_MAX_QUEUE=1024
     - KEA_DDNS_GENERATED_PREFIX=dhcp
     - KEA_DDNS_REPLACE_CLIENT_NAME=when-present
+    # What: Kea log severity and debug level.
+    # Why: the Kea render writes the loggers from them.
+    # From: Issue #1683 | PR #2020
     - KEA_LOG_SEVERITY=INFO
-    - KEA_DHCP4_PACKET_LOG_SEVERITY=ERROR
     - KEA_LOG_DEBUGLEVEL=0
+    # What: Kea packet log severity of an older layout.
+    # Why: no release has read it; DHCP_LOG_PACKETS rules.
+    # From: Issue #1683 | PR #2020
+    - KEA_DHCP4_PACKET_LOG_SEVERITY=ERROR
+    # What: dns snapshot mount of the dns container.
+    # Why: compose mounts it; snapshots live below it.
+    # From: Issue #1683 | PR #2020
     - DNS_SNAPSHOT_MOUNT=/var/lib/lancache-dns
+    # What: older dns config snapshot dir and file names.
+    # Why: no program reads them in v0.4.0 or later.
+    # From: Issue #1683 | PR #2020
     - DNS_CONFIG_SNAPSHOT_DIR=@DNS_SNAPSHOT_MOUNT@/config-snapshots
     - DNS_AUTH_CONFIG_SNAPSHOT_FILE=pdns.conf
     - DNS_RECURSOR_CONFIG_SNAPSHOT_FILE=recursor.conf
     - DNS_ZONE_SNAPSHOT_FILE=zone.json
+    # What: dns state dir and pdns data dir.
+    # Why: compose mounts them into the dns container.
+    # From: Issue #1683 | PR #2020
     - DNS_STATE_DIR=/var/lib/powerdns-state
     - PDNS_DATA_DIR=/var/lib/powerdns
+    # What: replication role words: primary and secondary.
+    # Why: compose sets the role; the dns render reads it.
+    # From: Issue #1683 | PR #2020
     - DNS_REPLICATION_ROLE=primary
-    - RAW_CONTENT_URL=https://raw.githubusercontent.com
-    - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
     - DNS_REPLICATION_ROLE_SECONDARY=secondary
+    # What: base URL of raw repository files.
+    # Why: CI and other SOT URLs build on it.
+    # From: Issue #1683 | PR #2020
+    - RAW_CONTENT_URL=https://raw.githubusercontent.com
+    # What: path of setup.sh below RAW_CONTENT_URL.
+    # Why: no release has read it.
+    # From: Issue #1683 | PR #2020
+    - SETUP_SCRIPT_PATH=wiki-mod/lancache-ng/master/setup.sh
+    # What: secondary gid, loopback tries and secret dir.
+    # Why: setup.sh and the secondary compose read them.
+    # From: Issue #1683 | PR #2020
     - SECONDARY_RUNTIME_GID=0
     - SECONDARY_LOOPBACK_CANDIDATES=10
     - SECONDARY_SHARED_SECRET_DIR=@DNS_SNAPSHOT_MOUNT@/secrets
+    # What: container names of the stack.
+    # Why: compose names the containers; logs file by them.
+    # From: Issue #1683 | PR #2020
     - CONTAINER_NAME_PREFIX=LanCache-NG
     - CONTAINER_NAME_SERVICES=@CONTAINER_NAME_PREFIX@-services
     - CONTAINER_NAME_PROXY=@CONTAINER_NAME_PREFIX@-proxy
     - CONTAINER_NAME_DNS=@CONTAINER_NAME_PREFIX@-dns
     - CONTAINER_NAME_DHCP=@CONTAINER_NAME_PREFIX@-dhcp
     - CONTAINER_NAME_UI=@CONTAINER_NAME_PREFIX@-ui
+    # What: cache domain list file in the images.
+    # Why: compose mounts it; the renders read it.
+    # From: Issue #1683 | PR #2020
     - CDN_DOMAINS_FILE=/usr/share/lancache/cdn-domains.txt
+    # What: cachehamster data dir.
+    # Why: compose mounts it; cachehamster keeps state.
+    # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_DATA_DIR=/var/lib/lancache-cachehamster
+    # What: cache dir and the prefix it must stay in.
+    # Why: the purge never deletes outside the prefix.
+    # From: Issue #1683 | PR #2020
     - CACHE_DIR=/var/cache/lancache
     - CACHE_DIR_ALLOWED_PREFIX=/var/cache
+    # What: Docker socket path.
+    # Why: compose mounts it; DOCKER_ENDPOINT builds on it.
+    # From: Issue #1683 | PR #2020
     - DOCKER_SOCKET=/var/run/docker.sock
     # What: host clock zone file, read only.
     # Why: the cachehamster window is local time.
@@ -866,33 +1111,95 @@ runtime:
     # Why: steps a bad clock only at start.
     # From: Issue #1683 | PR #1980
     - NTP_MAKESTEP=1.0 3
+    # What: own NTP server on, and as a DHCP option.
+    # Why: DHCP hands out NTP only when both are on.
+    # From: Issue #1683 | PR #2020
     - NTP_ENABLED=1
-    - AUTO_UPDATE_ENABLED=0
     - NTP_AUTO_DHCP=0
+    # What: install choice for automatic updates.
+    # Why: setup.sh and the setup page read it.
+    # From: Issue #1683 | PR #2020
+    - AUTO_UPDATE_ENABLED=0
+    # What: ui security headers and dev mode switches.
+    # Why: deprecated; unread since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - UI_SECURITY_HEADERS=true
     - LANCACHE_DEV_MODE=false
+    # What: stamps of the last cache purge and log prune.
+    # Why: the watchdog runs each once a day, restarts too.
+    # From: Issue #1683 | PR #2020
     - RETENTION_STATE_DIR=/var/lib/lancache-retention-state
     - PURGE_STAMP=@RETENTION_STATE_DIR@/purge.stamp
     - SYSLOG_PRUNE_STAMP=@RETENTION_STATE_DIR@/syslog-prune.stamp
+    # What: watchdog state dir; it holds alarms.json.
+    # Why: a named volume keeps alarms over restarts.
+    # From: Issue #1683 | PR #2020
     - STATUS_DIR=/var/run/watchdog
+    # What: status.json path of the old watchdog.
+    # Why: deprecated; unread since v0.4.0.
+    # From: Issue #1683 | PR #2020
     - STATUS_FILE=@STATUS_DIR@/status.json
+    # What: REST sockets of watchdog and cachehamster.
+    # Why: ui and CLI call them; services and ui mount it.
+    # From: Issue #1683 | PR #2020
+    - SERVICES_API_DIR=/var/run/services-api
+    - WATCHDOG_SOCKET=@SERVICES_API_DIR@/watchdog.sock
+    - CACHEHAMSTER_SOCKET=@SERVICES_API_DIR@/cachehamster.sock
+    # What: wait of a call for a services answer.
+    # Why: tidy packs log trees; a library list is slow.
+    # From: Issue #1683 | PR #2020
+    - WATCHDOG_API_TIMEOUT_SECONDS=600
+    - CACHEHAMSTER_API_TIMEOUT_SECONDS=600
+    # What: syslog-ng log root and its allowed prefix.
+    # Why: the watchdog prunes logs only inside it.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
     - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=/var/log
+    # What: nginx stub_status path and the ui URL to it.
+    # Why: the dashboard shows live proxy counters.
+    # From: Issue #1683 | PR #2020
     - PROXY_STATUS_PATH=/nginx_status
     - PROXY_STATUS_URL=http://@PROXY_SERVICE@@PROXY_STATUS_PATH@
+    # What: host name of Kea on the Docker host.
+    # Why: compose maps it to host-gateway for the ui.
+    # From: Issue #1683 | PR #2020
     - DHCP_API_HOST=host.docker.internal
+    # What: URL of the dns service.
+    # Why: deprecated; no release has read it.
+    # From: Issue #1683 | PR #2020
     - DNS_URL=http://dns
+    # What: install defaults: HTTPS on, DHCP mode off.
+    # Why: setup.sh and the ui change them later.
+    # From: Issue #1683 | PR #2020
     - HTTPS_ENABLED=1
     - DHCP_MODE=off
+    # What: shared group of logs and TLS keys.
+    # Why: one gid lets the programs of all images read.
+    # From: Issue #1683 | PR #2020
     - LOG_READER_GROUP=lancache
+    # What: install dir of the stack on the host.
+    # Why: setup.sh installs there; CI cleans it up.
+    # From: Issue #1683 | PR #2020
     - LANCACHE_STATE_DIR=/opt/lancache-ng
+    # What: ui template, static file and text dirs.
+    # Why: compose mounts them from the checkout.
+    # From: Issue #1683 | PR #2020
     - TEMPLATE_DIR=/templates
     - STATIC_DIR=/static
     - LANG_DIR=/lang
+    # What: pdns config dir, run dir and schema file.
+    # Why: the dns setup and start rows use them.
+    # From: Issue #1683 | PR #2020
     - PDNS_CONF_DIR=/etc/pdns
     - PDNS_RUN_DIR=/var/run/pdns
-    - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
     - PDNS_SCHEMA_FILE=/usr/share/doc/pdns/schema.sqlite3.sql
+    # What: old mount path of filter-aaaa.lua in dns.
+    # Why: deprecated; no program and no mount reads it.
+    # From: Issue #1683 | PR #2020
+    - PDNS_LUA_DNS_SCRIPT=@PDNS_CONF_DIR@/filter-aaaa.lua
+    # What: nginx config root of the proxy and the ui.
+    # Why: templates and the cert dirs sit below it.
+    # From: Issue #1683 | PR #2020
     - NGINX_DIR=/etc/nginx
     # What: uid and gid of the nginx worker account.
     # Why: cache files are 0600; no other uid reads them.
@@ -903,18 +1210,33 @@ runtime:
     # Why: the ui renders them; package examples go
     # From: Issue #1683 | PR #2017
     - NGINX_LINK_PARTS=conf.d stream.d proxy-params.conf
+    # What: CA and leaf cert dirs below NGINX_DIR.
+    # Why: the ui writes them; the proxy reads them.
+    # From: Issue #1683 | PR #2020
     - NGINX_SUBDIR_CA=ssl/ca
     - NGINX_SUBDIR_CERTS=ssl/certs
+    # What: stack CA files, subject, key type, lifetime.
+    # Why: the ui creates the CA once, then reuses it.
+    # From: Issue #1683 | PR #2020
     - CA_CERT_FILE=ca.crt
     - CA_KEY_FILE=ca.key
     - CA_SERIAL_FILE=ca.srl
     - CA_SUBJECT=/CN=LanCache-NG CA/O=LanCache-NG/C=DE
     - CA_KEY_TYPE=rsa:4096
     - CA_DAYS=3650
+    # What: leaf cert key type, subject and lifetime.
+    # Why: the ui signs one leaf per covered host.
+    # From: Issue #1683 | PR #2020
     - LEAF_KEY_TYPE=rsa:2048
     - LEAF_SUBJECT=/CN=lancache-ng
     - LEAF_DAYS=3650
+    # What: old name of the default leaf cert.
+    # Why: deprecated; NGINX_DEFAULT_CERT names it.
+    # From: Issue #1683 | PR #2020
     - DEFAULT_CERT_NAME=default
+    # What: DNS name in the default leaf cert.
+    # Why: clients without SNI or by IP get this cert.
+    # From: Issue #1683 | PR #2020
     - DEFAULT_CERT_DNS=lancache-default
     # What: cert file modes and the CA stamp file name.
     # Why: nginx workers read keys by the shared gid.
@@ -924,10 +1246,19 @@ runtime:
     - CERT_FILE_MODE=0644
     - CA_KEY_MODE=0600
     - CA_STAMP_FILE=.ca-fingerprint
+    # What: cache dir of the proxy nginx.
+    # Why: proxy_cache_path and the dashboard read it.
+    # From: Issue #1683 | PR #2020
     - NGINX_CACHE_DIR=/var/cache/nginx/lancache
+    # What: proxy health path and its http/https URLs.
+    # Why: compose healthchecks and CI probe them.
+    # From: Issue #1683 | PR #2020
     - PROXY_HEALTH_PATH=/healthz
     - PROXY_HEALTH_URL=http://@LOOPBACK_BIND_IP@:@PROXY_HTTP_PORT@@PROXY_HEALTH_PATH@
     - PROXY_HEALTH_HTTPS_URL=https://@LOOPBACK_BIND_IP@:@NGINX_HEALTH_HTTPS_PORT@@PROXY_HEALTH_PATH@
+    # What: proxy ports: http, https and internal listens.
+    # Why: the ui renders stream and https files from them.
+    # From: Issue #1683 | PR #2020
     - PROXY_HTTP_PORT=80
     - PROXY_HTTPS_PORT=443
     - NGINX_HEALTH_HTTPS_PORT=8445
@@ -936,14 +1267,20 @@ runtime:
     - NGINX_PASSTHROUGH_RELAY_PORT=9446
     - NGINX_PASSTHROUGH_PORT=8443
     - NGINX_ORIGIN_HTTPS_PORT=443
+    # What: upstream timeouts and the cache lock wait.
+    # Why: proxy-params.conf and the relays read them.
+    # From: Issue #1683 | PR #2020
     - NGINX_UPSTREAM_CONNECT_TIMEOUT=30
     - NGINX_UPSTREAM_IDLE_TIMEOUT=3600
     - NGINX_CACHE_LOCK_TIMEOUT=2h
-    - NGINX_SSL_VERIFY_DEPTH=2
-    # What: CA bundle nginx trusts for origin https.
+    # What: verify depth and CA bundle for origin https.
     # Why: one owner for the path; Alpine default.
     # From: Issue #1683 | PR #1980
+    - NGINX_SSL_VERIFY_DEPTH=2
     - NGINX_SSL_TRUSTED_CA=/etc/ssl/certs/ca-certificates.crt
+    # What: TLS protocols, ciphers, session cache of MITM.
+    # Why: https.conf reads them for the MITM server.
+    # From: Issue #1683 | PR #2020
     - NGINX_SSL_PROTOCOLS=TLSv1.2 TLSv1.3
     - NGINX_SSL_CIPHERS=HIGH:!aNULL:!MD5
     - NGINX_SSL_SESSION_CACHE=shared:SSL:10m
@@ -952,22 +1289,43 @@ runtime:
     # Why: kTLS lowers the CPU load of nginx.
     # From: Issue #1683 | PR #1985
     - NGINX_SSL_CONF_OPTIONS=KTLS
+    # What: proxy temp file limits for large downloads.
+    # Why: proxy-params.conf reads them.
+    # From: Issue #1683 | PR #2020
     - NGINX_MAX_TEMP_FILE_SIZE=51200m
     - NGINX_TEMP_FILE_WRITE_SIZE=8m
+    # What: nginx worker, thread pool and map limits.
+    # Why: nginx.conf reads them; many parallel clients.
+    # From: Issue #1683 | PR #2020
     - NGINX_WORKER_RLIMIT_NOFILE=65535
     - NGINX_THREAD_POOL_THREADS=32
     - NGINX_THREAD_POOL_MAX_QUEUE=65536
     - NGINX_WORKER_CONNECTIONS=4096
     - NGINX_MAP_HASH_BUCKET_SIZE=512
     - NGINX_MAP_HASH_MAX_SIZE=2048
+    # What: keepalive, directio and resolver timings.
+    # Why: nginx.conf reads them for http and stream.
+    # From: Issue #1683 | PR #2020
     - NGINX_KEEPALIVE_TIMEOUT=65
     - NGINX_DIRECTIO=4m
     - NGINX_RESOLVER_VALID=300s
     - NGINX_RESOLVER_TIMEOUT=5s
+    # What: old Kea NCR port; KEA_DDNS_PORT is used.
+    # Why: deprecated; no release has read it.
+    # From: Issue #1683 | PR #2020
     - KEA_NCR_PORT=53001
+    # What: rendered https listen file below NGINX_DIR.
+    # Why: the ui writes it; https.conf includes it.
+    # From: Issue #1683 | PR #2020
     - NGINX_HTTPS_LISTEN_FILE=conf.d/https-listen.inc
+    # What: healthz body file and its text.
+    # Why: the ui writes it; proxy-params.conf serves it.
+    # From: Issue #1683 | PR #2020
     - NGINX_HEALTHZ_FILE=lancache-healthz-body.txt
     - NGINX_HEALTHZ_BODY=ok
+    # What: PSL file name and its download URL.
+    # Why: setup.sh and CI fetch it; the ui reads it.
+    # From: Issue #1683 | PR #2020
     - NGINX_PSL_FILE=public_suffix_list.dat
     - NGINX_PSL_URL=https://publicsuffix.org/list/public_suffix_list.dat
     # What: PSL place in the checkout, checks, backups.
@@ -977,19 +1335,44 @@ runtime:
     - NGINX_PSL_MARKERS===BEGIN ICANN DOMAINS===,===END ICANN DOMAINS===,===BEGIN PRIVATE DOMAINS===,===END PRIVATE DOMAINS===
     - NGINX_PSL_BACKUP_SUBDIR=psl
     - NGINX_PSL_BACKUP_KEEP=3
+    # What: loopback ports that refuse uncovered TLS hosts.
+    # Why: the ui renders the refuse relay of the stream.
+    # From: Issue #1683 | PR #2020
     - NGINX_DISCARD_PORT=9
     - NGINX_REFUSE_RELAY_PORT=9447
+    # What: rendered stream, https map and dispatch files.
+    # Why: the ui writes them; nginx includes them.
+    # From: Issue #1683 | PR #2020
     - NGINX_STREAM_TARGETS_FILE=stream.d/00-stream-targets.conf
     - NGINX_HTTPS_MAP_FILE=conf.d/00-https-map.conf
     - NGINX_HTTPS_DISPATCH_FILE=stream.d/01-https-dispatch.conf
+    # What: ports of DNS, DNS for HTTPS, pdns auth and NTP.
+    # Why: compose and the rendered configs use them.
+    # From: Issue #1683 | PR #2020
     - DNS_PORT=53
     - DNS_HTTPS_PORT=1053
     - PDNS_AUTH_PORT=5300
     - NTP_PORT=123
+    # What: bind addresses: loopback and all interfaces.
+    # Why: other SOT values and renders build on them.
+    # From: Issue #1683 | PR #2020
     - LOOPBACK_BIND_IP=127.0.0.1
+    # What: where HTTPS ports bind while HTTPS is off.
+    # Why: own loopback IP; 127.0.0.1:53 may be in use.
+    # From: Issue #1683 | PR #2020
+    - HTTPS_OFF_BIND_IP=127.0.0.2
     - ANY_BIND_IP=0.0.0.0
+    # What: address setup.sh asks the route table about.
+    # Why: it finds the LAN IP; nothing is sent.
+    # From: Issue #1683 | PR #2020
     - ROUTE_PROBE_TARGET=1.1.1.1:53
+    # What: upper bound of UI_SESSION_TTL_SECONDS.
+    # Why: setup.sh rejects a longer session.
+    # From: Issue #1683 | PR #2020
     - UI_SESSION_TTL_MAX_SECONDS=31536000
+    # What: state subdir names below the install dir.
+    # Why: setup.sh reads them through state_dir_keys.
+    # From: Issue #1683 | PR #2020
     - STATE_SUBDIR_SYSLOG_NG=syslog-ng
     - STATE_SUBDIR_NTP=ntp
     - STATE_SUBDIR_CACHEHAMSTER=cachehamster
@@ -998,32 +1381,68 @@ runtime:
     - STATE_SUBDIR_KEA=kea
     - STATE_SUBDIR_CACHE=cache
     - STATE_SUBDIR_CA=ca
+    # What: cachehamster poll gap, queues, service.
+    # Why: cachehamster and the ui read them.
+    # From: Issue #1683 | PR #2020
     - CACHEHAMSTER_POLL_INTERVAL=5
-    - CACHEHAMSTER_PROGRAM=lancache-cachehamster
     - CACHEHAMSTER_QUEUES=2
     - CACHEHAMSTER_SERVICE=@SERVICES_SERVICE@
+    # What: rounds without jobs.json write till "down".
+    # Why: one late round must not show the daemon down.
+    # From: Issue #871 | PR #2020
+    - CACHEHAMSTER_ALIVE_ROUNDS=3
+    # What: cache domains: own, default list file, disabled.
+    # Why: the ui edits them; the renders read them.
+    # From: Issue #1683 | PR #2020
     - CDN_CUSTOM_DOMAINS=
     - CDN_DEFAULT_DOMAINS_FILE=@CDN_DOMAINS_FILE@
     - CDN_DISABLED_DOMAINS=
+    # What: compose project name of the stack.
+    # Why: Docker calls pick the stack containers by it.
+    # From: Issue #1683 | PR #2020
     - COMPOSE_PROJECT=lancache-ng
+    # What: accept DDNS updates without a TSIG key.
+    # Why: dns render and the ui read it; off by default.
+    # From: Issue #1683 | PR #2020
     - DDNS_ALLOW_UNSIGNED=0
+    # What: Kea options: custom, DDNS, DNS servers, logging.
+    # Why: the Kea render and the DHCP page read them.
+    # From: Issue #1683 | PR #2020
     - DHCP_CUSTOM_OPTIONS=
-    - DHCP_DDNS=0
+    - DHCP_DDNS=@DHCP_DDNS_ENABLED@
     - DHCP_DNS_SERVERS=
     - DHCP_LOG_PACKETS=0
     - DHCP_OPTION_DATA_MAX=255
+    # What: dhcp-probe ACK wait, sends and listen window.
+    # Why: the probe for a second DHCP server uses them.
+    # From: Issue #1683 | PR #2020
     - DHCP_PROBE_ACK_WAIT_MS=2000
     - DHCP_PROBE_SENDS=3
     - DHCP_PROBE_WINDOW_MS=5000
+    # What: proxy interface, relay address, subnet start.
+    # Why: the DHCP modes and setup.sh read them.
+    # From: Issue #1683 | PR #2020
     - DHCP_PROXY_INTERFACE=
     - DHCP_RELAY_LOCAL_ADDR=
-    - DHCP_SERVICE=dhcp
     - DHCP_SUBNET_START=
+    # What: compose service name of the dhcp container.
+    # Why: the ui and setup.sh find the container by it.
+    # From: Issue #1683 | PR #2020
+    - DHCP_SERVICE=dhcp
+    # What: AAAA filter of the recursors; off by default.
+    # Why: the dns render adds the filter script when on.
+    # From: Issue #1683 | PR #2020
     - DNS_FILTER_AAAA=0
+    # What: LAN record types, TTL and limits of the editor.
+    # Why: the DNS page and the record checks read them.
+    # From: Issue #1683 | PR #2020
     - DNS_LAN_RECORD_TYPES=A AAAA CNAME MX TXT SRV CAA HTTPS SVCB NAPTR SSHFP TLSA
     - DNS_RECORD_TTL=300
     - DNS_RECORD_TTL_MAX=86400
     - DNS_TXT_MAX_BYTES=255
+    # What: registered secondaries and the zones they hold.
+    # Why: the ui keeps them; the secondary reads its zones.
+    # From: Issue #1683 | PR #2020
     - DNS_SECONDARIES=
     - DNS_SECONDARY_ZONES=
     # What: secondaries as NS records; off by default.
@@ -1053,34 +1472,74 @@ runtime:
     # From: Issue #1683
     - DNS_SECONDARY_NS_REMOVE_AFTER_SECONDS=28800
     - DNS_SECONDARY_NS_REMOVE_FAILS=3
-    # What: compose service name of the dns container.
+    # What: compose service names of dns, proxy, services.
     # Why: names differ per compose project; services stay.
     # From: Issue #1683 | PR #1980
     - DNS_SERVICE=dns
     - PROXY_SERVICE=proxy
     - SERVICES_SERVICE=services
+    # What: the program the ui runs in services.
+    # Why: watchdog and cachehamster are one binary.
+    # From: Issue #1683 | PR #2020
+    - SERVICES_PROGRAM=lancache-ng
+    # What: DNS zone snapshot dir and how many stay.
+    # Why: the ui keeps a rollback point per zone change.
+    # From: Issue #1683 | PR #2020
     - DNS_SNAPSHOT_DIR=@UI_DATA_DIR@/dns-snapshots
     - DNS_SNAPSHOT_KEEP=20
+    # What: whole-stack state snapshots: dir, count, file.
+    # Why: a restore gives back the state of that time.
+    # From: Issue #1683 | PR #2020
+    - STACK_SNAPSHOT_DIR=@UI_DATA_DIR@/stack-snapshots
+    - STACK_SNAPSHOT_KEEP=50
+    - STACK_SNAPSHOT_FILE=stack.json
+    # What: Docker API endpoint and call timeout.
+    # Why: ui and watchdog talk to Docker; a hang fails.
+    # From: Issue #1683 | PR #2020
     - DOCKER_ENDPOINT=unix://@DOCKER_SOCKET@
     - DOCKER_TIMEOUT=30
     # What: Kea agent listens on all interfaces.
     # Why: the ui reaches it from its own network.
     # From: Issue #1683 | PR #1980
     - KEA_CTRL_ADDRESS=@ANY_BIND_IP@
+    # What: Kea DDNS address and port for name updates.
+    # Why: the Kea render sends NCRs there.
+    # From: Issue #1683 | PR #2020
     - KEA_DDNS_ADDRESS=@LOOPBACK_BIND_IP@
     - KEA_DDNS_PORT=53001
+    # What: Kea dhcp4 config file and control socket.
+    # Why: the Kea render writes and reloads through them.
+    # From: Issue #1683 | PR #2020
     - KEA_DHCP4_CONF_FILE=@KEA_DATA_DIR@/kea-dhcp4.conf
     - KEA_DHCP4_SOCKET=/run/kea/kea4-ctrl-socket
+    # What: number of Kea config snapshots kept.
+    # Why: the ui keeps a rollback point per change.
+    # From: Issue #1683 | PR #2020
     - KEA_SNAPSHOT_KEEP=20
+    # What: client ACL file and default leaf cert name.
+    # Why: the ui renders both for nginx.
+    # From: Issue #1683 | PR #2020
     - NGINX_CLIENT_ACL_FILE=@NGINX_CONF_DIR@/conf.d/client-acl.inc
     - NGINX_DEFAULT_CERT=default
+    # What: nginx templates and their dir in the image.
+    # Why: the ui renders these files for the proxy.
+    # From: Issue #1683 | PR #2020
     - NGINX_TEMPLATES=nginx.conf conf.d/http.conf conf.d/https.conf proxy-params.conf
     - NGINX_TEMPLATE_DIR=/usr/share/lancache/nginx
+    # What: NTP client nets and the NTP probe wait.
+    # Why: chrony allows them; DHCP probes NTP first.
+    # From: Issue #1683 | PR #2020
     - NTP_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@
     - NTP_PROBE_WAIT_MS=2000
+    # What: pdns API access, key and listen address.
+    # Why: the dns render writes them into pdns.conf.
+    # From: Issue #1683 | PR #2020
     - PDNS_API_ALLOW_FROM=@LOOPBACK_BIND_IP@ @PRIVATE_NETS@
     - PDNS_API_KEY=
     - PDNS_API_LISTEN=0.0.0.0
+    # What: pdns auth address, AXFR peers and database.
+    # Why: the dns render writes them into pdns.conf.
+    # From: Issue #1683 | PR #2020
     - PDNS_AUTH_ADDRESS=@LOOPBACK_BIND_IP@
     - PDNS_AXFR_FROM=
     - PDNS_DATABASE=@PDNS_DATA_DIR@/pdns.sqlite3
@@ -1088,11 +1547,17 @@ runtime:
     # Why: sqlite file in PDNS_DATABASE.
     # From: Issue #1683 | PR #1980
     - PDNS_LAUNCH=gsqlite3
+    # What: SOA content pdns gives a new zone.
+    # Why: ns1 and hostmaster of DHCP_DOMAIN; dns reads it.
+    # From: Issue #1683 | PR #2020
     - PDNS_DEFAULT_SOA=ns1.@DHCP_DOMAIN@ hostmaster.@DHCP_DOMAIN@ 0 30 10 604800 300
     # What: name of the HTTPS IP, A and PTR, never NS.
     # Why: HTTPS is optional; ns1 is the name server.
     # From: Issue #1683
     - DNS_NS_HTTPS_NAME=ns2.@DHCP_DOMAIN@
+    # What: pdns DNS update peers and listen address.
+    # Why: the dns render writes them into pdns.conf.
+    # From: Issue #1683 | PR #2020
     - PDNS_DNSUPDATE_FROM=@PRIVATE_NETS@
     - PDNS_LISTEN=0.0.0.0
     # What: path of the PowerDNS API below host and port.
@@ -1104,21 +1569,45 @@ runtime:
     # Why: a change raises the serial; NOTIFY follows.
     # From: Issue #1683 | PR #1980
     - PDNS_SOA_EDIT=INCREASE
+    # What: pdns transfer check interval, seconds.
+    # Why: a secondary pulls a changed zone soon.
+    # From: Issue #1683 | PR #2020
     - PDNS_XFR_CYCLE=60
+    # What: client nets the proxy serves.
+    # Why: the ui renders the client ACL from it.
+    # From: Issue #1683 | PR #2020
     - PROXY_ALLOWED_CLIENT_CIDRS=@PRIVATE_NETS@ fc00::/7
     # What: syslog folder holding proxy access lines.
     # Why: syslog-ng files them under the container.
     # From: Issue #1683 | PR #1985
     - PROXY_LOG_PROGRAM=@CONTAINER_NAME_PROXY@
+    # What: recursor AAAA filter file and run dir.
+    # Why: the dns render writes and reloads through them.
+    # From: Issue #1683 | PR #2020
     - RECURSOR_AAAA_LUA_FILE=@CONFIG_DIR@/dns/filter-aaaa.lua
     - RECURSOR_RUN_DIR=/var/run/pdns-recursor
+    # What: config root and the chrony config below it.
+    # Why: the ui renders files there; images mount it.
+    # From: Issue #1683 | PR #2020
     - CHRONY_CONF_FILE=@CONFIG_DIR@/services/chrony.conf
     - CONFIG_DIR=/etc/lancache
+    # What: security headers the ui sends.
+    # Why: browsers block sniffing, framing and leaks.
+    # From: Issue #1683 | PR #2020
     - UI_CONTENT_TYPE_OPTIONS=nosniff
     - "UI_CSP=default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:"
     - UI_FRAME_OPTIONS=DENY
     - UI_HSTS=max-age=31536000; includeSubDomains
     - UI_REFERRER_POLICY=no-referrer
+    # What: cookie and header names of the ui session.
+    # Why: Rust and the page script read one name each.
+    # From: Issue #1683 | PR #2020
+    - UI_CSRF_HEADER=x-csrf-token
+    - UI_LANG_COOKIE=lc_lang
+    - UI_SESSION_COOKIE=lancache_session
+    # What: file holding the DHCP mode for the dhcp start.
+    # Why: the ui writes it; dhcp start_pre reads it.
+    # From: Issue #1683 | PR #2020
     - DHCP_MODE_FILE=@CONFIG_DIR@/dhcp/mode
     # What: OpenRC run state; dns and dhcp clear it.
     # Why: /run outlives a restart without tmpfs.
@@ -1130,7 +1619,6 @@ runtime:
     # From: Issue #1683
     - OPENRC_RC_CONF=/etc/rc.conf
     - OPENRC_RC_SETTINGS=rc_sys=docker rc_env_allow=* rc_controller_cgroups=NO rc_cgroup_mode=legacy
-    - OPENRC_INIT_DIR=/etc/init.d
     - OPENRC_RUNLEVEL_DIR=/etc/runlevels
     - OPENRC_DROP_RUNLEVELS=sysinit boot
     - OPENRC_DEFAULT_RUNLEVEL=default
@@ -1147,10 +1635,14 @@ runtime:
     # Why: the exec rows and the program menu name it once.
     # From: Issue #1683 | PR #2017
     - SERVICE_CONTROL_PROGRAM=rc-service
+    # What: the program that lists the services it runs.
+    # Why: the watchdog offers what OpenRC runs, no list.
+    # From: Issue #1683 | PR #2020
+    - SERVICE_LIST_PROGRAM=rc-update
     # What: the command that reads the state of chronyd.
-    # Why: the statistics show stratum and offset.
-    # From: Issue #1683 | PR #2017
-    - CHRONY_TRACKING_EXEC=services:chronyc+-c+tracking
+    # Why: the watchdog runs it next to chronyd.
+    # From: Issue #1683 | PR #2020
+    - CHRONY_TRACKING_COMMAND=chronyc -c tracking
     # What: snmpd reload per container on a new snmpd.conf.
     # Why: one file, several snmpd; HUP rereads it.
     # From: Issue #1683
@@ -1167,10 +1659,19 @@ runtime:
     # Why: both sub-modes run the same dnsmasq daemon.
     # From: Issue #1683
     - DNSMASQ_RESTART_EXEC=dhcp:@SERVICE_CONTROL_PROGRAM@+dnsmasq+restart
+    # What: rendered nginx config dir of the proxy.
+    # Why: the ui writes there; the proxy image links it.
+    # From: Issue #1683 | PR #2020
     - NGINX_CONF_DIR=@CONFIG_DIR@/proxy
+    # What: rendered dnsmasq and Kea agent and DDNS files.
+    # Why: the ui writes them; the dhcp image reads them.
+    # From: Issue #1683 | PR #2020
     - DNSMASQ_CONF_FILE=@CONFIG_DIR@/dhcp/dnsmasq.conf
     - KEA_CTRL_CONF_FILE=@CONFIG_DIR@/dhcp/kea-ctrl-agent.conf
     - KEA_DDNS_CONF_FILE=@CONFIG_DIR@/dhcp/kea-dhcp-ddns.conf
+    # What: rendered pdns, dnsdist and recursor files.
+    # Why: the ui writes them; the dns image reads them.
+    # From: Issue #1683 | PR #2020
     - PDNS_CONF_FILE=@CONFIG_DIR@/dns/pdns.conf
     - DNSDIST_CONF_FILE=@CONFIG_DIR@/dns/dnsdist.conf
     - RECURSOR_HTTP_CONF_FILE=@CONFIG_DIR@/dns/recursor-http.yml
@@ -1200,18 +1701,34 @@ runtime:
     - RECURSOR_HTTPS_LISTEN=@LOOPBACK_BIND_IP@
     - RECURSOR_HTTPS_PORT=5302
     - RECURSOR_HTTPS_API_PORT=@PDNS_HTTPS_API_PORT@
+    # What: rendered snmpd and syslog-ng configs.
+    # Why: the ui writes them; the services read them.
+    # From: Issue #1683 | PR #2020
     - SNMPD_CONF_FILE=@CONFIG_DIR@/services/snmpd.conf
     - SYSLOG_CONF_FILE=@CONFIG_DIR@/services/syslog-ng.conf
+    # What: API URLs of both recursors.
+    # Why: the ui flushes and asks the recursors there.
+    # From: Issue #1683 | PR #2020
     - RECURSOR_API_URLS=http://@DNS_SERVICE@:@PDNS_HTTP_API_PORT@@PDNS_API_PATH@ http://@DNS_SERVICE@:@PDNS_HTTPS_API_PORT@@PDNS_API_PATH@
-    - REPO_URL=https://github.com/wiki-mod/lancache-ng
+    # What: project address the ui links to.
+    # Why: the page foot links it; one value owner.
+    # From: Issue #1683 | PR #2020
+    - REPO_URL=@LANCACHE_REPO_URL@
+    # What: dir of the secret files the programs read.
+    # Why: one owner of the secret file place.
+    # From: Issue #1683 | PR #2020
     - SECRETS_DIR=@LANCACHE_SHARED_SECRET_DIR@
     # What: git ref per channel for the secondary setup.sh.
     # Why: script and SOT must come from the same ref.
     # From: Issue #1683 | PR #1985
+    - SETUP_CHANNEL_NIGHTLY=nightly
     - SETUP_GIT_REF=master
     - SETUP_GIT_REF_NIGHTLY=current_dev
     - SETUP_SCRIPT_URL=@RAW_CONTENT_URL@/wiki-mod/lancache-ng/@SETUP_GIT_REF@/setup.sh
     - SETUP_SCRIPT_URL_NIGHTLY=@RAW_CONTENT_URL@/wiki-mod/lancache-ng/@SETUP_GIT_REF_NIGHTLY@/setup.sh
+    # What: snmpd agent, access, limits and traps.
+    # Why: the snmpd render writes them.
+    # From: Issue #1683 | PR #2020
     - SNMP_AGENTX=0
     - SNMP_AGENTX_SOCKET=/var/agentx/master
     - SNMP_ALLOW_FROM=default
@@ -1224,6 +1741,9 @@ runtime:
     - SNMP_LOGMATCH_INTERVAL=60
     - SNMP_TRAPS=0
     - SNMP_TRAP_SINK=
+    # What: stats graphs, sources, store dir and sizes.
+    # Why: the stats collector and the charts read them.
+    # From: Issue #1683 | PR #2020
     - STATS_CONTAINER_GRAPHS=cpu_percent:used=cpu_ns=DERIVE=0.0000001 memory:used=mem_bytes=GAUGE network:in=net_rx=COUNTER+out=net_tx=COUNTER disk_io:read=blk_read=COUNTER+write=blk_write=COUNTER
     - STATS_CONTAINERS=@PROXY_SERVICE@ @DNS_SERVICE@ @DHCP_SERVICE@ @UI_SERVICE@ @CACHEHAMSTER_SERVICE@
     - STATS_DARK_COLOURS=BACK#0b1220 CANVAS#0b1220 FONT#e6edf3 AXIS#8b949e GRID#30363d MGRID#30363d
@@ -1232,17 +1752,34 @@ runtime:
     - STATS_HEARTBEAT_STEPS=2
     - "STATS_FONTS=DEFAULT:11: TITLE:13: AXIS:10: LEGEND:11:"
     - STATS_HEIGHT=200
+    # What: host network counter file and its source.
+    # Why: compose mounts it; the stats show host traffic.
+    # From: Issue #1683 | PR #2020
     - HOST_NET_DEV_FILE=/host/net_dev
     - HOST_NET_DEV_SOURCE=/proc/1/net/dev
+    # What: more stats: skipped links, colours, RRAs, step.
+    # Why: the stats collector and the charts read them.
+    # From: Issue #1683 | PR #2020
     - STATS_HOST_IF_SKIP=lo veth docker br-
     - "STATS_LINE_COLOURS=#2f81f7 #3fb950 #d29922 #f85149"
     - STATS_RANGES=1h 1d 1w 1m 1y
     - STATS_RRAS=AVERAGE:0.5:1:1440 AVERAGE:0.5:12:1680 AVERAGE:0.5:288:800 MAX:0.5:12:1680
     - STATS_SERVICE_GRAPHS=machine.network:in=host:rx=DERIVE+out=host:tx=DERIVE proxy.requests:per_s=nginx:requests=DERIVE proxy.connections:active=nginx:active=GAUGE+waiting=nginx:waiting=GAUGE @DNS_SERVICE@.queries:recursor=recursor:questions=DERIVE+upstream=recursor:all-outqueries=DERIVE+auth=auth:udp-queries=DERIVE @DNS_SERVICE@.cache:hits=recursor:cache-hits=DERIVE+misses=recursor:cache-misses=DERIVE @DHCP_SERVICE@.packets:received=kea:pkt4-received=DERIVE+acks=kea:pkt4-ack-sent=DERIVE+naks=kea:pkt4-nak-sent=DERIVE @CACHEHAMSTER_SERVICE@.time:offset_ms=chrony:offset=GAUGE=1000+stratum=chrony:stratum=GAUGE
     - STATS_SNMP_TARGET=udp:@CACHEHAMSTER_SERVICE@:161
+    - STATS_SNMP_TIMEOUT=5
+    - STATS_GRAPH_FILE_MODE=0644
     - STATS_STEP=60
+    # What: gap between two cache usage scans.
+    # Why: the dashboard counts the cache use by it.
+    # From: Issue #1683 | PR #2020
     - CACHE_USAGE_SCAN_SECONDS=300
+    # What: chart width in pixels.
+    # Why: the stats charts render at this width.
+    # From: Issue #1683 | PR #2020
     - STATS_WIDTH=540
+    # What: Steam API, CDN host and login client identity.
+    # Why: cachehamster logs in to Steam with them.
+    # From: Issue #1683 | PR #2020
     - STEAM_API_URL=https://api.steampowered.com
     - STEAM_BRANCH=public
     - STEAM_CDN_HOST=lancache.steamcontent.com
@@ -1257,47 +1794,115 @@ runtime:
     # Why: a token that ends during a call fails it.
     # From: Issue #871 | PR #2017
     - STEAM_TOKEN_MARGIN_SECONDS=60
+    # What: Steam manifest API, OS, protocol and QR size.
+    # Why: cachehamster reads them for login and download.
+    # From: Issue #1683 | PR #2020
     - STEAM_MANIFEST_API_VERSION=5
     - STEAM_OS=windows
     - STEAM_PROTOCOL_VERSION=65580
     - STEAM_QR_SIZE=220
+    # What: disk buffer size per forward target, bytes.
+    # Why: syslog-ng drops every line without a size.
+    # From: Issue #1683 | PR #2020
+    - SYSLOG_BUFFER_BYTES=1073741824
+    # What: control socket of syslog-ng and its read wait.
+    # Why: the watchdog asks it for the processed count.
+    # From: Issue #1683 | PR #2020
+    - SYSLOG_CTL_SOCKET=/run/syslog-ng.ctl
+    - SYSLOG_CTL_TIMEOUT=5
+    # What: syslog buffer, forward, form, mute, primary.
+    # Why: the syslog render writes them.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_BUFFER_DIR=@SYSLOG_LOG_ROOT@/buffer
     - SYSLOG_FORWARD=
     - 'SYSLOG_LINE_TEMPLATE=${ISODATE} ${HOST} ${PROGRAM}: ${MSG}\n'
     - SYSLOG_MUTED=
     - SYSLOG_PRIMARY=
+    # What: programs the logs page lists.
+    # Why: the ui reads the log folder of each.
+    # From: Issue #1683 | PR #2020
     - SYSLOG_PROGRAMS=@CONTAINER_NAME_PROXY@ @CONTAINER_NAME_DNS@ @CONTAINER_NAME_DHCP@ @CONTAINER_NAME_UI@ @CONTAINER_NAME_SERVICES@
+    # What: services with a start and stop button.
+    # Why: the ui checks it before it starts or stops.
+    # From: Issue #1683 | PR #2020
     - UI_CONTROLLABLE_SERVICES=proxy dns dhcp services
+    # What: DHCP modes the ui offers.
+    # Why: the DHCP page lists them.
+    # From: Issue #1683 | PR #2020
     - DHCP_MODES=off kea dnsmasq-proxy dnsmasq-relay
+    # What: ui default language and listen address.
+    # Why: the ui starts with them.
+    # From: Issue #1683 | PR #2020
     - UI_LANG_DEFAULT=de
     - UI_LISTEN=0.0.0.0
+    # What: unix socket of the ui for the CLI, mode 0600.
+    # Why: CLI writes reach the running ui off the network.
+    # From: Issue #1683 | PR #2020
+    - UI_CLI_SOCKET=@RUN_DIR@/lancache-ui.sock
+    # What: wait of a CLI write for the ui answer.
+    # Why: a save renders and applies before it answers.
+    # From: Issue #1683 | PR #2020
+    - UI_CLI_WRITE_TIMEOUT_SECONDS=600
+    # What: logs page line count and read chunk size.
+    # Why: the logs page reads that much of a file.
+    # From: Issue #1683 | PR #2020
     - UI_LOG_LINES=500
     - UI_LOG_TAIL_CHUNK=65536
+    # What: ui password hash and minimum password length.
+    # Why: login checks the hash; a new password, length.
+    # From: Issue #1683 | PR #2020
     - UI_AUTH_PASSWORD_HASH=
     - UI_PASSWORD_MIN_LENGTH=12
     # What: largest request body the Admin UI accepts.
     # Why: a body is held in memory before it is read.
     # From: Issue #1683 | PR #2017
     - UI_REQUEST_BODY_MAX_BYTES=2097152
+    # What: ui port and its public URL.
+    # Why: the install command shows this address.
+    # From: Issue #1683 | PR #2020
     - UI_PORT=@UI_LISTEN_PORT@
     - UI_PUBLIC_URL=
+    # What: recent requests the dashboard shows.
+    # Why: the dashboard keeps this many rows.
+    # From: Issue #1683 | PR #2020
     - UI_RECENT_REQUESTS=50
-    - UI_SERVICES=dns:pdns dns:dns-http dns:dns-https dns:dnsdist dns:snmpd services:syslog-ng services:chronyd services:snmpd services:lancache-cachehamster dhcp:kea-dhcp4 dhcp:kea-ctrl-agent dhcp:kea-dhcp-ddns dhcp:dnsmasq proxy:nginx proxy:snmpd ui:snmpd
+    # What: status poll interval of the pages, seconds.
+    # Why: the dots and the dashboard refresh by it.
+    # From: Issue #1683 | PR #2020
     - UI_STATUS_REFRESH=10
+    # What: login user name of the ui.
+    # Why: basic auth compares the user with it.
+    # From: Issue #1683 | PR #2020
     - UI_AUTH_USER=admin
+    # What: upstream DHCP server of the relay mode.
+    # Why: the dnsmasq relay forwards to it.
+    # From: Issue #1683 | PR #2020
     - UPSTREAM_DHCP_IP=
+    # What: watchdog alarm file and its mode.
+    # Why: the watchdog writes alarms; the ui shows them.
+    # From: Issue #1683 | PR #2020
     - WATCHDOG_ALARM_FILE=@STATUS_DIR@/alarms.json
     - WATCHDOG_ALARM_FILE_MODE=0644
+    # What: restart limit, its window and the stop grace.
+    # Why: the watchdog stops healing a looping container.
+    # From: Issue #1683 | PR #2020
     - WATCHDOG_RESTART_LIMIT=3
     - WATCHDOG_RESTART_WINDOW=900
     - WATCHDOG_STOP_GRACE=10
+    # What: most file names a tidy answer lists.
+    # Why: a cache purge can pick millions of files.
+    # From: Issue #1683 | PR #2020
+    - WATCHDOG_TIDY_LIST_MAX=100
+    # What: cert files, cert warn time and disk limits.
+    # Why: the watchdog warns before they run out.
+    # From: Issue #1683 | PR #2020
     - WATCHDOG_CERT_FILES=@NGINX_DIR@/@NGINX_SUBDIR_CA@/ca.crt
     - WATCHDOG_CERT_WARN_SECS=2592000
     - WATCHDOG_DISK_MIN_FREE_PERCENT=10
     - WATCHDOG_DISK_PATHS=@CACHE_DIR@ @SYSLOG_LOG_ROOT@
-    # What: host conntrack counters and the warn level.
-    # Why: a full table drops new connections.
-    # From: Issue #1683 | PR #1985
+    # What: host conntrack counter file and its source.
+    # Why: compose mounts it; the watchdog reads it.
+    # From: Issue #1683 | PR #2020
     - HOST_NET_STAT_SOURCE=/proc/1/net/stat
     - HOST_NET_STAT_DIR=/host/net_stat
     # What: host machine-id sources; first found wins.
@@ -1309,18 +1914,33 @@ runtime:
     # Why: an unreadable or empty file is skipped.
     # From: Issue #871
     - CACHEHAMSTER_BIND_FILES=@HOST_MACHINE_ID_FILE@ /sys/class/dmi/id/product_uuid /sys/class/dmi/id/board_serial
+    # What: conntrack max file, stat file, warn level.
+    # Why: a full table drops new connections.
+    # From: Issue #1683 | PR #2020
     - CONNTRACK_MAX_FILE=/proc/sys/net/netfilter/nf_conntrack_max
+    - CONNTRACK_STAT_FILE=nf_conntrack
     - WATCHDOG_CONNTRACK_WARN_PCT=80
-    - UI_STOP_GRACE=10
+    # What: the mode of rendered files.
+    # Why: the ui writes files so.
+    # From: Issue #1683 | PR #2020
     - UI_CONFIG_FILE_MODE=0644
-    # What: ui wait for a restarted container to be healthy.
-    # Why: apply is done only when the service answers.
+    # What: wait for a restarted container to be healthy.
+    # Why: the watchdog ends a plan when it answers.
     # From: Issue #1683 | PR #1980
     - APPLY_HEALTH_WAIT_SECONDS=120
     - APPLY_HEALTH_POLL_SECONDS=1
+    # What: compose service name of the ui.
+    # Why: the ui and setup.sh find the container by it.
+    # From: Issue #1683 | PR #2020
     - UI_SERVICE=ui
+    # What: cache flush check gap and grace, seconds.
+    # Why: the ui flushes the recursors after zone changes.
+    # From: Issue #1683 | PR #2020
     - UI_FLUSH_CHECK_SECONDS=5
     - UI_FLUSH_GRACE_SECONDS=60
+    # What: longest name a secondary may have.
+    # Why: setup.sh and the ui check names by it.
+    # From: Issue #1683 | PR #2020
     - DNS_SECONDARY_NAME_MAX=32
   # What: key=kind;min;max;effect;owner; ? = optional.
   # Why: config.rs checks every value against it.
@@ -1330,58 +1950,62 @@ runtime:
     - NTP_AUTO_DHCP=bool;;;reload;dhcp
     - CACHEHAMSTER_CONCURRENCY=uint;1;1024;restart;services
     - CACHEHAMSTER_DATA_DIR=path;;;container;services
+    - LOCALTIME_FILE=path;;;container;services
+    - CACHEHAMSTER_ALIVE_ROUNDS=uint;1;100;live;services
     - CACHEHAMSTER_POLL_INTERVAL=uint;1;3600;live;services
-    - CACHEHAMSTER_PROGRAM=text;;;live;ui
     - CACHEHAMSTER_QUEUES=uint;1;64;restart;services
-    - CACHEHAMSTER_SERVICE=text;;;live;ui
+    - CACHEHAMSTER_SERVICE=text;;;fixed;ui
     - CACHEHAMSTER_THROUGHPUT_INTERVAL=uint;1;3600;live;services
     - CACHEHAMSTER_MAX_MBIT=uint;0;100000;restart;services
     - CACHEHAMSTER_WINDOW=text;;;restart;services
     - CDN_CUSTOM_DOMAINS=list?;;;reload;dns
-    - CDN_DEFAULT_DOMAINS_FILE=path;;;reload;dns
+    - CDN_DEFAULT_DOMAINS_FILE=path;;;fixed;dns
     - CDN_DISABLED_DOMAINS=list?;;;reload;dns
     - COMPOSE_PROJECT=text;;;live;ui
     - DDNS_ALLOW_UNSIGNED=bool;;;restart;dns
     - DDNS_TSIG_NAME=text;;;restart;dns
     - DHCP_CUSTOM_OPTIONS=text?;;;reload;dhcp
     - DHCP_DDNS=bool;;;reload;dhcp
-    - DHCP_DNS_SERVERS=list?;;;reload;dhcp
+    - DHCP_DDNS_ENABLED=bool;;;reload;dhcp
+    - DHCP_DNS_SERVERS=hosts?;;;reload;dhcp
     - DHCP_DOMAIN=text;;;reload;dhcp
-    - DHCP_GATEWAY=text;;;reload;dhcp
+    - DHCP_GATEWAY=ip;;;reload;dhcp
     - DHCP_LEASE_TIME=uint~;60;604800;reload;dhcp
     - DHCP_LEASE_TIME_MAX=uint;60;31536000;reload;dhcp
     - DHCP_LEASE_TIME_MIN=uint;1;604800;reload;dhcp
     - DHCP_LOG_PACKETS=bool;;;reload;dhcp
     - DHCP_MAX_LEASE_FACTOR=uint;1;100;reload;dhcp
     - DHCP_MODE=choice;off,kea,dnsmasq-proxy,dnsmasq-relay;;restart;dhcp
-    - DHCP_NTP_SERVERS=list?;;;reload;dhcp
+    - DHCP_NTP_SERVERS=hosts?;;;reload;dhcp
     - DHCP_OPTION_DATA_MAX=uint;1;65535;live;ui
     - DHCP_PROBE_ACK_WAIT_MS=uint;100;60000;live;ui
     - DHCP_PROBE_SENDS=uint;1;10;live;ui
     - DHCP_PROBE_WINDOW_MS=uint;100;60000;live;ui
     - DHCP_PROXY_INTERFACE=list?;;;reload;dhcp
-    - DHCP_RANGE_END=text;;;reload;dhcp
-    - DHCP_RANGE_START=text;;;reload;dhcp
-    - DHCP_RELAY_LOCAL_ADDR=text?;;;reload;dhcp
-    - DHCP_SERVICE=text;;;live;services
-    - DNS_SERVICE=text;;;live;ui
-    - PROXY_SERVICE=text;;;live;ui
-    - SERVICES_SERVICE=text;;;live;ui
-    - DHCP_SUBNET=text;;;reload;dhcp
+    - DHCP_RANGE_END=ip;;;reload;dhcp
+    - DHCP_RANGE_START=ip;;;reload;dhcp
+    - DHCP_RELAY_LOCAL_ADDR=ip?;;;reload;dhcp
+    - DHCP_SERVICE=text;;;fixed;services
+    - DNS_SERVICE=text;;;fixed;ui
+    - PROXY_SERVICE=text;;;fixed;ui
+    - SERVICES_SERVICE=text;;;fixed;ui
+    - SERVICES_PROGRAM=text;;;fixed;ui
+    - DHCP_SUBNET=net;;;reload;dhcp
     - DHCP_SUBNET_ID=uint;1;4294967294;reload;dhcp
-    - DHCP_SUBNET_START=text?;;;reload;dhcp
+    - DHCP_SUBNET_START=ip?;;;reload;dhcp
     - DNS_EXTRA_LAN_DOMAINS=list?;;;reload;dns
     - DNS_FILTER_AAAA=bool;;;reload;dns
     - DNS_LAN_RECORD_TYPES=list;;;live;ui
     - DNS_LOCAL_REVERSE_ZONES=bool;;;restart;dns
     - DNS_QUERY_LOG=bool;;;restart;dns
+    - LOG_QUERIES=bool;;;restart;dns
     - DNS_PRIVATE_REVERSE_ZONES=list;;;reload;dns
-    - DNS_QUERY_ALLOW_FROM=list;;;reload;dns
+    - DNS_QUERY_ALLOW_FROM=nets;;;reload;dns
     - DNS_RECORD_TTL=uint;1;86400;live;ui
     - DNS_RECORD_TTL_MAX=uint;1;604800;live;ui
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
-    - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_SECONDARIES=peers?;;;restart;dns
     - DNS_FOLLOW_SECONDS=uint;2;3600;restart;dns
     - DNS_SECONDARY_CHECK_SECONDS=uint;60;604800;live;ui
     - DNS_SECONDARY_NS=list?;;;live;ui
@@ -1392,87 +2016,93 @@ runtime:
     - DNS_SECONDARY_NS_REMOVE_FAILS=uint;1;1000;live;ui
     - DNS_SECONDARY_RECHECK_SECONDS=uint;60;86400;live;ui
     - DNS_SECONDARY_ZONES=list?;;;restart;dns
-    - DNS_SNAPSHOT_DIR=path;;;live;ui
+    - DNS_SNAPSHOT_DIR=path;;;fixed;ui
     - DNS_SNAPSHOT_KEEP=uint;1;1000;live;ui
-    - DNS_UPSTREAM_SERVERS=list?;;;reload;dns
+    - STACK_SNAPSHOT_DIR=path;;;fixed;ui
+    - STACK_SNAPSHOT_FILE=text;;;fixed;ui
+    - STACK_SNAPSHOT_KEEP=uint;1;1000;live;ui
+    - DNS_UPSTREAM_SERVERS=addrs?;;;reload;dns
     - DNS_UPSTREAM_UNSIGNED_ZONES=list?;;;reload;dns
     - DNS_UPSTREAM_ZONES=list?;;;reload;dns
-    - DNS_XFR_PRIMARY=text?;;;restart;dns
+    - DNS_XFR_PRIMARY=ip?;;;restart;dns
     - DOCKER_ENDPOINT=text;;;container;services
     - DOCKER_TIMEOUT=uint;1;600;live;services
     - HTTPS_ENABLED=bool;;;reload;proxy
     - CACHE_MAX_GB=uint;1;1048576;reload;proxy
     - HTTP_CLIENT_TIMEOUT=uint;1;600;live;services
+    - HTTP_RESPONSE_MAX_BYTES=uint;1048576;4294967296;live;services
     - HTTP_POOL_IDLE_TIMEOUT=uint;1;3600;live;services
     - HTTP_TCP_KEEPALIVE=uint;1;3600;live;services
-    - IP_HTTP=text;;;recreate;proxy services
-    - KEA_CTRL_ADDRESS=text;;;reload;dhcp
+    - IP_HTTP=ip;;;recreate;proxy services
+    - KEA_CTRL_ADDRESS=ip;;;reload;dhcp
     - KEA_CTRL_PORT=uint;1;65535;reload;dhcp
+    - KEA_CTRL_TOKEN=secret?;;;reload;dhcp
     - DHCP_API_HOST=text;;;container;ui
     - KEA_DATA_DIR=path;;;container;dhcp
-    - KEA_DDNS_ADDRESS=text;;;reload;dhcp
+    - KEA_DDNS_ADDRESS=ip;;;reload;dhcp
     - KEA_DDNS_GENERATED_PREFIX=text;;;reload;dhcp
     - KEA_DDNS_PORT=uint;1;65535;reload;dhcp
     - KEA_DDNS_REPLACE_CLIENT_NAME=choice;never,always,when-present,when-not-present;;reload;dhcp
-    - KEA_DHCP4_CONF_FILE=path;;;reload;dhcp
-    - KEA_DHCP4_SOCKET=path;;;reload;dhcp
-    - KEA_LEASE_CMDS_HOOK=text;;;reload;dhcp
-    - KEA_LEASE_FILE=path;;;reload;dhcp
+    - KEA_DHCP4_CONF_FILE=path;;;fixed;dhcp
+    - KEA_DHCP4_SOCKET=path;;;fixed;dhcp
+    - KEA_LEASE_CMDS_HOOK=text;;;fixed;dhcp
+    - KEA_LEASE_FILE=path;;;fixed;dhcp
     - KEA_LOG_DEBUGLEVEL=uint;0;99;reload;dhcp
     - KEA_LOG_SEVERITY=choice;FATAL,ERROR,WARN,INFO,DEBUG;;reload;dhcp
     - KEA_NCR_MAX_QUEUE=uint;1;65535;reload;dhcp
-    - KEA_CONFIG_SNAPSHOT_DIR=path;;;live;ui
-    - KEA_CONFIG_SNAPSHOT_FILE=text;;;live;ui
+    - KEA_CONFIG_SNAPSHOT_DIR=path;;;fixed;ui
+    - KEA_CONFIG_SNAPSHOT_FILE=text;;;fixed;ui
     - KEA_SNAPSHOT_KEEP=uint;1;1000;live;ui
     - LANCACHE_IMAGE_CHANNEL=choice;nightly,latest;;live;ui
     - LANCACHE_LOG_PORT=uint;1;65535;container;services
     - LOG_READER_GROUP=text;;;container;services
     - LOOPBACK_BIND_IP=text;;;container;services
     - NGINX_CACHE_DIR=path;;;container;proxy
-    - NGINX_CLIENT_ACL_FILE=path;;;reload;proxy
+    - NGINX_CLIENT_ACL_FILE=path;;;fixed;proxy
     - NGINX_DEFAULT_CERT=text;;;reload;proxy
     - NGINX_DIR=path;;;container;proxy
     - NGINX_LINK_PARTS=list;;;container;proxy
-    - NGINX_HTTPS_LISTEN_FILE=text;;;reload;proxy
-    - NGINX_PSL_FILE=text;;;reload;proxy
+    - NGINX_HTTPS_LISTEN_FILE=text;;;fixed;proxy
+    - NGINX_PSL_FILE=text;;;fixed;proxy
     - NGINX_DISCARD_PORT=uint;1;65535;reload;proxy
     - NGINX_REFUSE_RELAY_PORT=uint;1;65535;reload;proxy
-    - NGINX_STREAM_TARGETS_FILE=text;;;reload;proxy
-    - NGINX_HTTPS_MAP_FILE=text;;;reload;proxy
-    - NGINX_HTTPS_DISPATCH_FILE=text;;;reload;proxy
-    - NGINX_TEMPLATES=list;;;reload;proxy
-    - NGINX_TEMPLATE_DIR=path;;;reload;proxy
-    - NTP_ALLOWED_CLIENT_CIDRS=list;;;restart;services
-    - NTP_DRIFT_FILE=path;;;restart;services
+    - NGINX_STREAM_TARGETS_FILE=text;;;fixed;proxy
+    - NGINX_HTTPS_MAP_FILE=text;;;fixed;proxy
+    - NGINX_HTTPS_DISPATCH_FILE=text;;;fixed;proxy
+    - NGINX_TEMPLATES=list;;;fixed;proxy
+    - NGINX_TEMPLATE_DIR=path;;;fixed;proxy
+    - NTP_ALLOWED_CLIENT_CIDRS=nets;;;restart;services
+    - NTP_DRIFT_FILE=path;;;fixed;services
     - NTP_MAKESTEP=text;;;restart;services
     - NTP_ENABLED=bool;;;restart;services
     - NTP_PORT=uint;1;65535;container;services
     - NTP_PROBE_WAIT_MS=uint;100;60000;live;ui
     - NTP_UPSTREAM_SERVERS=list;;;restart;services
-    - PDNS_API_ALLOW_FROM=list;;;restart;dns
+    - PDNS_API_ALLOW_FROM=nets;;;restart;dns
     - PDNS_API_KEY=secret?;;;restart;dns
-    - PDNS_API_LISTEN=text;;;restart;dns
-    - PDNS_AUTH_ADDRESS=text;;;restart;dns
-    - PDNS_AUTH_API_PORT=uint;1;65535;restart;dns
+    - PDNS_API_LISTEN=ip;;;restart;dns
+    - PDNS_AUTH_ADDRESS=ip;;;restart;dns
+    - PDNS_AUTH_API_PORT=uint;1;65535;fixed;dns
     - PDNS_AUTH_LOGLEVEL=uint;0;9;restart;dns
     - PDNS_AUTH_PORT=uint;1;65535;container;dns
-    - PDNS_AXFR_FROM=list?;;;restart;dns
-    - PDNS_DATABASE=path;;;restart;dns
+    - PDNS_AXFR_FROM=nets?;;;restart;dns
+    - PDNS_DATABASE=path;;;fixed;dns
     - PDNS_LAUNCH=text;;;restart;dns
     - PDNS_DEFAULT_SOA=text;;;restart;dns
     - DNS_NS_HTTPS_NAME=text;;;live;ui
-    - PDNS_DNSUPDATE_FROM=list?;;;restart;dns
-    - PDNS_LISTEN=list;;;restart;dns
-    - PDNS_PRIMARY_API_URL=text?;;;live;services
+    - PDNS_DNSUPDATE_FROM=nets?;;;restart;dns
+    - PDNS_LISTEN=addrs;;;restart;dns
+    - PDNS_PRIMARY_API_URL=text?;;;fixed;services
     - PDNS_SOA_EDIT=text;;;live;ui
     - PDNS_SOA_COLD_RETRY=uint;1;3600;live;ui
     - PDNS_XFR_CYCLE=uint;1;86400;restart;dns
-    - PROXY_ALLOWED_CLIENT_CIDRS=list;;;reload;proxy
+    - PROXY_ALLOWED_CLIENT_CIDRS=nets;;;reload;proxy
     - PROXY_HTTP_PORT=uint;1;65535;container;proxy
-    - PROXY_LOG_PROGRAM=text;;;live;ui
+    - PROXY_LOG_PROGRAM=text;;;fixed;ui
     - PROXY_SECURITY_MODE=choice;lazy,strict;;reload;proxy
-    - RECURSOR_AAAA_LUA_FILE=path;;;restart;dns
-    - RECURSOR_RUN_DIR=path;;;restart;dns
+    - RECURSOR_AAAA_LUA_FILE=path;;;fixed;dns
+    - RECURSOR_API_KEY=secret?;;;restart;dns
+    - RECURSOR_RUN_DIR=path;;;fixed;dns
     - CHRONY_CONF_FILE=path;;;container;services
     - CONFIG_DIR=path;;;container;ui
     - UI_CONTENT_TYPE_OPTIONS=text;;;live;ui
@@ -1480,21 +2110,24 @@ runtime:
     - UI_FRAME_OPTIONS=text;;;live;ui
     - UI_HSTS=text;;;live;ui
     - UI_REFERRER_POLICY=text;;;live;ui
+    - UI_CSRF_HEADER=text;;;live;ui
+    - UI_LANG_COOKIE=text;;;live;ui
+    - UI_SESSION_COOKIE=text;;;live;ui
     - DHCP_MODE_FILE=path;;;container;dhcp
-    - RELOAD_EXEC=list;;;live;ui
-    - SNMPD_RELOAD_EXEC=list;;;live;ui
-    - PDNS_RESTART_EXEC=list;;;live;ui
-    - DNSDIST_RESTART_EXEC=list;;;live;ui
-    - DNSMASQ_RESTART_EXEC=list;;;live;ui
-    - CHRONY_TRACKING_EXEC=list;;;live;ui
+    - RELOAD_EXEC=list;;;fixed;ui
+    - SNMPD_RELOAD_EXEC=list;;;fixed;ui
+    - PDNS_RESTART_EXEC=list;;;fixed;ui
+    - DNSDIST_RESTART_EXEC=list;;;fixed;ui
+    - DNSMASQ_RESTART_EXEC=list;;;fixed;ui
+    - CHRONY_TRACKING_COMMAND=list;;;fixed;services
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp
     - KEA_DDNS_CONF_FILE=path;;;container;dhcp
     - PDNS_CONF_FILE=path;;;container;dns
     - DNSDIST_CONF_FILE=path;;;container;dns
-    - DNSDIST_LISTEN=list;;;restart;dns
-    - DNSDIST_SOURCE_ADDRESS=text;;;restart;dns
+    - DNSDIST_LISTEN=addrs;;;restart;dns
+    - DNSDIST_SOURCE_ADDRESS=ip;;;restart;dns
     - RECURSOR_HTTP_CONF_FILE=path;;;container;dns
     - RECURSOR_HTTP_LUA_FILE=path;;;container;dns
     - RECURSOR_HTTP_RPZ_FILE=path;;;container;dns
@@ -1512,18 +2145,20 @@ runtime:
     - RPZ_SOA_MINIMUM=uint;0;;reload;dns
     - RPZ_POLICY_NAME=text;;;reload;dns
     - ROOT_ZONE_MIRROR=bool;;;reload;dns
-    - ROOT_ZONE_MIRROR_URL=text;;;reload;dns
+    - ROOT_ZONE_MIRROR_URL=text;;;fixed;dns
     - ROOT_ZONE_MIRROR_REFRESH=uint;1;;reload;dns
     - ROOT_ZONE_MIRROR_RETRY=uint;1;;reload;dns
-    - RECURSOR_API_URLS=list;;;live;services
-    - REPO_URL=text;;;live;ui
+    - RECURSOR_API_URLS=list;;;fixed;services
+    - REPO_URL=text;;;fixed;ui
     - SECRETS_DIR=path;;;container;services
-    - SETUP_SCRIPT_URL=text;;;live;ui
-    - SETUP_SCRIPT_URL_NIGHTLY=text;;;live;ui
-    - SETUP_GIT_REF=text;;;live;ui
-    - SETUP_GIT_REF_NIGHTLY=text;;;live;ui
+    - SETUP_CHANNEL_NIGHTLY=text;;;live;ui
+    - SETUP_SCRIPT_URL=text;;;fixed;ui
+    - SETUP_SCRIPT_URL_NIGHTLY=text;;;fixed;ui
+    - SETUP_GIT_REF=text;;;fixed;ui
+    - SETUP_DNS_PROBE_NAME=text;;;container;dns
+    - SETUP_GIT_REF_NIGHTLY=text;;;fixed;ui
     - SNMP_AGENTX=bool;;;restart;services
-    - SNMP_AGENTX_SOCKET=path;;;restart;services
+    - SNMP_AGENTX_SOCKET=path;;;fixed;services
     - SNMP_ALLOW_FROM=text;;;restart;services
     - SNMP_COMMUNITY=secret?;;;restart;services
     - SNMP_DISK_MIN_FREE_PERCENT=uint;1;99;restart;services
@@ -1537,8 +2172,8 @@ runtime:
     - STATS_CONTAINER_GRAPHS=list;;;live;ui
     - STATS_CONTAINERS=list;;;live;ui
     - STATS_DARK_COLOURS=list;;;live;ui
-    - STATS_DIR=path;;;live;ui
-    - STATS_FONTS=list;;;live;ui
+    - STATS_DIR=path;;;fixed;ui
+    - STATS_FONTS=list;;;fixed;ui
     - STATS_GRAPHS=list;;;live;ui
     - STATS_HEARTBEAT_STEPS=uint;1;100;live;ui
     - STATS_HEIGHT=text;;;live;ui
@@ -1549,11 +2184,13 @@ runtime:
     - STATS_RANGES=list;;;live;ui
     - STATS_RRAS=list;;;live;ui
     - STATS_SERVICE_GRAPHS=list;;;live;ui
-    - STATS_SNMP_TARGET=text;;;live;ui
+    - STATS_SNMP_TARGET=text;;;fixed;ui
+    - STATS_SNMP_TIMEOUT=uint;1;60;live;ui
+    - STATS_GRAPH_FILE_MODE=text;;;fixed;ui
     - STATS_STEP=uint;10;3600;live;ui
     - CACHE_USAGE_SCAN_SECONDS=uint;30;86400;live;ui
     - STATS_WIDTH=text;;;live;ui
-    - STEAM_API_URL=text;;;live;services
+    - STEAM_API_URL=text;;;fixed;services
     - STEAM_BRANCH=text;;;live;services
     - STEAM_CDN_HOST=text;;;live;services
     - STEAM_CELL_ID=uint;0;10000;live;services
@@ -1568,7 +2205,10 @@ runtime:
     - STEAM_OS=choice;windows,macos,linux;;live;services
     - STEAM_PROTOCOL_VERSION=uint;1;1000000;live;services
     - STEAM_QR_SIZE=uint;100;1000;live;services
-    - SYSLOG_BUFFER_DIR=path;;;restart;services
+    - SYSLOG_BUFFER_BYTES=uint;1048576;1099511627776;restart;services
+    - SYSLOG_BUFFER_DIR=path;;;fixed;services
+    - SYSLOG_CTL_SOCKET=path;;;fixed;services
+    - SYSLOG_CTL_TIMEOUT=uint;1;60;live;services
     - SYSLOG_FORWARD=list?;;;restart;services
     - SYSLOG_LINE_TEMPLATE=text;;;restart;services
     - SYSLOG_LOG_ROOT=path;;;container;services
@@ -1576,40 +2216,43 @@ runtime:
     - SYSLOG_PRIMARY=text?;;;restart;services
     - SYSLOG_PROGRAMS=list;;;live;ui
     - SYSLOG_TIME_REAP=uint;1;3600;restart;services
-    - SYSLOG_DIR_PERM=text;;;restart;services
-    - SYSLOG_FILE_PERM=text;;;restart;services
+    - SYSLOG_DIR_PERM=text;;;fixed;services
+    - SYSLOG_FILE_PERM=text;;;fixed;services
     - SYSLOG_IN_TRANSPORT=choice;udp,tcp;;restart;services
     - SYSLOG_FWD_TRANSPORT=choice;udp,tcp;;restart;services
-    - UI_CONTROLLABLE_SERVICES=list;;;live;ui
+    - UI_CONTROLLABLE_SERVICES=list;;;fixed;ui
     - DHCP_MODES=list;;;live;ui
     - UI_LANG_DEFAULT=text;;;live;ui
-    - UI_LISTEN=text;;;restart;ui
+    - UI_LISTEN=ip;;;restart;ui
     - UI_LOG_LINES=uint;10;100000;live;ui
     - UI_LOG_TAIL_CHUNK=uint;1024;10485760;live;ui
     - UI_AUTH_PASSWORD_HASH=secret?;;;live;ui
     - UI_PASSWORD_MIN_LENGTH=uint;8;128;live;ui
+    - UI_SESSION_TTL_SECONDS=uint;1;;live;ui
+    - UI_SESSION_TTL_MAX_SECONDS=uint;1;;live;ui
     - UI_PORT=uint;1;65535;recreate;ui
-    - UI_PUBLIC_URL=text?;;;live;ui
+    - UI_PUBLIC_URL=text?;;;fixed;ui
     - UI_RECENT_REQUESTS=uint;1;1000;live;ui
     - UI_REQUEST_BODY_MAX_BYTES=uint;1024;104857600;restart;ui
-    - UI_SERVICES=list;;;live;ui
     - UI_STATUS_REFRESH=uint;1;3600;live;ui
     - UI_AUTH_USER=text;;;live;ui
-    - UPSTREAM_DHCP_IP=text?;;;reload;dhcp
-    - WATCHDOG_ALARM_FILE=path;;;live;services
-    - WATCHDOG_ALARM_FILE_MODE=text;;;live;services
+    - UPSTREAM_DHCP_IP=ip?;;;reload;dhcp
+    - WATCHDOG_ALARM_FILE=path;;;fixed;services
+    - WATCHDOG_ALARM_FILE_MODE=text;;;fixed;services
     - WATCHDOG_RESTART_LIMIT=uint;1;100;live;services
     - WATCHDOG_RESTART_WINDOW=uint;60;86400;live;services
     - WATCHDOG_STOP_GRACE=uint;1;600;live;services
-    - WATCHDOG_CERT_FILES=list?;;;live;services
+    - WATCHDOG_TIDY_LIST_MAX=uint;0;100000;live;services
+    - WATCHDOG_CERT_FILES=list?;;;fixed;services
     - WATCHDOG_CERT_WARN_SECS=uint;3600;31536000;live;services
     - WATCHDOG_DISK_MIN_FREE_PERCENT=uint;1;99;live;services
     - HOST_NET_STAT_SOURCE=path;;;container;services
     - HOST_NET_STAT_DIR=path;;;container;services
     - HOST_MACHINE_ID_SOURCES=list;;;container;services
     - HOST_MACHINE_ID_FILE=path;;;container;services
-    - CACHEHAMSTER_BIND_FILES=list;;;restart;services
-    - CONNTRACK_MAX_FILE=path;;;live;services
+    - CACHEHAMSTER_BIND_FILES=list;;;fixed;services
+    - CONNTRACK_MAX_FILE=path;;;fixed;services
+    - CONNTRACK_STAT_FILE=text;;;fixed;services
     - WATCHDOG_CONNTRACK_WARN_PCT=uint;1;100;live;services
     - CHECK_INTERVAL=uint;5;3600;live;services
     - SERVICES_STOPPED=list?;;;live;services
@@ -1618,44 +2261,43 @@ runtime:
     - DISK_WARN_PCT=uint;1;100;live;services
     - DISK_ALARM_PCT=uint;1;100;live;services
     - CACHE_VALID_DAYS=uint;0;36500;live;services
-    - CACHE_DIR_ALLOWED_PREFIX=path;;;live;services
-    - PURGE_STAMP=path;;;live;services
+    - CACHE_DIR_ALLOWED_PREFIX=path;;;fixed;services
+    - PURGE_STAMP=path;;;fixed;services
     - SYSLOG_RETENTION_DAYS=uint;0;36500;live;services
     - SYSLOG_MAX_GB=uint;1;100000;live;services
     - SYSLOG_PRUNE_RETRY_COOLDOWN=uint;0;86400;live;services
-    - SYSLOG_PRUNE_STAMP=path;;;live;services
-    - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=path;;;live;services
+    - SYSLOG_PRUNE_STAMP=path;;;fixed;services
+    - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=path;;;fixed;services
     - SYSLOG_XZ_PRESET=uint;0;9;live;services
     - WATCHDOG_DISK_PATHS=list;;;live;services
-    - UI_STOP_GRACE=uint;1;600;live;ui
-    - UI_CONFIG_FILE_MODE=text;;;live;ui
+    - UI_CONFIG_FILE_MODE=text;;;fixed;ui
     - APPLY_HEALTH_WAIT_SECONDS=uint;0;3600;live;ui
     - APPLY_HEALTH_POLL_SECONDS=uint;1;60;live;ui
-    - UI_SERVICE=text;;;live;ui
+    - UI_SERVICE=text;;;fixed;ui
     - UI_FLUSH_CHECK_SECONDS=uint;1;3600;live;ui
     - UI_FLUSH_GRACE_SECONDS=uint;0;3600;live;ui
     - DNS_SECONDARY_NAME_MAX=uint;1;63;live;ui
     # What: keys the Rust code reads that had no row.
     # Why: config.rs drops a default without a row.
     # From: Issue #1683 | PR #1980
-    - CA_CERT_FILE=text;;;live;ui
+    - CA_CERT_FILE=text;;;fixed;ui
     - CA_DAYS=uint;1;36500;live;ui
-    - CA_KEY_FILE=text;;;live;ui
-    - CA_KEY_MODE=text;;;live;ui
+    - CA_KEY_FILE=text;;;fixed;ui
+    - CA_KEY_MODE=text;;;fixed;ui
     - CA_KEY_TYPE=text;;;live;ui
-    - CA_SERIAL_FILE=text;;;live;ui
-    - CA_STAMP_FILE=text;;;live;ui
+    - CA_SERIAL_FILE=text;;;fixed;ui
+    - CA_STAMP_FILE=text;;;fixed;ui
     - CA_SUBJECT=text;;;live;ui
-    - CERT_DIR_MODE=text;;;live;ui
-    - CERT_FILE_MODE=text;;;live;ui
-    - CERT_KEY_MODE=text;;;live;ui
+    - CERT_DIR_MODE=text;;;fixed;ui
+    - CERT_FILE_MODE=text;;;fixed;ui
+    - CERT_KEY_MODE=text;;;fixed;ui
     - DDNS_TSIG_ALGORITHM=text;;;live;ui
     - DEFAULT_CERT_DNS=text;;;live;ui
     - LEAF_DAYS=uint;1;36500;live;ui
     - LEAF_KEY_TYPE=text;;;live;ui
     - LEAF_SUBJECT=text;;;live;ui
-    - NGINX_HEALTHZ_BODY=text;;;reload;proxy
-    - NGINX_HEALTHZ_FILE=text;;;reload;proxy
+    - NGINX_HEALTHZ_BODY=text;;;fixed;proxy
+    - NGINX_HEALTHZ_FILE=text;;;fixed;proxy
     - NGINX_HEALTH_HTTPS_PORT=uint;1;65535;reload;proxy
     - NGINX_MITM_PORT=uint;1;65535;reload;proxy
     - NGINX_ORIGIN_HTTPS_PORT=uint;1;65535;reload;proxy
@@ -1665,11 +2307,11 @@ runtime:
     - NGINX_UPSTREAM_CONNECT_TIMEOUT=uint;1;86400;reload;proxy
     - NGINX_UPSTREAM_IDLE_TIMEOUT=uint;1;86400;reload;proxy
     - PROXY_HTTPS_PORT=uint;1;65535;container;proxy
-    - PROXY_STATUS_URL=text;;;live;ui
+    - PROXY_STATUS_URL=text;;;fixed;ui
   # What: defaults compose interpolates as SOT_<KEY>.
   # Why: setup.sh and ci.sh export them; no clash with .env.
   # From: Issue #1683 | PR #1912
-  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE PDNS_LUA_DNS_SCRIPT TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR STACK_ENV_DIR STACK_ENV_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
+  compose_keys: LANCACHE_LOG_PORT RUN_DIR SUPERVISE_RUN_DIR LANCACHE_SHARED_SECRET_DIR UI_DATA_DIR STATUS_DIR SERVICES_API_DIR CACHE_DIR SYSLOG_LOG_ROOT RETENTION_STATE_DIR NTP_STATE_DIR CACHEHAMSTER_DATA_DIR DOCKER_SOCKET LOCALTIME_FILE CDN_DOMAINS_FILE PDNS_DATA_DIR DNS_STATE_DIR DNS_SNAPSHOT_MOUNT KEA_DATA_DIR UI_LISTEN_PORT DNS_PORT DNS_HTTPS_PORT PDNS_AUTH_PORT PDNS_AUTH_API_PORT NTP_PORT PROXY_HTTP_PORT PROXY_HTTPS_PORT NGINX_PASSTHROUGH_PORT NGINX_DIR NGINX_SUBDIR_CA NGINX_SUBDIR_CERTS NGINX_CACHE_DIR NGINX_PSL_FILE TEMPLATE_DIR STATIC_DIR LANG_DIR LOOPBACK_BIND_IP HTTPS_OFF_BIND_IP DHCP_API_HOST DNS_REPLICATION_ROLE_SECONDARY SECONDARY_RUNTIME_GID SECONDARY_SHARED_SECRET_DIR CONTAINER_NAME_SERVICES CONTAINER_NAME_PROXY CONTAINER_NAME_DNS CONTAINER_NAME_DHCP CONTAINER_NAME_UI HEALTHCHECK_INTERVAL HEALTHCHECK_TIMEOUT HEALTHCHECK_RETRIES HEALTHCHECK_START_PERIOD PROXY_HEALTH_PATH SETUP_DNS_PROBE_NAME CONFIG_DIR NGINX_CONF_DIR NGINX_TEMPLATE_DIR STACK_ENV_DIR STACK_ENV_FILE HOST_NET_DEV_FILE HOST_NET_DEV_SOURCE HOST_NET_STAT_SOURCE HOST_NET_STAT_DIR HOST_MACHINE_ID_FILE
   # What: managed secrets as "KEY generator owner".
   # Why: setup.sh and ci.sh filter one list.
   # From: Issue #1683 | PR #1912
@@ -1842,7 +2484,7 @@ ci_check_inputs:
     - "deploy/**"
     - "@{ci_variables.CI_README}"
     - "@{ci_variables.CI_INSTALLER}"
-    - "@{services.ui.context}/src/main.rs"
+    - "**/*.rs"
   codeql-coverage: ["**/*.rs", "**/Cargo.toml"]
   comments: ["**"]
   deny-short-sha:
@@ -2685,6 +3327,22 @@ file_headers:
     - services/ui/src/static/admin.css
     - "services/ui/src/lang/*.json"
     - services/ui/nginx/public_suffix_list.dat
+  # What: verbatim maintainer notice after a Rust header.
+  # Why: the comment check passes this text only, line 5 on.
+  # From: Issue #1683 | PR #2020
+  rust_notice:
+    - "BINDING MAINTAINER DECISION [AG-WF-029]"
+    - ""
+    - "This is the single Rust source file of lancache-ng."
+    - "Every capability MUST live in exactly one module, its"
+    - "owner. A module MUST NOT implement the responsibility of"
+    - "another module. Shared functionality MUST live in mod"
+    - "shared, which MUST NOT collect unrelated domain logic."
+    - ""
+    - "This notice is mandatory and MUST be retained verbatim."
+    - ""
+    - "Any modification, rewording, shortening, relocation, or removal"
+    - "of this notice is explicitly DISACK."
 
 # What: CI variables each build type passes as build-args.
 # Why: builders read repo/org vars; no YAML or literal copy.

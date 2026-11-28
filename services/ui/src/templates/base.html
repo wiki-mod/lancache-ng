@@ -5,10 +5,10 @@
 {# Why: child templates extend it and override the blocks #}
 {# From: Issue #1683 | PR #1912 #}
 
-{# What: hidden csrf_token field of every POST form #}
-{# Why: one markup; main.rs CSRF_FORM_FIELD reads it #}
+{# What: hidden token field of every POST form #}
+{# Why: one markup; name and token come from ui.rs #}
 {# From: Issue #1683 | PR #1912 #}
-{% component csrf_field(csrf_token) %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endcomponent csrf_field %}
+{% component csrf_field(@csrf_token, @csrf_name) %}<input type="hidden" name="{{ csrf_name }}" value="{{ csrf_token }}">{% endcomponent csrf_field %}
 {# What: "Kopieren" button; copyText() copies target #}
 {# Why: one markup for setup and Secondary copy buttons #}
 {# From: Issue #1683 | PR #1912 #}
@@ -664,7 +664,7 @@
   a.subtab { text-decoration: none; }
   button.subtab { background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; }
 
-  /* What: watchdog dots in the mockup beam-light look
+  /* What: status dots in the mockup beam-light look
      Why: JS paints one class per status on every page
      From: Issue #1437 | PR #1858 */
   .beambar-dot { display: inline-block; width: 7px; height: 7px; border-radius: 999px; vertical-align: middle; margin-right: 7px; }
@@ -695,6 +695,21 @@
     // Why: one conversion for every page script
     // From: Issue #1683 | PR #1912
     window.LancacheUi = { ms: function (seconds) { return seconds * 1000; } };
+
+    // What: date and time of a Date in the page language
+    // Why: one formatter for every page, html lang
+    // From: Issue #1683 | PR #2020
+    (function () {
+      const lang = document.documentElement.lang;
+      const day = new Intl.DateTimeFormat(lang, { dateStyle: 'medium' });
+      const clock = new Intl.DateTimeFormat(lang, { timeStyle: 'medium' });
+      window.LancacheUi.when = function (date) {
+        return day.format(date) + ', ' + clock.format(date);
+      };
+      window.LancacheUi.whenParts = function (date) {
+        return [day.format(date), clock.format(date)];
+      };
+    })();
 
     // What: a visible error line at the page bottom.
     // Why: else an error shows only in the console.
@@ -915,15 +930,18 @@
 
   <script>
     // What: CSRF token for the fetch()-based POSTs below
-    // Why: sent as X-CSRF-Token header, not a form field
+    // Why: sent as a SOT-named header, not a form field
     // From: Issue #1437
     const CSRF_TOKEN = "{{ csrf_token }}";
+    const CSRF_FIELD = "{{ csrf_name }}";
+    const CSRF_HEADER = "{{ v.UI_CSRF_HEADER }}";
+    const LANG_COOKIE = "{{ v.UI_LANG_COOKIE }}";
 
     // What: POST with the CSRF header; data goes as JSON
     // Why: every page action sends the same request
     // From: Issue #1683 | PR #2019
     function csrfPost(url, data) {
-      const init = { method: 'POST', headers: { 'X-CSRF-Token': CSRF_TOKEN } };
+      const init = { method: 'POST', headers: { [CSRF_HEADER]: CSRF_TOKEN } };
       if (data !== undefined) {
         init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(data);
@@ -931,10 +949,10 @@
       return fetch(url, init);
     }
 
-    // What: shared watchdog poll for beambar + dashboard
+    // What: shared container status poll for all dots
     // Why: one fetch/interval, not one per template
     // From: Issue #1437
-    window.LancacheWatchdog = (function () {
+    window.LancacheStatus = (function () {
       const DOT_COLOR_CLASSES = ['green', 'amber', 'yellow', 'red', 'gray'];
       // What: the status as dot class; unknown becomes gray
       // Why: a server value never adds an unknown class
@@ -968,12 +986,12 @@
       async function refresh() {
         let data;
         try {
-          const response = await fetch('{{ routes.watchdog_status | safe }}');
+          const response = await fetch('{{ routes.container_status | safe }}');
           // What: throws on a non-2xx status response
           // Why: the catch below reports it as fetch error
           // From: Issue #1683 | PR #1912
           if (!response.ok) {
-            throw new Error('watchdog status: HTTP ' + response.status);
+            throw new Error('container status: HTTP ' + response.status);
           }
           data = await response.json();
         } catch (err) {
@@ -990,7 +1008,7 @@
       return { colorClass: colorClass, paintDot: paintDot, onUpdate: onUpdate, refresh: refresh };
     })();
 
-    // What: POSTs desired state; the watchdog applies it
+    // What: POSTs desired state; the ui saves, applies it
     // Why: shared by all dock start/stop buttons
     // From: Issue #1437
     async function setDockServiceState(service, state, button) {
@@ -1003,7 +1021,7 @@
         if (!response.ok) {
           throw new Error('desired state: HTTP ' + response.status);
         }
-        window.LancacheWatchdog.refresh();
+        window.LancacheStatus.refresh();
       } catch (err) {
         // What: reports the error, re-enables button
         // Why: a network hiccup must not strand the button
@@ -1069,13 +1087,23 @@
     }
 
     // What: names that get a dock start/stop button
-    // Why: DesiredState::SERVICES, matched to status.json
+    // Why: SOT UI_CONTROLLABLE_SERVICES; the ui checks it
     // From: Issue #1683 | PR #1912
     const DOCK_CONTROLLABLE_SERVICES = [{% for name in desired_services %}'{{ name }}',{% endfor %}];
     // What: programs per container (container:program)
-    // Why: reload/restart one program via OpenRC
-    // From: Issue #1683 | PR #1980
-    const DOCK_PROGRAMS = [{% for p in programs %}'{{ p }}',{% endfor %}];
+    // Why: the watchdog lists what OpenRC runs there
+    // From: Issue #1683 | PR #2020
+    let DOCK_PROGRAMS = [];
+    fetch('{{ routes.watchdog_programs | safe }}')
+      .then(function (r) {
+        if (!r.ok) { throw new Error('programs: HTTP ' + r.status); }
+        return r.json();
+      })
+      .then(function (v) {
+        DOCK_PROGRAMS = v.programs || [];
+        window.LancacheStatus.refresh();
+      })
+      .catch(function (err) { reportError(err); });
     // What: the ui container: restart only, no stop.
     // Why: its menu offers restart like the proxy menu.
     // From: Issue #1683 | PR #1985
@@ -1107,7 +1135,7 @@
         wrap.className = 'beam-station';
         wrap.title = svc.health || '';
         const dot = document.createElement('span');
-        window.LancacheWatchdog.paintDot(dot, svc.status);
+        window.LancacheStatus.paintDot(dot, svc.status);
         wrap.appendChild(dot);
         const nameNode = document.createTextNode(svc.name + ' ');
         wrap.appendChild(nameNode);
@@ -1169,8 +1197,7 @@
           button.addEventListener('click', function () {
             if (!confirm(LC_T.restart_ui_ask)) { return; }
             button.disabled = true;
-            const body = new URLSearchParams({ csrf_token: CSRF_TOKEN });
-            fetch('{{ routes.restart_ui | safe }}', { method: 'POST', body: body })
+            csrfPost('{{ routes.restart_ui | safe }}')
               .finally(function () { setTimeout(function () { location.reload(); }, 5000); });
           });
         }
@@ -1254,13 +1281,15 @@
       // From: Issue #871 | PR #1991
       document.querySelectorAll('[data-cache-wipe]').forEach(function (b) {
         const st = b.parentNode.querySelector('[data-cache-wipe-state]');
-        const gib = function (n) { return (n / 1073741824).toFixed(1) + ' GiB'; };
         b.addEventListener('click', function () {
           if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = LC_T.cache_wipe_sure; return; }
           b.disabled = true; b.textContent = LC_T.loading;
-          fetch(b.dataset.cacheWipe, { method: 'POST', headers: { 'X-CSRF-Token': b.dataset.csrf } })
+          csrfPost(b.dataset.cacheWipe)
             .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
-            .then(function (v) { st.textContent = LC_T.cache_freed.replace('{x}', gib(v.freed)); })
+            .then(function (v) {
+              st.textContent = LC_T.cache_freed.replace('{x}', v.freed_human);
+              if (v.errors && v.errors.length) { window.LancacheUi.fail(new Error(v.errors.join('\n'))); }
+            })
             .catch(function (e) { window.LancacheUi.fail(e); })
             .finally(function () { b.disabled = false; delete b.dataset.sure; b.textContent = LC_T.cache_wipe; });
         });
@@ -1279,7 +1308,7 @@
       function render(data) {
         container.textContent = '';
         if (data.state === 'unavailable') {
-          container.textContent = LC_T.watchdog_status_not_available;
+          container.textContent = LC_T.container_status_not_available;
           return;
         }
         (data.services || []).forEach(function (svc) {
@@ -1291,29 +1320,36 @@
           container.appendChild(staleNote);
         }
       }
-      window.LancacheWatchdog.onUpdate(render);
+      window.LancacheStatus.onUpdate(render);
     })();
 
-    // What: loads watchdog status now and per SOT interval
+    // What: loads container status now and per interval
     // Why: beambar and dashboard dots read the same data
     // From: Issue #1683 | PR #1912
-    window.LancacheWatchdog.refresh();
-    setInterval(window.LancacheWatchdog.refresh, window.LancacheUi.ms({{ watchdog_refresh_seconds }}));
+    window.LancacheStatus.refresh();
+    setInterval(window.LancacheStatus.refresh, window.LancacheUi.ms({{ status_refresh_seconds }}));
 
-    // What: each [data-epoch] value as de-DE date and time
+    // What: each [data-epoch] value as date and time
     // Why: one owner for every page; 0 or junk stays raw
     // From: Issue #1683 | PR #1912
     (function () {
-      const formatter = new Intl.DateTimeFormat('de-DE', {
-        dateStyle: 'medium',
-        timeStyle: 'medium',
-      });
       document.querySelectorAll('[data-epoch]').forEach(function (el) {
         const epoch = Number(el.dataset.epoch);
         if (!Number.isFinite(epoch) || epoch <= 0) {
           return;
         }
-        el.textContent = formatter.format(new Date(window.LancacheUi.ms(epoch)));
+        const date = new Date(window.LancacheUi.ms(epoch));
+        // What: data-split puts the time under the date.
+        // Why: one line makes a table column wide.
+        // From: Issue #871 | PR #1985
+        if (el.hasAttribute('data-split')) {
+          const parts = window.LancacheUi.whenParts(date);
+          el.textContent = parts[0];
+          el.appendChild(document.createElement('br'));
+          el.appendChild(document.createTextNode(parts[1]));
+        } else {
+          el.textContent = window.LancacheUi.when(date);
+        }
         el.title = 'Unix: ' + el.dataset.epoch;
       });
     })();
@@ -1325,7 +1361,7 @@
   <script>
     (function () {
       const choose = function (code) {
-        document.cookie = 'lc_lang=' + code + '; path=/; max-age=31536000; samesite=strict';
+        document.cookie = LANG_COOKIE + '=' + code + '; path=/; max-age=31536000; samesite=strict';
         location.reload();
       };
       const pick = document.getElementById('lang-select');

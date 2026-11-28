@@ -93,11 +93,12 @@ ENV LANCACHE_RUNTIME_GID=${LANCACHE_RUNTIME_GID} \
 # What: the dns helper, the Rust program of this image.
 # Why: built in the builder stage from this checkout.
 # From: Issue #1683
-COPY --from=builder /build/lancache-dns-out /usr/local/bin/lancache-dns
+COPY --from=builder /build/lancache-ng-out /usr/local/bin/lancache-ng
 
 # What: one supervise-daemon script per SOT process.
 # Why: OpenRC restarts crashes; @KEY@ e.g. CONFIG_DIR.
 # From: Issue #1683 | PR #1980
+ARG RUST_CRATES
 ARG LANCACHE_PROCESSES
 ARG LANCACHE_PROCESS_PRE
 ARG LANCACHE_INIT_PRE

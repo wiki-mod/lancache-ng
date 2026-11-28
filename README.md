@@ -69,7 +69,7 @@ It can:
 - clone the code of that channel to `/opt/lancache-ng/latest` or
   `/opt/lancache-ng/nightly`
 - ask for the cache server IP
-- ask for a second LAN IP (always required) and HTTPS caching (default: on)
+- ask whether to enable HTTPS caching (default: on); only then ask for a second LAN IP
 - ask for cache directory and cache size
 - optionally enable scheduled automatic updates (a host systemd timer)
 - create pre-update rollback backups
@@ -240,10 +240,10 @@ You need:
 - enough disk space for the cache
 - port `53` free for DNS
 - port `80` free for HTTP cache traffic
-- port `443` free on both LAN IPs
+- port `443` free on the cache server IP, and on the second LAN IP in HTTPS mode
 - port `5300` free on the HTTP IP (zone transfer to secondary DNS nodes of older versions)
 - port `8080` for the Admin UI
-- a second LAN IP (always required; HTTPS mode answers on it)
+- a second LAN IP, only for HTTPS mode (HTTPS mode answers on it)
 - optional port `67/udp` if using the built in DHCP server
 
 Recommended storage:
@@ -432,8 +432,8 @@ compressed, timestamped archive and prints its path:
 - a copy of `.env` and, if present, `.env.local` with every credential-shaped value (API keys,
   TSIG keys, passwords, tokens) redacted
 - host facts (Docker/Compose versions, kernel, disk space)
-- known-good-snapshot directory listings (file names only, no content) --
-  see `docs/README.md` (section 6)
+- directory listings of the zone, stack and Kea snapshots (file names
+  only, no content) -- see `docs/README.md` (section 6)
 
 Review the archive yourself before attaching it to an issue -- this command
 never uploads or attaches anything automatically.
@@ -833,9 +833,9 @@ LANCACHE_IMAGE_TAG=<set-by-setup>
 - `lazy` is the default and keeps the traditional LanCache-style behavior: if a client reaches the cache, nginx proxies the requested host upstream. This is the deliberate cache-first choice so new CDN hostnames keep working out of the box.
 - `strict` NOT RECOMMENDED! Only proxies hosts whose root domain is derived from `services/dns/cdn-domains.txt`; unknown hosts receive `403 Forbidden`. This reduces accidental or abusive proxying, but it can AND will break downloads until the missing CDN hostname is added to `cdn-domains.txt` — there is no separate file to maintain, but you still need to add every CDN hostname you want to cache by hand.
 
-`PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.0.2.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`Settings::load` in `services/common/config.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
+`PROXY_ALLOWED_CLIENT_CIDRS` restricts who may use the proxy, for example `192.0.2.0/24 172.16.0.0/12`. An empty value keeps the default from `runtime.defaults` in `.github/yaml/build-manifest.yml` (the private networks and `fc00::/7`); it does not open the proxy to every client (`config::Settings::load` in `services/lancache-ng/src/lancache-ng.rs` treats an empty file or environment value as unset). Firewalling and Docker port bindings still define the outer boundary for the normal LAN-only deployment model.
 
-The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`) and of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) for operator-selected rollback; see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback).
+The Admin UI keeps snapshots of the Kea DHCP configuration (`KEA_SNAPSHOT_KEEP`, default `20`), of the lan and private reverse zone records (`DNS_SNAPSHOT_KEEP`, default `20`) and of the whole stack state after every change (`STACK_SNAPSHOT_KEEP`, default `50`) for operator-selected rollback (`setup.sh reset-to-last-known-good-config stack|kea|dns`); see [docs/README.md](docs/README.md#6-known-good-snapshots-and-rollback).
 
 `LANCACHE_IMAGE_CHANNEL` controls the mutable stack channel. `latest` (from
 `master`) is the install default (SOT `release.install_channel`). On update, a
@@ -942,7 +942,7 @@ Recommended:
 - use enough disk space
 - enable nesting
 - keep the container inside your LAN
-- give the container a static IP and a second static IP (always required)
+- give the container a static IP, and a second static IP if you use HTTPS mode
 
 Example LXC config on the Proxmox host:
 
@@ -965,8 +965,8 @@ cached there, for clients with the CA certificate installed.
 
 | Port | Protocol | Used for |
 |---|---|---|
-| `53` | TCP and UDP | DNS (both LAN IPs); dnsdist also passes zone transfer and NOTIFY to the authoritative server |
-| `80` | TCP | HTTP cache (both LAN IPs) |
+| `53` | TCP and UDP | DNS (cache server IP, and the second LAN IP in HTTPS mode); dnsdist also passes zone transfer and NOTIFY to the authoritative server |
+| `80` | TCP | HTTP cache (cache server IP, and the second LAN IP in HTTPS mode) |
 | `443` | TCP | TLS passthrough on the HTTP IP, HTTPS mode cache on the HTTPS IP |
 | `5300` | TCP and UDP | zone transfer to secondary DNS nodes of older versions (HTTP IP); a new secondary uses `53` |
 | `8080` | TCP | Admin UI |
@@ -993,8 +993,7 @@ services/proxy/          Unified proxy for HTTP mode and HTTPS mode
 services/dns/            DNS image: dnsdist, PowerDNS auth and recursor
 services/dhcp/           DHCP image: Kea or dnsmasq proxy/relay
 services/ui/             Admin UI
-services/common/         Shared Rust crate
-services/cachehamster/   CacheHamster prefill daemon (Steam), built into services
+services/lancache-ng/    The one Rust program: ui, dns, watchdog and cachehamster roles, CLI tools
 ```
 
 ## Common problems

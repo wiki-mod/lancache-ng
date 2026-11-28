@@ -8,11 +8,11 @@ Dockerfiles and compose files name keys, never values.
 
 | Container | Programs | Started by |
 | --- | --- | --- |
-| `services` | lancache-watchdog, lancache-cachehamster, syslog-ng, chronyd, snmpd | OpenRC |
+| `services` | lancache-watchdog (`lancache-ng watchdog`), lancache-cachehamster (`lancache-ng cachehamster daemon`), syslog-ng, chronyd, snmpd | OpenRC |
 | `proxy` | nginx, snmpd | OpenRC |
-| `dns` | dnsdist, PowerDNS auth, recursor `dns-http`, recursor `dns-https`, snmpd | OpenRC |
+| `dns` | dnsdist, PowerDNS auth, recursor `dns-http`, recursor `dns-https`, lancache-dns (`lancache-ng dns`), snmpd | OpenRC |
 | `dhcp` | Kea (dhcp4, ctrl-agent, ddns) or dnsmasq | OpenRC, runlevel = `DHCP_MODE` |
-| `ui` | lancache-ui, snmpd | OpenRC |
+| `ui` | lancache-ui (`lancache-ng ui`), snmpd | OpenRC |
 
 The program list of each image is the SOT field `processes`. Each row is
 `[runlevel:]name=command,arg,...`. The Dockerfile turns every row into an
@@ -30,15 +30,24 @@ One owner per decision. No component undoes the work of another.
 
 | Who | Does | Does not |
 | --- | --- | --- |
-| `shared.rs` | Building blocks: render configs, Docker calls, file tidy-up | Decide anything |
-| ui | Saves settings, renders and writes every config, wakes the owner container, records user start/stop in `SERVICES_STOPPED` | Run check loops or cleanup |
-| Watchdog | Decides *when*: health checks, restarts sick containers, daily cleanup, writes the alarm file | Write configs |
+| `mod shared` (`services/lancache-ng/src/lancache-ng.rs`) | Building blocks: render configs, Docker calls, file tidy-up | Decide anything |
+| ui | Saves settings, renders and writes every config, records user start/stop in `SERVICES_STOPPED`, tells the watchdog which owners need a restart or reload | Start, stop, restart or reload programs and containers; run check loops or cleanup |
+| Watchdog | Carries out every start, stop, restart and reload of programs and containers (after a save, on demand and when healing); decides *when*: health checks, restarts sick containers, keeps containers to their wish, daily cleanup, writes the alarm file | Write configs |
 | OpenRC (inside a container) | Keeps the programs of its container alive | Touch other containers |
 | Docker healthcheck | Tells Docker whether the programs really answer | Restart anything |
 
 A container the user stopped in the ui is listed in `SERVICES_STOPPED`.
-The watchdog never restarts a container on that list. This prevents the
-loop "user stops, watchdog starts, user stops again".
+The watchdog never restarts a container on that list and stops one that
+runs against it. This prevents the loop "user stops, watchdog starts,
+user stops again".
+
+The ui and the CLI reach the watchdog and the cachehamster daemon only
+through their REST routes on Unix sockets (`WATCHDOG_SOCKET`,
+`CACHEHAMSTER_SOCKET`) in the volume `services-api`, which only the
+`services` and `ui` containers mount. A command such as
+`lancache-ng watchdog ...` sends its request there and runs nowhere
+else; without the socket it fails with "is the watchdog running?". The
+watchdog works without the ui.
 
 ## Failure handling
 
@@ -54,11 +63,11 @@ Healthchecks:
 
 | Container | Check |
 | --- | --- |
-| `services` | `lancache-watchdog healthcheck`: the alarm file is newer than `CHECK_INTERVAL × RESTART_AFTER` |
+| `services` | `lancache-ng watchdog healthcheck`: the alarm file is newer than `CHECK_INTERVAL × RESTART_AFTER` |
 | `proxy` | HTTP request to `PROXY_HEALTH_PATH` |
-| `dns` | DNS query for `SETUP_DNS_PROBE_NAME`; any reply counts, so a dead upstream does not restart DNS |
+| `dns` | `lancache-ng dns healthcheck`: DNS query for `SETUP_DNS_PROBE_NAME`; any reply counts, so a dead upstream does not restart DNS |
 | `dhcp` | No crashed OpenRC service |
-| `ui` | `lancache-ui healthcheck` |
+| `ui` | `lancache-ng ui healthcheck` |
 
 ## Configuration flow
 
@@ -67,18 +76,28 @@ Healthchecks:
    mounted at `STACK_ENV_DIR`). `setup.sh` writes the same file; both hold a
    flock of `<file>.lock` while they write. An optional `<file>.local`
    (`.env.local`) beside it overrides single keys; nothing writes it, and the
-   ui refuses to save a key it sets (`config::read_file`, `config::store`).
+   ui refuses to save a key it sets (`config::read_file`, `config::save_edits`).
    Precedence per key: `.env.local`, then `.env` (an empty value means the SOT
    default), then the container env, then the SOT default in
    `build-manifest.yml`. A file value with `$` is a Compose expression; the
    container env holds its resolved value.
 2. The ui renders every config from the SOT and the saved settings
-   (`render::all` in `shared.rs`) and writes changed files into the
+   (`shared::render::all` in `services/lancache-ng/src/lancache-ng.rs`) and writes changed files into the
    `lancache-config` volume under `CONFIG_DIR`.
-3. The ui wakes only the owners with changes, with the strongest needed
-   action (reload or restart, `apply::plan`).
+3. The ui plans only the owners with changes, with the strongest needed
+   action (reload or restart, `apply::owner_effects`), and sends the plan
+   to the watchdog (`UI_ROUTE_WATCHDOG_APPLY`); a new daemon file sends its
+   SOT exec rows (`UI_ROUTE_WATCHDOG_EXEC`). The watchdog runs the reloads
+   and restarts, retries a 409, waits for health and answers with the
+   report.
 4. The owner containers mount `lancache-config` read-only and start their
    programs with the SOT config paths.
+5. After a successful change the ui keeps the new stack state: the storable
+   settings, the Kea config and the own zones (`stack::state_after`).
+   `lancache-ng system snapshot restore <id>` (REST
+   `UI_ROUTE_STACK_SNAPSHOT_RESTORE`) and `setup.sh
+   reset-to-last-known-good-config stack` give an earlier state back as a
+   whole.
 
 The ui also renders once at start, because the volume starts empty.
 nginx templates come from `services/ui/nginx` in the checkout (mounted into
@@ -118,7 +137,7 @@ be switched per service in the ui; the ui re-renders the syslog-ng config.
 
 ## Pre-caching
 
-`lancache-cachehamster` runs in `services`. It logs in to Steam by QR
+`lancache-cachehamster` (`lancache-ng cachehamster daemon`) runs in `services`. It logs in to Steam by QR
 code, keeps a job queue (now, later, at a time) and downloads through the
 proxy so the cache fills. The ui starts jobs through it.
 

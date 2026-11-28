@@ -2357,6 +2357,10 @@ migrate_dhcp_mode_for_update() {
 # From: Issue #1683 | PR #1858
 readonly LEGACY_STATE_ROOT="/srv/lancache"
 readonly -a LEGACY_STATE_CHILDREN=(cache pdns pdns-ssl pdns-filter-state kea nats nats-conf)
+# What: the PowerDNS data folder name of 1.x installs
+# Why: legacy move and PDNS_DIR rename read one name
+# From: Issue #1683 | PR #2020
+readonly LEGACY_PDNS_SUBDIR=pdns-standard
 
 # What: the legacy path of state child $1, or the root
 # Why: one place joins root and child; pdns differs
@@ -2366,7 +2370,7 @@ legacy_state_path() {
     # What: old installs keep PowerDNS data in pdns-standard
     # Why: the move must find the data where 1.x wrote it
     # From: Issue #1683 | PR #1912
-    [[ "$child" != pdns ]] || child=pdns-standard
+    [[ "$child" != pdns ]] || child=$LEGACY_PDNS_SUBDIR
     if [[ -n "$child" ]]; then
         printf '%s/%s\n' "$LEGACY_STATE_ROOT" "$child"
     else
@@ -5245,8 +5249,8 @@ migrate_env_for_update() (
     # Why: moving the key must not move the zone data.
     # From: Issue #1683 | PR #1912
     pdns_default=$(prod_state_dir_for_key PDNS_DIR "" "$state_dir") || exit $?
-    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/pdns-standard" && ! -d "$pdns_default" ]]; then
-        set_env_key PDNS_DIR "$state_dir/pdns-standard" "$env_file"
+    if [[ -z "$(get_env_var PDNS_DIR "$env_file" nonempty)" && -d "$state_dir/$LEGACY_PDNS_SUBDIR" && ! -d "$pdns_default" ]]; then
+        set_env_key PDNS_DIR "$state_dir/$LEGACY_PDNS_SUBDIR" "$env_file"
     fi
 
     # What: derives state dirs from the legacy root
@@ -6215,8 +6219,9 @@ Commands:
   reset-to-last-known-good-config <service> [install-dir] [snapshot-id]
                        CLI fallback for rolling a service back to a known-good
                        config when the Admin UI itself is unreachable.
-                       Supported: kea, dns/pdns (dns/pdns also takes a <zone>
-                       argument -- run with --help for the full shape).
+                       Supported: stack, kea, dns/pdns (dns/pdns also takes
+                       a <zone> argument -- run with --help for the full
+                       shape).
   reset-sign-in [install-dir] [--yes]
                        Turn the Admin UI sign-in off after a lockout (asks
                        first); then set a new user name and password in
@@ -6459,7 +6464,7 @@ Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snaps
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
 control surface still is. Automates the exact by-hand recovery
-sequence docs/README.md section 6.4
+sequence docs/README.md section 6.5
 documents: list this install's known-good config snapshots for <service> and
 apply one -- the given [snapshot-id], or the newest after an explicit
 confirmation if omitted -- via that service's own real validate/apply/persist
@@ -6467,6 +6472,11 @@ API, the same sequence the Admin UI's own per-service rollback pages already
 run when they ARE reachable.
 
 Supported services:
+  stack              Rolls the whole stack back to a saved state
+                     (settings, Kea and the zones together) via
+                     lancache-ng system snapshot in the ui container.
+                     Needs the ui process; it may be unreachable from
+                     the browser.
   kea, dhcp          Rolls back Kea's DHCP config via its Control Agent API
                      (config-test -> config-set -> config-write), reading
                      snapshots from KEA_CONFIG_SNAPSHOT_DIR in the
@@ -8347,8 +8357,18 @@ cmd_create_logs_for_issue() (
     done
 
     print_step "Known-good-snapshot directory listings"
-    logbundle_named_volume_listing "$install_dir" "$env_file" dns-config-snapshots config-snapshots \
-        "$dest/known-good-snapshots/dns.txt"
+    # What: zone and stack states in the ui data volume
+    # Why: the ui keeps them below UI_DATA_DIR (SOT)
+    # From: Issue #1683 | PR #2020
+    local ui_data snap_key snap_dir
+    ui_data=$(prod_env_default UI_DATA_DIR) || exit $?
+    for snap_key in DNS_SNAPSHOT_DIR STACK_SNAPSHOT_DIR; do
+        snap_dir=$(prod_env_default "$snap_key") || exit $?
+        [[ "$snap_dir" == "$ui_data"/* ]] \
+            || die "$snap_key ($snap_dir) is not below UI_DATA_DIR ($ui_data)."
+        logbundle_named_volume_listing "$install_dir" "$env_file" ui-data "${snap_dir#"$ui_data"/}" \
+            "$dest/known-good-snapshots/${snap_key,,}.txt"
+    done
     # What: Kea snapshots: host path, then named volume
     # Why: pre-v0.3.0 dev stacks used a named volume
     # From: Issue #1683 | PR #1858
@@ -8390,7 +8410,7 @@ EOF
     printf '\n%sAttach this file to your GitHub issue:%s %s\n\n' "${BOLD}" "${RESET}" "$archive"
 )
 
-# What: rolls a Kea or DNS service back to a snapshot
+# What: rolls the stack, Kea or a zone back to a state
 # Why: works when the Admin UI is unreachable
 # From: Issue #1683 | PR #1858
 cmd_reset_to_last_known_good_config() {
@@ -8430,6 +8450,9 @@ cmd_reset_to_last_known_good_config() {
     esac
 
     case "$service" in
+        stack)
+            reset_stack_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
+            ;;
         kea|dhcp)
             reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
             ;;
@@ -8440,10 +8463,10 @@ cmd_reset_to_last_known_good_config() {
             reset_dns_to_last_known_good_config "dns" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         "")
-            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]. Supported services: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]. Supported services: stack, kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
         *)
-            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: stack, kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
     esac
 }
@@ -8730,17 +8753,61 @@ dns_zone_snapshot_entries() {
     json_value ".zones[\$zone][]? | \"\(.id) \(.created_unix)\"" "$1" --arg zone "$2"
 }
 
-# What: runs one lancache-ui command in the ui container
-# Why: zone-snapshots and zone-rollback are ui commands
+# What: runs one lancache-ng command in the ui container
+# Why: zone and stack rollback are commands of the ui
 # From: Issue #1683 | PR #1858
-dns_rollback_exec() (
+ui_container_exec() (
     local install_dir="$1" env_file="$2" out rc=0 ui_svc
     shift 2
     ui_svc=$(prod_env_default UI_SERVICE) || exit $?
-    out=$(stack_compose "$install_dir" "$env_file" exec -T "$ui_svc" lancache-ui "$@" 2>&1) || rc=$?
-    [[ $rc -eq 0 ]] || die "lancache-ui $1 in the ui container failed (exit $rc): $out"
+    out=$(stack_compose "$install_dir" "$env_file" exec -T "$ui_svc" "$@" 2>&1) || rc=$?
+    [[ $rc -eq 0 ]] || die "$* in the ui container failed (exit $rc): $out"
     printf "%s\n" "$out" | tail -n 1
 )
+
+# What: rolls the whole stack back to a saved state
+# Why: settings, Kea and zones come back together
+# From: Issue #1683 | PR #2020
+reset_stack_to_last_known_good_config() {
+    local install_dir="$1" snapshot_id="$2" assume_yes="${3:-0}"
+    local env_file body entry_list resp entry eid found=0 idx n
+    local -a entries=()
+
+    env_file=$(require_stack_env_file "$install_dir") || exit $?
+    install_missing_tools jq
+
+    body=$(ui_container_exec "$install_dir" "$env_file" lancache-ng system snapshot list)
+    entry_list=$(json_value '.answer.snapshots[] | "\(.id) \(.created_unix)"' "$body") \
+        || die "Unrecognized snapshot list from the ui: $body"
+    [[ -z "$entry_list" ]] || mapfile -t entries <<< "$entry_list"
+    [[ ${#entries[@]} -gt 0 ]] || die "No saved stack state found."
+
+    print_step "Saved stack states (oldest first)"
+    n=${#entries[@]}
+    for (( idx = n - 1; idx >= 0; idx-- )); do
+        print_snapshot_line "${entries[$idx]%% *}" "${entries[$idx]#* }"
+    done
+
+    if [[ -z "$snapshot_id" ]]; then
+        snapshot_id="${entries[0]%% *}"
+        warn_newest_snapshot "$snapshot_id"
+    fi
+    for entry in "${entries[@]}"; do
+        eid="${entry%% *}"
+        [[ "$eid" = "$snapshot_id" ]] && { found=1; break; }
+    done
+    [[ "$found" -eq 1 ]] || die "Stack state '$snapshot_id' not found."
+
+    confirm_snapshot_rollback "the whole stack" "$snapshot_id" "$assume_yes"
+
+    print_step "Restoring stack state $snapshot_id (settings, Kea, zones)"
+    resp=$(ui_container_exec "$install_dir" "$env_file" \
+        lancache-ng system snapshot restore "$snapshot_id")
+    json_value '.answer.report[]?' "$resp" | sed 's/^/  /'
+    [[ "$(json_value .answer.ok "$resp")" == "true" ]] \
+        || die "Stack state $snapshot_id restored only in part; run it again: $resp"
+    print_ok "Stack rolled back to saved state $snapshot_id."
+}
 
 # What: rolls a DNS zone back to a chosen snapshot
 # Why: a zone is required; PDNS snapshots are per zone
@@ -8755,7 +8822,7 @@ reset_dns_to_last_known_good_config() {
     env_file=$(require_stack_env_file "$install_dir") || exit $?
     install_missing_tools jq
 
-    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" zone-snapshots)
+    snapshots_body=$(ui_container_exec "$install_dir" "$env_file" lancache-ui zone-snapshots)
 
     if [[ -z "$zone" ]]; then
         zone_list=$(list_dns_zones_with_snapshots "$snapshots_body") \
@@ -8808,7 +8875,7 @@ reset_dns_to_last_known_good_config() {
     confirm_snapshot_rollback "$container's zone $zone_canon" "$snapshot_id" "$assume_yes"
 
     print_step "Applying snapshot $snapshot_id for zone $zone_canon (PowerDNS API restore)"
-    resp=$(dns_rollback_exec "$install_dir" "$env_file" zone-rollback "$zone_canon" "$snapshot_id")
+    resp=$(ui_container_exec "$install_dir" "$env_file" lancache-ui zone-rollback "$zone_canon" "$snapshot_id")
     [[ -n "$(json_value .restored "$resp")" ]] \
         || die "Unrecognized rollback answer: $resp"
 

@@ -63,7 +63,7 @@
         </div>
 
         <form action="{{ routes.dns_add | safe }}" method="post" class="field-row">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field/> }}
           <div class="field" style="margin-bottom:0;">
             <label for="new-domain">{{ t.add_a_domain }}</label>
             <input type="text" id="new-domain" name="domain" placeholder="steamcontent.com" required>
@@ -82,7 +82,7 @@
             <td>{% if domain.display is starting_with(pat=".") %}{{ t.all_subdomains }}{% else %}{{ t.exact_domain_only }}{% endif %}</td>
             <td>
               <form action="{{ routes.dns_remove | safe }}" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field/> }}
                 <input type="hidden" name="domain" value="{{ domain.display }}">
                 <button type="submit" class="btn ghost" data-ask="{{ t.remove_x_q | replace(from="{x}", to=domain.display) }}" onclick="return confirm(this.dataset.ask)">{{ t.remove }}</button>
               </form>
@@ -111,7 +111,7 @@
             <td>
               {% if domain.is_valid %}
               <form action="{{ routes.dns_toggle | safe }}" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field/> }}
                 <input type="hidden" name="domain" value="{{ domain.display }}">
                 <label class="toggle"><input type="checkbox" name="enabled" value="1" {% if domain.enabled %}checked{% endif %} onchange="this.form.requestSubmit()"><span class="track"></span><span class="knob"></span></label>
               </form>
@@ -146,7 +146,7 @@
               {% if not domain.main %}
               <div style="display:flex; gap:14px; flex-wrap:wrap;">
                 <form action="{{ routes.lan_domain_main | safe }}" method="post">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  {{ <csrf_field/> }}
                   <input type="hidden" name="domain" value="{{ domain.name }}">
                   <button type="submit" style="background:none; border:0; cursor:pointer; color:var(--mist); font-size:12.5px;">{{ t.make_main_domain }}</button>
                 </form>
@@ -155,7 +155,7 @@
                    From: Issue #1683 #}
                 {% if domain.records | length == 0 %}
                 <form action="{{ routes.lan_domain_remove | safe }}" method="post">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  {{ <csrf_field/> }}
                   <input type="hidden" name="domain" value="{{ domain.name }}">
                   <button type="submit" data-domain="{{ domain.name }}" onclick="return confirmRemoveDomain(this)" style="background:none; border:0; cursor:pointer; color:var(--danger); font-size:12.5px;">{{ t.remove }}</button>
                 </form>
@@ -170,7 +170,7 @@
         </table>
       </div>
       <form action="{{ routes.lan_domain_add | safe }}" method="post" class="field-row" style="margin-top:12px;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <div class="field" style="margin-bottom:0;">
           <label for="lan-domain-new">{{ t.add_lan_domain }}</label>
           <input type="text" id="lan-domain-new" name="domain" placeholder="lab.lan" pattern="[A-Za-z0-9.-]+" required>
@@ -197,7 +197,7 @@
          Why: type and content not parsed together
          From: Issue #1683 | PR #1976 #}
       <form action="{{ routes.lan_add | safe }}" method="post" class="field-row" style="max-width:none; align-items:flex-end;" data-lan-record-form>
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <input type="hidden" name="zone" value="{{ lan_zone }}" data-lan-zone-field>
         <div class="field" style="margin-bottom:0; max-width:260px;">
           <label for="lan-name">Name</label>
@@ -245,7 +245,7 @@
                  From: Issue #1683 | PR #2019 #}
               {% if record.missing_ptr is defined %}{% for ip in record.missing_ptr %}
               <form action="{{ routes.ptr_add | safe }}" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field/> }}
                 <input type="hidden" name="ip" value="{{ ip }}">
                 <input type="hidden" name="ttl" value="{{ record.ttl }}">
                 <input type="hidden" name="hostname" value="{{ record.name }}">
@@ -253,7 +253,7 @@
               </form>
               {% endfor %}{% endif %}
               <form action="{{ routes.lan_remove | safe }}" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field/> }}
                 <input type="hidden" name="zone" value="{{ domain.name }}">
                 <input type="hidden" name="name" value="{{ record.name }}">
                 <input type="hidden" name="record_type" value="{{ record.type }}">
@@ -310,7 +310,7 @@
          Why: the reverse record name comes from the IP
          From: Issue #1683 | PR #1912 #}
       <form action="{{ routes.ptr_add | safe }}" method="post" class="field-row" style="max-width:none; align-items:flex-end;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <div class="field" style="margin-bottom:0; max-width:260px;">
           <label for="ptr-ip">{{ t.ip_address }}</label>
           <input type="text" id="ptr-ip" name="ip" placeholder="{{ t.ip_example }}" required>
@@ -335,7 +335,7 @@
             <td class="mono">{{ ptr.hostname }}</td>
             <td>
               <form action="{{ routes.ptr_remove | safe }}" method="post">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {{ <csrf_field/> }}
                 {# What: removal drops the PTR set of the IP
                    Why: the PTR rrset is keyed by IP
                    From: Issue #1683 | PR #1912 #}
@@ -369,7 +369,7 @@
           <td class="mono">{{ miss.hostname }}</td>
           <td>
             <form action="{{ routes.ptr_add | safe }}" method="post">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              {{ <csrf_field/> }}
               <input type="hidden" name="ip" value="{{ miss.ip }}">
               <input type="hidden" name="ttl" value="{{ miss.ttl }}">
               <input type="hidden" name="hostname" value="{{ miss.hostname }}">
@@ -390,7 +390,7 @@
       <div class="section-title" style="margin-top:0;">{{ t.network_mode }}</div>
       <p class="section-sub">{{ t.changes_here_save_immediately_and_stay }}</p>
       <form action="{{ routes.aaaa_filter | safe }}" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <div class="toggle-row">
           <div>
             <div class="t-label">{{ t.ipv4_only }}</div>
@@ -406,7 +406,7 @@
          Why: DoMe 31.10.: see DNS queries live
          From: Issue #1683 | PR #1980 #}
       <form action="{{ routes.query_log | safe }}" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <div class="toggle-row">
           <div>
             <div class="t-label">{{ t.dns_query_log }}</div>
@@ -427,7 +427,7 @@
       <div class="section-title">{{ t.upstream_dns }}</div>
       <p class="section-sub">{{ t.upstream_dns_desc }}</p>
       <form action="{{ routes.setup_save | safe }}" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <input type="hidden" name="back" value="{{ pages.domains }}">
         <div class="field"><label for="up-servers">{{ t.upstream_servers }}</label><input id="up-servers" name="DNS_UPSTREAM_SERVERS" placeholder="192.0.2.23 192.0.2.22" value="{{ v.DNS_UPSTREAM_SERVERS }}"></div>
         <div class="field"><label for="up-zones">{{ t.upstream_zones }}</label><input id="up-zones" name="DNS_UPSTREAM_ZONES" placeholder="firma.local" value="{{ v.DNS_UPSTREAM_ZONES }}"></div>
@@ -446,7 +446,7 @@
       <p class="section-sub">{{ t.no_tsig_key_is_set_so }}</p>
       {% endif %}
       <form action="{{ routes.ddns_unsigned | safe }}" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <div class="toggle-row">
           <div>
             <div class="t-label">{{ t.allow_unsigned_updates }}</div>
@@ -459,7 +459,7 @@
         </div>
       </form>
       <form action="{{ routes.tsig_rotate | safe }}" method="post">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ <csrf_field/> }}
         <div class="toggle-row">
           <div>
             <div class="t-label">{{ t.new_tsig_key }}</div>
@@ -472,7 +472,7 @@
       </form>
     </section>
 
-    {# What: zone snapshot table; rows come from main.rs
+    {# What: zone snapshot table; rows come from the ui
        Why: the ui keeps snapshots in DNS_SNAPSHOT_DIR
        From: Issue #1683 | PR #1912 #}
     <section data-dns-panel="zones" class="card flex flex-col gap-4 hidden">
@@ -511,7 +511,7 @@
                        From: Issue #1683 | PR #1912 #}
                     <form method="POST" action="{{ routes.zone_rollback | safe }}" class="inline"
                           data-ask="{{ t.zone_rollback_q | replace(from="{x}", to=group.zone) }}" onsubmit="return confirm(this.dataset.ask)">
-                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      {{ <csrf_field/> }}
                       <input type="hidden" name="zone" value="{{ group.zone }}">
                       <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}">
                       <button type="submit" class="btn btn-sm btn-warn">
@@ -555,7 +555,7 @@
            Why: both off by default; the admin decides
            From: Issue #1683 #}
         <form action="{{ routes.secondary_ns_switch | safe }}" method="post">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field/> }}
           <div class="toggle-row">
             <div>
               <div class="t-label">{{ t.secondary_ns_switch }}</div>
@@ -568,7 +568,7 @@
           </div>
         </form>
         <form action="{{ routes.secondary_ns_auto | safe }}" method="post">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ <csrf_field/> }}
           <div class="toggle-row">
             <div>
               <div class="t-label">{{ t.secondary_ns_auto }}</div>
@@ -612,7 +612,7 @@
       </div>
 
       {# What: install command for a new secondary #}
-      {# Why: main.rs renders the token and primary URL #}
+      {# Why: the ui renders the token and primary URL #}
       <div data-sec-panel="add" class="hidden">
         <div class="section-title" style="margin-top:0;">{{ t.run_this_on_the_secondary_box }}</div>
         <p class="section-sub">{{ t.one_command_installs_it_registers_it }}</p>

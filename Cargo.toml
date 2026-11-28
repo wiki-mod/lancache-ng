@@ -9,11 +9,7 @@
 [workspace]
 resolver = "3"
 members = [
-    "services/ui",
-    "services/cachehamster",
-    "services/watchdog",
-    "services/common",
-    "services/dns",
+    "services/lancache-ng",
 ]
 
 # What: license, edition from SOT release; no version.
@@ -35,6 +31,10 @@ dhcproto = "*"
 flate2 = "*"
 futures-util = "*"
 hex = "*"
+# What: jiff for local time from a TZif file.
+# Why: the host zone file is TZif; std has no zones.
+# From: Issue #871 | PR #2020
+jiff = { version = "*", default-features = false, features = ["std", "alloc"] }
 qrcode = { version = "*", default-features = false, features = ["svg"] }
 rand = "*"
 # What: reqwest without default features, on rustls.
@@ -44,6 +44,14 @@ reqwest = { version = "*", default-features = false, features = ["json", "rustls
 # Why: safe statvfs and SIGTERM; std has neither on stable.
 # From: Issue #1683 | PR #1912
 rustix = { version = "*", default-features = false, features = ["std", "fs", "process"] }
+# What: snmp2 for SNMP v2c GET, no v3 and no async.
+# Why: stats ask snmpd natively; v3 would pull crypto.
+# From: Issue #1683 | PR #2020
+snmp2 = { version = "*", default-features = false }
+# What: lzma-rust2 for xz packing, pure Rust, no lzip.
+# Why: logs pack without the xz program; no unsafe tuning.
+# From: Issue #1683 | PR #2020
+lzma-rust2 = { version = "*", default-features = false, features = ["std", "encoder", "xz"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 sha2 = "*"

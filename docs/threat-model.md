@@ -27,7 +27,7 @@ identifiers G1 to G3 are stable references used by code comments.
 
 | ID | Topic | State in the code | Threat |
 |---|---|---|---|
-| G1 | Admin UI login | The UI reads `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` from the stack `.env` (`STACK_ENV_FILE`, the mounted `deploy/prod/.env`; a key in `deploy/prod/.env.local` wins). `main` in `services/ui/src/main.rs` stops the `ui` process with "Admin-UI authentication is required" when `UI_AUTH_PASSWORD_HASH` is empty and `ALLOW_INSECURE_UI` is not true. The SOT runtime default is `ALLOW_INSECURE_UI=true`. `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. `setup.sh reset-sign-in` empties the password hash in `.env.local` after a lockout. | T3 |
+| G1 | Admin UI login | The UI reads `UI_AUTH_USER` and `UI_AUTH_PASSWORD_HASH` from the stack `.env` (`STACK_ENV_FILE`, the mounted `deploy/prod/.env`; a key in `deploy/prod/.env.local` wins). `ui::run` in `services/lancache-ng/src/lancache-ng.rs` stops the `ui` process with "Admin-UI authentication is required" when `UI_AUTH_PASSWORD_HASH` is empty and `ALLOW_INSECURE_UI` is not true. The SOT runtime default is `ALLOW_INSECURE_UI=true`. `setup.sh` asks "Protect Admin-UI with password? [y/N]" (default No) and, on No, "Allow Admin-UI without authentication?" (default from the SOT value); answering No to both repeats the question. An update appends `ALLOW_INSECURE_UI=true` to an install that has no login, so the open state is an explicit entry in `.env`. `AG-SEC-001` governs this case. `setup.sh reset-sign-in` empties the password hash in `.env.local` after a lockout. | T3 |
 | G2 | Kea Control Agent | `kea_conf::ctrl_agent` writes a basic `authentication` block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and `kea::Api` sends them. The bind address is `KEA_CTRL_ADDRESS=@ANY_BIND_IP@` (`0.0.0.0`) on the host network. `KEA_CTRL_ALLOW_FROM` and `KEA_CTRL_CHAIN` exist only in the SOT; no code applies a firewall fence. | T12 |
 | G3 | nginx upstream resolver | `AG-OP-002` governs the nginx upstream resolver. `render::nginx_files` and the UI save path check every `NGINX_UPSTREAM_RESOLVER` entry with `recursor_conf::upstream_entry` (numeric address only; loopback, unspecified and this host's own addresses are refused as "would loop"). | T1 |
 
@@ -39,17 +39,18 @@ The table names the source of each component.
 
 | Component | Primary source of truth | Threats |
 |---|---|---|
-| DNS spoofing (PowerDNS RPZ) | `services/common/shared.rs` (`recursor_conf::rpz`, `recursor_conf::yaml`, `pdns_conf::auth`), `services/dns/cdn-domains.txt` | T1, T4, T11 |
-| TLS interception + local CA | `services/common/shared.rs` (`cert::make_ca`, `cert::make_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | T7, T8, T10 |
-| Proxy request policy (client CIDR + host allowlists) | `services/common/shared.rs` (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | T2, T9 |
-| Admin UI authentication | `services/ui/src/main.rs` (`login_ok`, `auth`, `Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | T3 |
-| Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/common/shared.rs` (`docker::Api`) | T6 |
-| DHCP: Kea mode | `services/common/shared.rs` (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/README.md` (section 5) | T12 |
-| DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/common/shared.rs` (`dnsmasq_conf`), `docs/README.md` (section 5) | T12, T13 |
-| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/common/shared.rs` (`pdns_conf::auth`), `services/ui/src/main.rs` (`rotate_tsig`, `ensure_tsig`: `TSIG-ALLOW-AXFR`, `slave_tsig_key_ids`) | T5 |
-| Secondary-node registration | `services/ui/src/main.rs` (`register`, `registration_token`, `secondary_action`), `deploy/secondary/docker-compose.yml` | T5, T14 |
+| DNS spoofing (PowerDNS RPZ) | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`recursor_conf::rpz`, `recursor_conf::yaml`, `pdns_conf::auth`), `services/dns/cdn-domains.txt` | T1, T4, T11 |
+| TLS interception + local CA | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`cert::create_ca`, `cert::create_leaf`, `render::issue_certs`, `nginx_conf`), `services/ui/nginx/conf.d/https.conf` | T7, T8, T10 |
+| Proxy request policy (client CIDR + host allowlists) | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`nginx_conf`), `services/ui/nginx/proxy-params.conf`, `services/ui/nginx/conf.d/*.conf` | T2, T9 |
+| Admin UI authentication | `services/lancache-ng/src/lancache-ng.rs` (`ui::login_ok`, `ui::auth`, `ui::Csrf`), `deploy/prod/docker-compose.yml`, `setup.sh` | T3 |
+| Docker access (socket in `services` and `ui`) | `deploy/prod/docker-compose.yml`, `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`docker::Api`) | T6 |
+| DHCP: Kea mode | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`kea_conf`, `kea::Api`), `deploy/prod/docker-compose.yml` (`dhcp`), `docs/README.md` (section 5) | T12 |
+| DHCP: dnsmasq-proxy and dnsmasq-relay modes | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`dnsmasq_conf`), `docs/README.md` (section 5) | T12, T13 |
+| Zone transfer to secondaries (TSIG, NOTIFY, AXFR) | `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) (`pdns_conf::auth`), `services/lancache-ng/src/lancache-ng.rs` (`dns::rotate_tsig`, `shared::peer::ensure_tsig`: `TSIG-ALLOW-AXFR`, `slave_tsig_key_ids`) | T5 |
+| Secondary-node registration | `services/lancache-ng/src/lancache-ng.rs` (`ui::register`, `ui::registration_token`, `ui::secondary_action`), `deploy/secondary/docker-compose.yml` | T5, T14 |
 | Console exclusion-by-omission | `services/dns/cdn-domains.txt`, `docs/README.md` (section 4) | T4, T10 |
-| Zone/record known-good snapshot + rollback | `services/ui/src/main.rs` (`rollback`, `zone_snapshots_cli`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | T4 |
+| Zone/record known-good snapshot + rollback | `services/lancache-ng/src/lancache-ng.rs` (`dns::rollback`, `dns::zone_snapshots`, route `/domains/zone-rollback`), `docs/README.md` (section 6) | T4 |
+| Whole-stack state + rollback | `services/lancache-ng/src/lancache-ng.rs` (`stack::state_save`, `stack::state_restore`, routes `UI_ROUTE_STACK_SNAPSHOTS`, `UI_ROUTE_STACK_SNAPSHOT_SAVE`, `UI_ROUTE_STACK_SNAPSHOT_RESTORE`, CLI `lancache-ng system snapshot`), `setup.sh reset-to-last-known-good-config stack` | T3, T4 |
 
 ---
 
@@ -129,10 +130,10 @@ sources in the inventory table.
   container OpenRC keeps the programs alive; the watchdog in `services`
   restarts a sick container through the Docker API.
 - **Who writes configs** — the `ui` renders every config from the SOT
-  (`.github/yaml/build-manifest.yml`) and the saved settings (`render::all` in
-  `services/common/shared.rs`), writes the changed files into the
+  (`.github/yaml/build-manifest.yml`) and the saved settings (`shared::render::all` in
+  `services/lancache-ng/src/lancache-ng.rs`), writes the changed files into the
   `lancache-config` volume and wakes only the affected owner containers (reload
-  or restart through the Docker API, `apply::plan`). The owner containers mount
+  or restart through the Docker API, `apply::owner_effects`). The owner containers mount
   that volume read-only. The watchdog never writes configs.
 - **DNS spoofing** — PowerDNS (authoritative + recursor) in the `dns`
   container. The `ui` builds an **RPZ zone** from `cdn-domains.txt`
@@ -159,7 +160,7 @@ sources in the inventory table.
   to the real CDN (no CA needed); **HTTPS mode** terminates TLS using a per-domain
   wildcard cert signed by the local CA, caches, then re-fetches from the origin
   over verified TLS.
-- **Local CA (HTTPS mode)** — created by the `ui` (`cert::make_ca`;
+- **Local CA (HTTPS mode)** — created by the `ui` (`cert::create_ca`;
   `CA_KEY_TYPE=rsa:4096`, `CA_DAYS=3650`, key file mode `0600`) in the CA state
   directory (`CA_DIR`). `ca.key` is the crown jewel and stays outside the
   checkout; `ca.crt` is a public certificate distributed to clients.
@@ -237,7 +238,7 @@ proxy into caching attacker-controlled content under a legitimate key.
   (`AG-KD-004`) and `$cdn_host_allowed` defaults to allow. In `strict` mode it
   defaults to deny and allows the hosts derived from `cdn-domains.txt` (rooted
   via the vendored Public Suffix List; see `Psl` and `nginx_conf::hosts` in
-  `services/common/shared.rs`); other hosts get HTTP 403 in the `http{}` and
+  `services/lancache-ng/src/lancache-ng.rs` (`mod shared`)); other hosts get HTTP 403 in the `http{}` and
   `https{}` `location /` blocks, and the stream-level SNI listeners route an
   unlisted SNI to a closed backend.
 - `PROXY_ALLOWED_CLIENT_CIDRS` restricts which client networks the proxy will
@@ -269,11 +270,11 @@ untrusted network · **Impact**: Critical
 unauthenticated case. The setup flow generates `UI_AUTH_PASSWORD` and delivers
 only its Argon2id hash.
 
-**State in the code** (`services/ui/src/main.rs`):
+**State in the code** (`services/lancache-ng/src/lancache-ng.rs`, `mod ui`):
 - **Password set:** the UI reads `UI_AUTH_USER` and
   `UI_AUTH_PASSWORD_HASH` from the stack `.env` (G1). `login_ok` then requires HTTP Basic credentials, checked with
   Argon2id and a constant-time user compare (`secret::equal`).
-- **No password:** `main` stops the `ui` process when `UI_AUTH_PASSWORD_HASH`
+- **No password:** `ui::run` stops the `ui` process when `UI_AUTH_PASSWORD_HASH`
   is empty and `ALLOW_INSECURE_UI` is not true. With `ALLOW_INSECURE_UI=true`,
   `login_ok` accepts every request. Unauthenticated access is an explicit choice
   with a default of open (`ALLOW_INSECURE_UI=true` in the SOT runtime defaults):
@@ -298,6 +299,14 @@ only its Argon2id hash.
   and the Docker socket, so the mount adds no new privilege. The UI refuses
   values Compose would read differently (`$`, quotes, a backquote, a
   backslash, `#`, line breaks).
+- Settings with the schema effect `fixed` (program lines such as
+  `RELOAD_EXEC`, paths, URLs, service names) cannot be stored through the
+  settings form, REST or CLI, and a value for them in the stack `.env` is
+  ignored (`Effect::writable` in `mod config`). A `fixed` default that names a
+  storable `@KEY@` is a load error, so no stored value reaches a program line.
+- Address and network settings (schema kinds `ip`, `net`, `nets`, `addrs`,
+  `hosts`) are parsed by the address readers of `shared::dns` and stored in
+  one form; anything else is refused.
 - The registration route for secondaries has its own token (T14).
 
 **Residual risk**: Depends on the operator's explicit choice. With a password
@@ -327,9 +336,15 @@ appliance spoofs.
   arbitrary clients.
 - **Zone/record rollback**: known-good snapshots are listed and restored by the
   `ui` (`rollback`; route `/domains/zone-rollback` behind the UI
-  authentication and CSRF check, and the CLI `lancache-ui zone-snapshots` /
+  authentication and CSRF check, and the CLI `lancache-ng ui zone-snapshots` /
   `zone-rollback`). Rollback is always operator-selected, never automatic on
   startup. It is therefore only as protected as the Admin UI itself (T3).
+- **Whole-stack rollback**: a saved stack state holds the storable settings,
+  the Kea config and the own zones (`stack::state_save`); a restore takes a
+  backup first and runs under the change lock (`stack::state_restore`,
+  REST `UI_ROUTE_STACK_SNAPSHOT_RESTORE`, CLI `lancache-ng system snapshot
+  restore`, `setup.sh reset-to-last-known-good-config stack`). It is behind
+  the same Admin UI authentication and CSRF check (T3).
 - The PowerDNS API key is a shared secret resolved by `secret::resolve`: the
   operator's value wins; an empty or template-like value
   (`secret::is_placeholder`) is replaced by a generated value stored in the
@@ -381,7 +396,7 @@ creates privileged containers or `exec`s into others, escaping to the host.
 sensitive) · **Impact**: Critical (full host compromise)
 
 **Actual exposure** (verified in `deploy/prod/docker-compose.yml` and
-`services/common/shared.rs`):
+`services/lancache-ng/src/lancache-ng.rs` (`mod shared`)):
 - **Two containers mount the Docker socket read-write, with no socket proxy:
   `services` and `ui` (`${SOT_DOCKER_SOCKET}` in `deploy/prod/docker-compose.yml`).** The `ui`
   mounts it "for apply and the overview": it wakes owner containers after it
@@ -391,6 +406,9 @@ sensitive) · **Impact**: Critical (full host compromise)
   read stats, `exec` in a container, and start, stop, restart or HUP a
   container. The mounted socket itself grants the full Docker API, so a
   compromise of either container is a host compromise.
+- The renderer of the `ui` writes only below `CONFIG_DIR` and
+  `KEA_DATA_DIR` (`render::confine`); a target outside them is an error and
+  nothing is written.
 - Reaching the `ui` through the network therefore reaches Docker; this makes
   the Admin UI authentication (T3) part of this threat; with the unauthenticated
   default, reaching the UI is enough.
@@ -515,7 +533,7 @@ networking publishes that API on every host interface unless something fences it
 **Likelihood**: Medium (only when Kea mode is enabled) · **Impact**: High
 (reprogramming DHCP-issued DNS redirects the whole LAN)
 
-**State in the code** (`services/common/shared.rs`):
+**State in the code** (`services/lancache-ng/src/lancache-ng.rs` (`mod shared`)):
 - **Authentication:** `kea_conf::ctrl_agent` writes a basic `authentication`
   block (user `KEA_CTRL_USER`, password `KEA_CTRL_TOKEN`) and the UI's client
   (`kea::Api`) sends them with `basic_auth` (G2). `KEA_CTRL_TOKEN` is a
@@ -546,7 +564,7 @@ proxy-DHCP DNS options are not reliably honoured by ordinary clients.
 
 **Likelihood**: Medium · **Impact**: Low–Medium (cache bypass, not compromise)
 
-**Mitigations** (verified in `services/common/shared.rs` `dnsmasq_conf` and
+**Mitigations** (verified in `services/lancache-ng/src/lancache-ng.rs` (`mod shared`) `dnsmasq_conf` and
 `docs/README.md`, section 5):
 - A render with a bad value fails instead of producing a config
   (`dnsmasq_conf::render` returns an error; `render::all` returns the errors

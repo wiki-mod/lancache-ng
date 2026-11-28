@@ -59,7 +59,7 @@ Valid for `current_dev` at `e223782d`. Section 9 lists what is not verified.
   | `setup.sh restore <archive> [install-dir]` | restore a backup archive |
   | `setup.sh compose <install-dir> <compose arguments>` | runs Docker Compose with the stack's file list (used by units, recovery hints and this guide) |
   | `setup.sh configure-upstream-dns` | set the upstream DNS servers |
-  | `setup.sh reset-to-last-known-good-config <service> ...` | roll back a Kea configuration or a DNS zone (section 6) |
+  | `setup.sh reset-to-last-known-good-config <service> ...` | roll back the whole stack, a Kea configuration or a DNS zone (section 6) |
 
   `setup.sh --help` prints the usage with every command.
 
@@ -312,7 +312,7 @@ The Admin UI shows the live proxy values and hides the Kea-only subnet,
 reservation and lease editors while this mode is active.
 
 Settings of the `dnsmasq-proxy` render (`dnsmasq_conf`,
-`services/common/shared.rs`):
+`services/lancache-ng/src/lancache-ng.rs` (`mod shared`)):
 
 | Setting | Rendered as | Note |
 | --- | --- | --- |
@@ -400,11 +400,13 @@ that is the limit described in 5.3.
 
 A snapshot is a stored copy of a configuration that was applied successfully.
 Snapshots are separate from the install backup (section 7): they keep a few
-recent configurations of one subject, not the whole install.
+recent configurations, not the whole install. A stack state (section 6.4)
+holds the storable settings, the Kea configuration and the own zones
+together; a Kea or zone snapshot holds one subject.
 
 ### 6.1 Snapshot store
 
-One store (`snapshot::Store`, `services/common/shared.rs`) owns the format:
+One store (`snapshot::Store`, `services/lancache-ng/src/lancache-ng.rs` (`mod shared`)) owns the format:
 
 - A snapshot id is a digit string, the nanoseconds since the Unix epoch; a
   longer or larger id is newer. A snapshot is one file named by the id, or a
@@ -420,6 +422,7 @@ The Admin UI is the only user of the store:
 | --- | --- | --- | --- |
 | Kea DHCP configuration | `KEA_CONFIG_SNAPSHOT_DIR` (`KEA_CONFIG_SNAPSHOT_FILE`) | `KEA_SNAPSHOT_KEEP` (SOT 20) | Admin UI DHCP page (`POST /dhcp/kea-rollback`); `setup.sh reset-to-last-known-good-config kea` |
 | Records of every LAN domain zone (`DHCP_DOMAIN`, `DNS_EXTRA_LAN_DOMAINS`) and the private reverse zones | `DNS_SNAPSHOT_DIR/<zone>` | `DNS_SNAPSHOT_KEEP` (SOT 20) | Admin UI domains page (`POST /domains/zone-rollback`); `setup.sh reset-to-last-known-good-config dns` |
+| Whole stack: storable settings, Kea configuration, own zones | `STACK_SNAPSHOT_DIR` (`STACK_SNAPSHOT_FILE`) | `STACK_SNAPSHOT_KEEP` (SOT 50) | REST `POST /api/stack/snapshots/restore`; CLI `lancache-ng system snapshot restore <id>`; `setup.sh reset-to-last-known-good-config stack` |
 
 Other zones, such as the RPZ, are not snapshotted. TSIG keys and zone metadata
 are not part of a zone snapshot.
@@ -444,12 +447,25 @@ the serial and sends NOTIFY; the secondaries pull the zone by AXFR. A zone
 rollback is never automatic: an older zone can undo leases and host names
 created since.
 
-### 6.4 Command line
+### 6.4 Stack states
+
+After every successful change the Admin UI keeps the new stack state
+(`stack::state_after`). `lancache-ng system snapshot list|save|restore <id>`
+and the REST routes `GET /api/stack/snapshots`, `POST
+/api/stack/snapshots/save` and `POST /api/stack/snapshots/restore` list,
+keep and give back one state. A restore first keeps the current state as a
+backup, runs under the change lock and reports each part (settings, Kea,
+every zone); a part that fails stops no other part, and a second run
+finishes it. A state leaves out the cache, leases, secrets, container keys,
+`.env.local` overrides, jobs and sessions.
+
+### 6.5 Command line
 
 `setup.sh reset-to-last-known-good-config` is the fallback when the Admin UI is
 not reachable:
 
 ```bash
+./setup.sh reset-to-last-known-good-config stack [install-dir] [snapshot-id] [--yes]
 ./setup.sh reset-to-last-known-good-config kea [install-dir] [snapshot-id] [--yes]
 ./setup.sh reset-to-last-known-good-config dns [install-dir] <zone> [snapshot-id] [--yes]
 ```
@@ -457,14 +473,17 @@ not reachable:
 - `dhcp` is an alias of `kea`, `pdns` of `dns`.
 - Without a snapshot id the newest is offered after a confirmation; `--yes`
   skips the prompt.
+- `stack` lists the stack states and restores one through `lancache-ng
+  system snapshot` in the `ui` container. It needs the ui process; the
+  Admin UI page may be unreachable.
 - `kea` lists the snapshots in `KEA_CONFIG_SNAPSHOT_DIR` on the host and
   applies the chosen one through the Kea control agent (`config-test`,
   `config-set`, `config-write`).
-- `dns` runs the rollback through `lancache-ui` in the `ui` container.
+- `dns` runs the rollback through `lancache-ng ui` in the `ui` container.
   PowerDNS keeps snapshots per zone, so `<zone>` is required; without it the
   command lists the zones that have snapshots.
 
-### 6.5 Settings without a consumer
+### 6.6 Settings without a consumer
 
 The SOT defines the snapshot directory `DNS_CONFIG_SNAPSHOT_DIR` in the volume
 `dns-config-snapshots`. No code in `services/` reads it: no automatic fall-back
@@ -684,7 +703,8 @@ tail -5 "${SYSLOG_NG_LOG_DIR}/LanCache-NG-proxy/$(date +%Y%m%d).log"
 
 nginx logs to stdout; Docker's `syslog` driver hands the log to syslog-ng in
 `services`, which stores it under `SYSLOG_NG_LOG_DIR` in the directory named
-after the proxy container. This needs `LOGGING_PROXY_ENABLED` on. If the
+after the proxy container. This needs the proxy logging switch on (Admin UI
+logs page; the container is not in `SYSLOG_MUTED`). If the
 logged address is the real client address already, disabling the userland
 proxy changes no behavior. If the address differs, record that as a separate
 finding.
@@ -763,8 +783,9 @@ done
 
 ### 8.5 Connection tracking
 
-The fill level of the connection-tracking table is not monitored: the stack
-has no alarm for it.
+The watchdog warns when the host connection-tracking table reaches
+`WATCHDOG_CONNTRACK_WARN_PCT` (SOT 80) of `nf_conntrack_max`; a host without
+the table gets no check. To read the values by hand:
 
 ```bash
 cat /proc/sys/net/netfilter/nf_conntrack_count
