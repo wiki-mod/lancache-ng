@@ -1048,7 +1048,7 @@ mod cachehamster {
             .timeout(http::timeout(&c.s)?)
             .send()
             .await
-            .map_err(|e| format!("{url}: {e}"))?;
+            .map_err(|e| format!("{url}: {}", http::error_chain(&e)))?;
         let head = |k: &str| {
             resp.headers()
                 .get(k)
@@ -10217,7 +10217,7 @@ mod shared {
                     if e.is_timeout() {
                         Error::Timeout
                     } else {
-                        Error::Transport(e.to_string())
+                        Error::Transport(crate::shared::http::error_chain(&e))
                     }
                 };
                 let mut req = self
@@ -13187,7 +13187,7 @@ end
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| format!("{url}: {e}"))?;
+                .map_err(|e| format!("{url}: {}", crate::shared::http::error_chain(&e)))?;
             let resp = resp.error_for_status().map_err(|e| format!("{url}: {e}"))?;
             let max = crate::shared::http::max_body(s)?;
             let body = crate::shared::http::read_text(resp, max, &url).await?;
