@@ -16551,7 +16551,7 @@ end
             };
             if dst.exists() {
                 // What: append the stream to the .xz.
-                // Why: xz will not overwrite a file.
+                // Why: xz reads joined streams as one file.
                 // From: Issue #1683 | PR #1985
                 let part = super::fs::with_suffix(dst, ".part");
                 let joined = super::fs::write_with(&part, mode, Place::Replace, owner, encode)
