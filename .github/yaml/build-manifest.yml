@@ -1997,7 +1997,7 @@ runtime:
     - DNS_RECORD_TTL_MAX=uint;1;604800;live;ui
     - DNS_TXT_MAX_BYTES=uint;1;255;live;ui
     - DNS_REPLICATION_ROLE=choice;primary,secondary;;recreate;dns
-    - DNS_SECONDARIES=list?;;;restart;dns
+    - DNS_SECONDARIES=peers?;;;restart;dns
     - DNS_FOLLOW_SECONDS=uint;2;3600;restart;dns
     - DNS_SECONDARY_CHECK_SECONDS=uint;60;604800;live;ui
     - DNS_SECONDARY_NS=list?;;;live;ui

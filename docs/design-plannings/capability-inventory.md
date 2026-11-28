@@ -175,8 +175,8 @@ Provided by `mod ui` in `services/lancache-ng/src/lancache-ng.rs` and `services/
   (`STACK_ENV_FILE`) through `config::save_edits`, one change at a time
   (`stack::commit_with`); precedence per key is that file, the container
   environment, the SOT default (`config::Settings::load`). The schema reads
-  each value by its kind (`ip`, `net`, `nets`, `addrs`, `hosts` read and
-  normalize addresses); keys of effect `container` (host paths) and `fixed`
+  each value by its kind (`ip`, `net`, `nets`, `addrs`, `hosts`, `peers`
+  read and normalize addresses); keys of effect `container` (host paths) and `fixed`
   (commands, internal paths, URLs, service names) are never stored by the ui
   and a value for them in the `.env` is ignored.
 - **Stack state.** `stack::state_save` keeps the whole changeable state

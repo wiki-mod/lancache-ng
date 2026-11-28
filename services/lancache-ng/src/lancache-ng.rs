@@ -2738,6 +2738,7 @@ mod config {
         Nets,
         Hosts,
         Addrs,
+        Peers,
     }
 
     // What: methods of the setting kind Kind.
@@ -2809,6 +2810,11 @@ mod config {
         // From: Issue #1683 | PR #2020
         const ADDRS: &str = "addrs";
 
+        // What: schema word of kind peers: name@ip rows.
+        // Why: the schema row and the schema output agree.
+        // From: Issue #1683 | PR #2020
+        const PEERS: &str = "peers";
+
         // What: the schema word of a kind; uint is one.
         // Why: describe prints the word parse reads.
         // From: Issue #1683 | PR #2020
@@ -2826,6 +2832,7 @@ mod config {
                 Kind::Nets => Self::NETS,
                 Kind::Hosts => Self::HOSTS,
                 Kind::Addrs => Self::ADDRS,
+                Kind::Peers => Self::PEERS,
             }
         }
     }
@@ -3169,6 +3176,7 @@ mod config {
                 Kind::NETS => Kind::Nets,
                 Kind::HOSTS => Kind::Hosts,
                 Kind::ADDRS => Kind::Addrs,
+                Kind::PEERS => Kind::Peers,
                 other => return Err(format!("{key}: unknown kind {other:?}")),
             };
             Ok(Self {
@@ -3234,6 +3242,21 @@ mod config {
                     let items: Vec<String> = list_items(raw)
                         .map(|item| {
                             crate::shared::dns::canonical_endpoint(item, names)
+                                .map_err(|e| format!("{key}: {e}"))
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let note = read_note(key, raw, &items.join(" "));
+                    Ok((Value::List(items), note))
+                }
+                // What: peers: each row read by peer_row.
+                // Why: every way in stores only valid rows.
+                // From: Issue #1683 | PR #2020
+                Kind::Peers => {
+                    use crate::shared::pdns_conf::peer_row;
+                    let items: Vec<String> = list_items(raw)
+                        .map(|row| {
+                            peer_row(row)
+                                .map(|(name, ip)| format!("{name}@{ip}"))
                                 .map_err(|e| format!("{key}: {e}"))
                         })
                         .collect::<Result<_, _>>()?;
@@ -5911,8 +5934,7 @@ mod dns {
     // From: Issue #1683 | PR #2017
     pub(crate) fn valid_peer_name(s: &Settings, name: &str) -> Result<bool, String> {
         let max = s.num::<usize>("DNS_SECONDARY_NAME_MAX")?;
-        let label = !name.contains('.') && crate::shared::dns::is_dns_name(name, false, false);
-        Ok(name.len() <= max && label)
+        Ok(name.len() <= max && crate::shared::pdns_conf::peer_label(name))
     }
 
     // What: everything a new secondary needs.
@@ -11610,13 +11632,29 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         pub fn secondaries(s: &Settings) -> Result<Vec<(String, String)>, String> {
             s.list("DNS_SECONDARIES")?
                 .iter()
-                .map(|row| {
-                    let (name, addr) = row
-                        .split_once('@')
-                        .ok_or_else(|| format!("DNS_SECONDARIES: {row:?} is no name@address"))?;
-                    Ok((name.to_string(), addr.to_string()))
-                })
+                .map(|row| peer_row(row).map_err(|e| format!("DNS_SECONDARIES: {e}")))
                 .collect()
+        }
+
+        // What: one secondary row name@ip, read.
+        // Why: schema, list and forms read one rule.
+        // From: Issue #1683 | PR #2020
+        pub fn peer_row(row: &str) -> Result<(String, String), String> {
+            let (name, addr) = row
+                .split_once('@')
+                .ok_or_else(|| format!("{row:?} is no name@address"))?;
+            if !peer_label(name) {
+                return Err(format!("{row:?}: {name:?} is no single DNS label"));
+            }
+            let ip = crate::shared::dns::canonical_ip(addr).map_err(|e| format!("{row:?}: {e}"))?;
+            Ok((name.to_string(), ip))
+        }
+
+        // What: a secondary name is one DNS label.
+        // Why: it becomes a label and a file name.
+        // From: Issue #1683 | PR #2020
+        pub fn peer_label(name: &str) -> bool {
+            !name.contains('.') && crate::shared::dns::is_dns_name(name, false, false)
         }
 
         // What: the SOT text of a list of secondaries.
@@ -11631,13 +11669,7 @@ log {{ source(s_docker); filter(f_named); destination({STORE}); }};
         // Why: NOTIFY goes to every registered secondary.
         // From: Issue #1683 | PR #1980
         pub fn secondary_ips(s: &Settings) -> Result<Vec<String>, String> {
-            secondaries(s)?
-                .into_iter()
-                .map(|(name, ip)| match crate::shared::dns::is_ip(&ip) {
-                    true => Ok(ip),
-                    false => Err(format!("DNS_SECONDARIES: {name}@{ip} has no IP address")),
-                })
-                .collect()
+            Ok(secondaries(s)?.into_iter().map(|(_, ip)| ip).collect())
         }
 
         // What: address and port of the own pdns.
