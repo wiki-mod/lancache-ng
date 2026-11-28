@@ -4095,10 +4095,10 @@ mod dhcp {
     // Why: host from env; basic auth with the stack token.
     // From: Issue #1683 | PR #1980
     pub(crate) fn kea_api(s: &Settings) -> Result<kea::Api, String> {
+        let host = s.text("DHCP_API_HOST")?;
         let url = format!(
-            "http://{}:{}/",
-            s.text("DHCP_API_HOST")?,
-            s.uint("KEA_CTRL_PORT")?
+            "http://{}/",
+            crate::shared::dns::host_port(&host, s.uint("KEA_CTRL_PORT")?)
         );
         let token = secret::get(s, "KEA_CTRL_TOKEN")?;
         Ok(kea::Api::new(
@@ -18363,7 +18363,8 @@ mod ui {
         // From: Issue #1683 | PR #1980
         let mut url = s.text_or_empty("UI_PUBLIC_URL");
         if url.is_empty() {
-            url = format!("http://{}:{}", s.text("IP_HTTP")?, s.uint("UI_PORT")?);
+            let at = crate::shared::dns::host_port(&s.text("IP_HTTP")?, s.uint("UI_PORT")?);
+            url = format!("http://{at}");
         }
         ctx.insert("primary_url", &url);
         ctx.insert("lan_record_types", &s.list("DNS_LAN_RECORD_TYPES")?);
@@ -20423,12 +20424,8 @@ mod ui {
     // Why: the container health check runs this.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn healthcheck(s: &Settings) -> Result<(), String> {
-        let url = format!(
-            "http://{}:{}{}",
-            s.text("LOOPBACK_BIND_IP")?,
-            s.uint("UI_PORT")?,
-            s.text("UI_ROUTE_HEALTH")?
-        );
+        let at = crate::shared::dns::host_port(&s.text("LOOPBACK_BIND_IP")?, s.uint("UI_PORT")?);
+        let url = format!("http://{at}{}", s.text("UI_ROUTE_HEALTH")?);
         let limit = http::timeout(s)?;
         http::probe(&url, None, limit).await
     }
