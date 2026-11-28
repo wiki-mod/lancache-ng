@@ -695,7 +695,7 @@ mod cachehamster {
         let tick = c.s.uint("CACHEHAMSTER_POLL_INTERVAL")?;
         let rounds = c.s.uint("CACHEHAMSTER_ALIVE_ROUNDS")?;
         let what = "CACHEHAMSTER_POLL_INTERVAL times CACHEHAMSTER_ALIVE_ROUNDS";
-        let limit = crate::shared::clock::window(tick, rounds, what)?;
+        let limit = crate::shared::clock::quiet_secs(tick, rounds, what)?;
         Ok(std::fs::metadata(c.path(JOBS_FILE))
             .and_then(|m| m.modified())
             .ok()
@@ -7212,7 +7212,7 @@ mod shared {
         // What: seconds a heartbeat may stay quiet.
         // Why: daemon and watchdog count rounds alike.
         // From: Issue #1683 | PR #2020
-        pub fn window(interval: u64, rounds: u64, what: &str) -> Result<u64, String> {
+        pub fn quiet_secs(interval: u64, rounds: u64, what: &str) -> Result<u64, String> {
             interval
                 .checked_mul(rounds)
                 .ok_or_else(|| format!("{what} is too big"))
@@ -21709,7 +21709,7 @@ mod watchdog {
         let s = Settings::from_process()?;
         let (interval, after) = (s.uint("CHECK_INTERVAL")?, s.uint("RESTART_AFTER")?);
         let what = "CHECK_INTERVAL times RESTART_AFTER";
-        let limit = clock::window(interval, after.max(1), what)?;
+        let limit = clock::quiet_secs(interval, after.max(1), what)?;
         let v = report(&s)?
             .ok_or_else(|| format!("{}: missing", s.text_or_empty("WATCHDOG_ALARM_FILE")))?;
         let written = v["written"].as_u64().ok_or("written missing")?;
