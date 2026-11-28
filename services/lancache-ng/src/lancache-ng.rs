@@ -19384,23 +19384,23 @@ mod ui {
     // Why: the watchdog runs it; errors in page words.
     // From: Issue #1683 | PR #2020
     async fn to_watchdog(s: &Settings, route: &str, body: crate::shared::http::Body) -> Page {
-        let (code, v) = ask_watchdog(s, route, body).await?;
+        let (code, v) = ask(s, crate::shared::http::Peer::Watchdog, route, body).await?;
         Ok(match v {
             Some(v) => (code, axum::Json(v)).into_response(),
             None => code.into_response(),
         })
     }
 
-    // What: status and JSON of one watchdog call.
+    // What: status and JSON of one services call.
     // Why: an error comes back in the page language.
     // From: Issue #1683 | PR #2020
-    async fn ask_watchdog(
+    async fn ask(
         s: &Settings,
+        peer: crate::shared::http::Peer,
         route: &str,
         body: crate::shared::http::Body,
     ) -> Result<(StatusCode, Option<Value>), Fail> {
-        use crate::shared::http::{Peer, send};
-        let (status, text) = send(s, Peer::Watchdog, route, body)
+        let (status, text) = crate::shared::http::send(s, peer, route, body)
             .await
             .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -19439,20 +19439,16 @@ mod ui {
         op: &str,
         fields: Vec<(String, String)>,
     ) -> Result<Value, Fail> {
-        use crate::shared::http::{Body, Peer, send};
+        use crate::shared::http::{Body, Peer};
         let route = crate::shared::fill(s.text("UI_ROUTE_HAMSTER_API")?, &[("op", op.to_string())]);
-        let (status, text) = send(s, Peer::Cachehamster, &route, Body::Form(fields))
+        // What: service text behind a translated lead.
+        // Why: Steam details stay as the service wrote.
+        // From: Issue #871 | PR #1980
+        let lead = |Fail(code, e): Fail| Fail(code, format!("{} {e}", tr("hamster_says")));
+        let (_, v) = ask(s, Peer::Cachehamster, &route, Body::Form(fields))
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
-        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let v: Value = serde_json::from_str(&text).unwrap_or_default();
-        if let Some(e) = v.get("error").and_then(Value::as_str) {
-            // What: service text behind a translated lead.
-            // Why: Steam details stay as the service wrote.
-            // From: Issue #871 | PR #1980
-            return Err(Fail(code, format!("{} {e}", tr("hamster_says"))));
-        }
-        Ok(v)
+            .map_err(lead)?;
+        Ok(v.unwrap_or_default())
     }
 
     // What: GET UI_ROUTE_WATCHDOG_CHECK via watchdog.
@@ -19489,7 +19485,8 @@ mod ui {
         if field(&query, "dry_run") == "1" {
             route.push_str("?dry_run=1");
         }
-        let (code, v) = ask_watchdog(&s, &route, crate::shared::http::Body::Form(vec![])).await?;
+        let body = crate::shared::http::Body::Form(vec![]);
+        let (code, v) = ask(&s, crate::shared::http::Peer::Watchdog, &route, body).await?;
         let v = v.unwrap_or_default();
         lower_cache_sum(&app, &v);
         Ok((code, axum::Json(v)).into_response())
