@@ -665,7 +665,7 @@ mod cachehamster {
     // From: Issue #871 | PR #1980
     fn parse_add(args: &[String]) -> Result<Order, String> {
         let [name, when, what] = args else {
-            return Err("usage: add <name> <now|later|at:UNIX> <app:ID|URL,URL>".into());
+            return Err(crate::shared::cli::usage(&COMMANDS, |c| c.op == Op::Add));
         };
         let when = When::from_word(when)?;
         let target = match what.strip_prefix("app:") {
@@ -1032,7 +1032,11 @@ mod cachehamster {
     async fn fetch_check(c: &Ctx, args: &[String]) -> Result<Value, String> {
         let raw = match args {
             [u] => u,
-            _ => return Err("usage: fetch-check <url>".into()),
+            _ => {
+                return Err(crate::shared::cli::usage(&COMMANDS, |c| {
+                    c.op == Op::FetchCheck
+                }));
+            }
         };
         let dl = Dl::load(&c.s, 1)?;
         let url = dl.url(raw)?;
@@ -2422,132 +2426,186 @@ mod cachehamster {
     // What: every command cachehamster takes.
     // Why: help, errors, choice and REST read this table.
     // From: Issue #871 | PR #2020
-    const COMMANDS: [(&str, Cmd); 18] = [
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Cmd>); 18] = [
         (
             "daemon",
-            Cmd {
-                op: Op::Daemon,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Daemon,
+                    rest: Rest::No,
+                },
+                "daemon",
+            ),
         ),
         (
             "status",
-            Cmd {
-                op: Op::Status,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Status,
+                    rest: Rest::Plain,
+                },
+                "status",
+            ),
         ),
         (
             "healthcheck",
-            Cmd {
-                op: Op::Healthcheck,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Healthcheck,
+                    rest: Rest::No,
+                },
+                "healthcheck",
+            ),
         ),
         (
             "login-begin",
-            Cmd {
-                op: Op::LoginBegin,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::LoginBegin,
+                    rest: Rest::Plain,
+                },
+                "login-begin",
+            ),
         ),
         (
             "login-poll",
-            Cmd {
-                op: Op::LoginPoll,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::LoginPoll,
+                    rest: Rest::Plain,
+                },
+                "login-poll",
+            ),
         ),
         (
             "login-cancel",
-            Cmd {
-                op: Op::LoginCancel,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::LoginCancel,
+                    rest: Rest::Plain,
+                },
+                "login-cancel",
+            ),
         ),
         (
             "logout",
-            Cmd {
-                op: Op::Logout,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Logout,
+                    rest: Rest::No,
+                },
+                "logout",
+            ),
         ),
         (
             "library",
-            Cmd {
-                op: Op::Library,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Library,
+                    rest: Rest::Plain,
+                },
+                "library",
+            ),
         ),
         (
             "cached",
-            Cmd {
-                op: Op::Cached,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Cached,
+                    rest: Rest::Plain,
+                },
+                "cached",
+            ),
         ),
         (
             "wipe",
-            Cmd {
-                op: Op::Wipe,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Wipe,
+                    rest: Rest::Plain,
+                },
+                "wipe",
+            ),
         ),
         (
             "fetch-check",
-            Cmd {
-                op: Op::FetchCheck,
-                rest: Rest::Url,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::FetchCheck,
+                    rest: Rest::Url,
+                },
+                "fetch-check <url>",
+            ),
         ),
         (
             "steam-check",
-            Cmd {
-                op: Op::SteamCheck,
-                rest: Rest::Plain,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::SteamCheck,
+                    rest: Rest::Plain,
+                },
+                "steam-check",
+            ),
         ),
         (
             "lookup",
-            Cmd {
-                op: Op::Lookup,
-                rest: Rest::AppId,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Lookup,
+                    rest: Rest::AppId,
+                },
+                "lookup <app-id>",
+            ),
         ),
         (
             "evict",
-            Cmd {
-                op: Op::Evict,
-                rest: Rest::AppId,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Evict,
+                    rest: Rest::AppId,
+                },
+                "evict <app-id>",
+            ),
         ),
         (
             "add",
-            Cmd {
-                op: Op::Add,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Add,
+                    rest: Rest::No,
+                },
+                "add <name> <now|later|at:UNIX> <app:ID|URL,URL>",
+            ),
         ),
         (
             "start",
-            Cmd {
-                op: Op::Start,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Start,
+                    rest: Rest::No,
+                },
+                "start <id>",
+            ),
         ),
         (
             "cancel",
-            Cmd {
-                op: Op::Cancel,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Cancel,
+                    rest: Rest::No,
+                },
+                "cancel <id>",
+            ),
         ),
         (
             "remove",
-            Cmd {
-                op: Op::Remove,
-                rest: Rest::No,
-            },
+            crate::shared::cli::row(
+                Cmd {
+                    op: Op::Remove,
+                    rest: Rest::No,
+                },
+                "remove <id>",
+            ),
         ),
     ];
 
@@ -2555,7 +2613,7 @@ mod cachehamster {
     // Why: the ui builds the arguments from the kind.
     // From: Issue #871 | PR #2020
     pub(crate) fn rest_of(word: &str) -> Rest {
-        crate::shared::cli::pick(&COMMANDS, word).map_or(Rest::No, |c| c.rest)
+        crate::shared::cli::pick(&COMMANDS, word).map_or(Rest::No, |c| c.op.rest)
     }
 
     // What: run one command and answer as JSON.
@@ -2566,8 +2624,8 @@ mod cachehamster {
         let op = match args.first().map(String::as_str) {
             None => Op::Daemon,
             Some(word) => cli::pick(&COMMANDS, word)
-                .map(|cmd| cmd.op)
-                .ok_or_else(|| cli::commands(&COMMANDS))?,
+                .map(|row| row.op.op)
+                .ok_or_else(|| cli::help(&COMMANDS))?,
         };
         // What: the HTTP client, built when one is needed.
         // Why: the daemon and local commands need none.
@@ -2618,7 +2676,7 @@ mod cachehamster {
         // Why: no settings are needed to name them.
         // From: Issue #1683 | PR #2020
         if args.first().is_some_and(|a| a == "help") {
-            println!("{}", crate::shared::cli::commands(&COMMANDS));
+            println!("{}", crate::shared::cli::help(&COMMANDS));
             return std::process::ExitCode::SUCCESS;
         }
         let result = match Ctx::load() {
@@ -3946,19 +4004,16 @@ mod config {
     // Why: help, errors and the choice read this table.
     // From: Issue #1683 | PR #2020
     const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
-        (
-            "show",
-            crate::shared::cli::row(Op::Show, "config show [KEY]"),
-        ),
+        ("show", crate::shared::cli::row(Op::Show, "show [KEY]")),
         (
             "schema",
-            crate::shared::cli::row(Op::Schema, "config schema [KEY]"),
+            crate::shared::cli::row(Op::Schema, "schema [KEY]"),
         ),
+        ("set", crate::shared::cli::row(Op::Set, "set KEY=VALUE ...")),
         (
-            "set",
-            crate::shared::cli::row(Op::Set, "config set|validate KEY=VALUE ..."),
+            "validate",
+            crate::shared::cli::row(Op::Validate, "validate KEY=VALUE ..."),
         ),
-        ("validate", crate::shared::cli::row(Op::Validate, "")),
     ];
 
     // What: lancache-ng config: show, schema, set, validate
@@ -4000,10 +4055,7 @@ mod config {
                 let v = crate::shared::http::ui_socket(&s, &route, body).await?;
                 println!("{v}");
             }
-            _ => {
-                let usage = crate::shared::cli::forms(&COMMANDS, " | ");
-                return Err(format!("usage: {usage}"));
-            }
+            _ => return Err(crate::shared::cli::help(&COMMANDS)),
         }
         Ok(())
     }
@@ -4346,13 +4398,22 @@ mod dhcp {
     // What: every command of the dhcp group.
     // Why: help, errors and the choice read this table.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [(&str, Op); 6] = [
-        ("state", Op::State),
-        ("kea-snapshots", Op::KeaSnapshots),
-        ("stats", Op::Stats),
-        ("kea-rollback", Op::KeaRollback),
-        ("probe", Op::Probe),
-        ("do", Op::Do),
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 6] = [
+        ("state", crate::shared::cli::row(Op::State, "state")),
+        (
+            "kea-snapshots",
+            crate::shared::cli::row(Op::KeaSnapshots, "kea-snapshots"),
+        ),
+        ("stats", crate::shared::cli::row(Op::Stats, "stats")),
+        (
+            "kea-rollback",
+            crate::shared::cli::row(Op::KeaRollback, "kea-rollback <snapshot-id>"),
+        ),
+        ("probe", crate::shared::cli::row(Op::Probe, "probe")),
+        (
+            "do",
+            crate::shared::cli::row(Op::Do, "do <action> field=value ..."),
+        ),
     ];
 
     // What: lancache-ng dhcp <command>: JSON on stdout.
@@ -4361,11 +4422,7 @@ mod dhcp {
     pub(crate) async fn run(args: &[String]) -> Result<(), String> {
         use crate::shared::cli;
         let s = Settings::from_process()?;
-        let op = match args.first().map(String::as_str) {
-            Some(word) => cli::pick(&COMMANDS, word),
-            None => None,
-        };
-        let v = match op.ok_or_else(|| cli::commands(&COMMANDS))? {
+        let v = match cli::op_of(&COMMANDS, args.first()).ok_or_else(|| cli::help(&COMMANDS))? {
             Op::State => kea_state(&s).await?.ok_or(NOT_KEA)?,
             Op::KeaSnapshots => kea_snapshots(&s)?,
             Op::Stats => json!(kea_stats(&s).await?.ok_or(NOT_KEA)?),
@@ -4377,7 +4434,7 @@ mod dhcp {
                     kea_rollback(&s, id).await?;
                     json!({"restored": "kea", "snapshot": id})
                 }
-                _ => return Err("usage: kea-rollback <snapshot-id>".into()),
+                _ => return Err(cli::usage(&COMMANDS, |o| *o == Op::KeaRollback)),
             },
             // What: the LAN DHCP probe via the ui socket.
             // Why: the ui starts it on the host network.
@@ -4795,7 +4852,9 @@ mod dns {
         use crate::shared::cli;
         let op = match args.first().map(String::as_str) {
             None => Op::Daemon,
-            Some(word) => cli::pick(&COMMANDS, word).ok_or_else(|| cli::commands(&COMMANDS))?,
+            Some(word) => cli::pick(&COMMANDS, word)
+                .map(|row| row.op)
+                .ok_or_else(|| cli::help(&COMMANDS))?,
         };
         match op {
             Op::Daemon => follow().await,
@@ -4862,7 +4921,7 @@ mod dns {
                         let v = crate::shared::http::ui_socket(&s, &route, body).await?;
                         println!("{v}");
                     }
-                    Some(_) => return Err("usage: zones [ensure]".into()),
+                    Some(_) => return Err(cli::usage(&COMMANDS, |o| *o == Op::Zones)),
                 }
                 Ok(())
             }
@@ -4905,7 +4964,7 @@ mod dns {
                         _ => Err(format!("soa-probe: {} does not serve {zone}", v["server"])),
                     }
                 }
-                _ => Err("usage: soa-probe <zone> [http|https|auth|ip[:port]]".into()),
+                _ => Err(cli::usage(&COMMANDS, |o| *o == Op::SoaProbe)),
             },
             // What: query NAME TYPE [http/https/auth/ip]
             // Why: a real DNS answer; needs no running ui.
@@ -4917,7 +4976,7 @@ mod dns {
                     println!("{}", query(&s, n, ty, target).await?);
                     Ok(())
                 }
-                _ => Err("usage: query <name> <type> [http|https|auth|ip[:port]]".into()),
+                _ => Err(cli::usage(&COMMANDS, |o| *o == Op::Query)),
             },
             // What: DNSSEC anchors, proven zones, NTAs.
             // Why: a read; it needs no running ui.
@@ -4945,7 +5004,7 @@ mod dns {
                 let zone = match &args[1..] {
                     [] => ".".to_string(),
                     [z] => z.clone(),
-                    _ => return Err("usage: flush [zone]".into()),
+                    _ => return Err(cli::usage(&COMMANDS, |o| *o == Op::Flush)),
                 };
                 peer::flush_zone(&Settings::from_process()?, &zone).await?;
                 println!("{}", json!({"flushed": zone}));
@@ -4971,7 +5030,11 @@ mod dns {
             ops.push((*op, route, word));
         }
         let words: Vec<&str> = ops.iter().map(|o| o.2.as_str()).collect();
-        let usage = format!("usage: secondary <name> <{}> [address]", words.join("|"));
+        let usage = format!(
+            "{}; actions {}",
+            crate::shared::cli::usage(&COMMANDS, |o| *o == Op::Secondary),
+            words.join("|")
+        );
         let (name, word, rest) = match args {
             [n, w, rest @ ..] => (n, w, rest),
             _ => return Err(usage),
@@ -5014,22 +5077,49 @@ mod dns {
     // What: every command of the dns role.
     // Why: help, errors and the choice read this table.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [(&str, Op); 15] = [
-        ("daemon", Op::Daemon),
-        ("soa-probe", Op::SoaProbe),
-        ("follow-once", Op::FollowOnce),
-        ("healthcheck", Op::Healthcheck),
-        ("records", Op::Records),
-        ("tsig", Op::Tsig),
-        ("sync-check", Op::SyncCheck),
-        ("do", Op::Do),
-        ("secondary", Op::Secondary),
-        ("flush", Op::Flush),
-        ("dnssec", Op::Dnssec),
-        ("api-check", Op::ApiCheck),
-        ("stats", Op::Stats),
-        ("query", Op::Query),
-        ("zones", Op::Zones),
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 15] = [
+        ("daemon", crate::shared::cli::row(Op::Daemon, "daemon")),
+        (
+            "soa-probe",
+            crate::shared::cli::row(Op::SoaProbe, "soa-probe <zone> [http|https|auth|ip[:port]]"),
+        ),
+        (
+            "follow-once",
+            crate::shared::cli::row(Op::FollowOnce, "follow-once"),
+        ),
+        (
+            "healthcheck",
+            crate::shared::cli::row(Op::Healthcheck, "healthcheck"),
+        ),
+        ("records", crate::shared::cli::row(Op::Records, "records")),
+        ("tsig", crate::shared::cli::row(Op::Tsig, "tsig")),
+        (
+            "sync-check",
+            crate::shared::cli::row(Op::SyncCheck, "sync-check"),
+        ),
+        (
+            "do",
+            crate::shared::cli::row(Op::Do, "do <action> field=value ..."),
+        ),
+        (
+            "secondary",
+            crate::shared::cli::row(Op::Secondary, "secondary <name> <action> [address]"),
+        ),
+        ("flush", crate::shared::cli::row(Op::Flush, "flush [zone]")),
+        ("dnssec", crate::shared::cli::row(Op::Dnssec, "dnssec")),
+        (
+            "api-check",
+            crate::shared::cli::row(Op::ApiCheck, "api-check"),
+        ),
+        ("stats", crate::shared::cli::row(Op::Stats, "stats")),
+        (
+            "query",
+            crate::shared::cli::row(Op::Query, "query <name> <type> [http|https|auth|ip[:port]]"),
+        ),
+        (
+            "zones",
+            crate::shared::cli::row(Op::Zones, "zones [ensure]"),
+        ),
     ];
 
     // What: serials of managed zones on all servers.
@@ -6870,13 +6960,13 @@ mod shared {
             table.iter().find(|(w, _)| *w == word).map(|(_, row)| *row)
         }
 
-        // What: the word of a row.
+        // What: the word of an action.
         // Why: a message names the command the table ran.
         // From: Issue #1683 | PR #2020
-        pub fn word<T: PartialEq>(table: &[(&'static str, T)], row: T) -> &'static str {
+        pub fn word<T: PartialEq>(table: &[(&'static str, Entry<T>)], op: T) -> &'static str {
             table
                 .iter()
-                .find(|(_, r)| *r == row)
+                .find(|(_, r)| r.op == op)
                 .map_or("", |(w, _)| *w)
         }
 
@@ -6918,11 +7008,22 @@ mod shared {
             shown.join(sep)
         }
 
-        // What: the error and help line of an unknown word.
-        // Why: every owner says it the same way.
+        // What: the help line: every form of a table.
+        // Why: help and unknown words say it one way.
         // From: Issue #1683 | PR #2020
-        pub fn commands<T>(table: &[(&'static str, T)]) -> String {
-            format!("commands: {}", names(table))
+        pub fn help<T>(table: &[(&'static str, Entry<T>)]) -> String {
+            format!("commands: {}", forms(table, " | "))
+        }
+
+        // What: the usage line of one command.
+        // Why: wrong arguments show the table form.
+        // From: Issue #1683 | PR #2020
+        pub fn usage<T>(table: &[(&'static str, Entry<T>)], is: impl Fn(&T) -> bool) -> String {
+            let form = table
+                .iter()
+                .find(|(_, r)| is(&r.op))
+                .map_or("", |(_, r)| r.form);
+            format!("usage: {form}")
         }
     }
 
@@ -7544,7 +7645,7 @@ mod shared {
         pub fn run(args: &[String]) -> Result<(), String> {
             use crate::shared::cli;
             if cli::op_of(&COMMANDS, args.first()) != Some(Op::List) {
-                return Err(format!("commands: {}", cli::forms(&COMMANDS, " | ")));
+                return Err(crate::shared::cli::help(&COMMANDS));
             }
             let v = states(&crate::config::Settings::from_process()?)?;
             println!("{v}");
@@ -7732,7 +7833,7 @@ mod shared {
                     .replace('_', "-")
             };
             let words: Vec<String> = keys.iter().map(|k| word(k)).collect();
-            let usage = || format!("usage: do <{}> field=value ...", words.join("|"));
+            let usage = || format!("do: actions {}", words.join("|"));
             let (name, pairs) = args.split_first().ok_or_else(usage)?;
             let key = keys.iter().find(|k| word(k) == *name).ok_or_else(usage)?;
             let mut form = Vec::new();
@@ -9951,7 +10052,7 @@ mod shared {
                         .replace("{action}", a);
                     (r, Body::Form(vec![]))
                 }
-                _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
+                _ => return Err(crate::shared::cli::help(&COMMANDS)),
             };
             let v = crate::shared::http::ui_socket(&s, &route, body).await?;
             println!("{}", json!({"done": route, "answer": v}));
@@ -13090,8 +13191,11 @@ end
         const COMMANDS: [(&str, crate::shared::cli::Entry<Op>); 4] = [
             ("status", crate::shared::cli::row(Op::Status, "status")),
             ("log", crate::shared::cli::row(Op::Log, "log")),
-            ("psl", crate::shared::cli::row(Op::Psl, "psl")),
-            ("certs", crate::shared::cli::row(Op::Certs, "certs")),
+            ("psl", crate::shared::cli::row(Op::Psl, "psl <host>")),
+            (
+                "certs",
+                crate::shared::cli::row(Op::Certs, "certs [check|renew]"),
+            ),
         ];
 
         // What: lancache-ng proxy status|log as JSON.
@@ -13108,7 +13212,7 @@ end
                 // From: Issue #1683 | PR #2020
                 Some(Op::Psl) => match args.get(1) {
                     Some(host) => crate::shared::render::psl_lookup(&s, host)?,
-                    None => return Err("usage: psl <host>".into()),
+                    None => return Err(cli::usage(&COMMANDS, |o| *o == Op::Psl)),
                 },
                 // What: certs list; check: rc 1; renew: ui.
                 // Why: renew reloads the proxy like apply.
@@ -13120,9 +13224,14 @@ end
                         let body = crate::shared::http::Body::Form(vec![]);
                         crate::shared::http::ui_socket(&s, &route, body).await?
                     }
-                    Some(x) => return Err(format!("{x}: certs [check | renew]")),
+                    Some(x) => {
+                        return Err(format!(
+                            "{x}: {}",
+                            cli::usage(&COMMANDS, |o| *o == Op::Certs)
+                        ));
+                    }
                 },
-                None => return Err(format!("commands: {}", cli::forms(&COMMANDS, " "))),
+                None => return Err(crate::shared::cli::help(&COMMANDS)),
             };
             println!("{v}");
             let check = args.get(1).is_some_and(|a| a == "check");
@@ -14579,7 +14688,7 @@ end
                     );
                     return Ok(());
                 }
-                None => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
+                None => return Err(crate::shared::cli::help(&COMMANDS)),
             }
             let v = status(&s).await?;
             println!("{v}");
@@ -15127,7 +15236,7 @@ end
                     "UI_ROUTE_DNS_TOGGLE",
                     vec![pair("domain", d), pair("enabled", "false")],
                 ),
-                _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
+                _ => return Err(crate::shared::cli::help(&COMMANDS)),
             };
             ui_socket(&s, &s.text(key)?, Body::Form(form)).await?;
             println!("{}", listing(&Settings::from_process()?)?);
@@ -15538,7 +15647,7 @@ end
                         return Err("snmp-check: the target did not answer".into());
                     }
                 }
-                _ => return Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
+                _ => return Err(crate::shared::cli::help(&COMMANDS)),
             }
             Ok(())
         }
@@ -15972,7 +16081,7 @@ end
                     println!("{v}");
                     Ok(())
                 }
-                None => Err(format!("commands: {}", cli::forms(&COMMANDS, " | "))),
+                None => Err(crate::shared::cli::help(&COMMANDS)),
             }
         }
 
@@ -20066,7 +20175,9 @@ mod ui {
                 [zone, id] => rollback(s, zone, id).await.map_err(|e| say(&e)).map(|()| {
                     println!("{}", json!({"restored": zone, "snapshot": id}));
                 }),
-                _ => Err("usage: zone-rollback <zone> <snapshot-id>".into()),
+                _ => Err(crate::shared::cli::usage(&COMMANDS, |c| {
+                    *c == Cmd::Set(Set::ZoneRollback)
+                })),
             }),
             Some(Set::Healthcheck) => Some(healthcheck(s).await),
             // What: one DHCP probe as JSON on stdout.
@@ -20106,18 +20217,51 @@ mod ui {
     // What: every command of ui role; none = the server.
     // Why: help, errors and the choice read this table.
     // From: Issue #1683 | PR #2020
-    const COMMANDS: [(&str, Cmd); 11] = [
-        ("hash-password", Cmd::HashPassword),
-        ("encode-password-hash", Cmd::EncodePasswordHash),
-        ("zone-snapshots", Cmd::Set(Set::ZoneSnapshots)),
-        ("registration-token", Cmd::Set(Set::RegistrationToken)),
-        ("lang", Cmd::Set(Set::Lang)),
-        ("routes", Cmd::Set(Set::Routes)),
-        ("templates", Cmd::Set(Set::Templates)),
-        ("password", Cmd::Set(Set::Password)),
-        ("zone-rollback", Cmd::Set(Set::ZoneRollback)),
-        ("healthcheck", Cmd::Set(Set::Healthcheck)),
-        (DHCP_PROBE_CMD, Cmd::Set(Set::DhcpProbe)),
+    const COMMANDS: [(&str, crate::shared::cli::Entry<Cmd>); 11] = [
+        (
+            "hash-password",
+            crate::shared::cli::row(Cmd::HashPassword, "hash-password"),
+        ),
+        (
+            "encode-password-hash",
+            crate::shared::cli::row(Cmd::EncodePasswordHash, "encode-password-hash"),
+        ),
+        (
+            "zone-snapshots",
+            crate::shared::cli::row(Cmd::Set(Set::ZoneSnapshots), "zone-snapshots"),
+        ),
+        (
+            "registration-token",
+            crate::shared::cli::row(Cmd::Set(Set::RegistrationToken), "registration-token"),
+        ),
+        ("lang", crate::shared::cli::row(Cmd::Set(Set::Lang), "lang")),
+        (
+            "routes",
+            crate::shared::cli::row(Cmd::Set(Set::Routes), "routes"),
+        ),
+        (
+            "templates",
+            crate::shared::cli::row(Cmd::Set(Set::Templates), "templates"),
+        ),
+        (
+            "password",
+            crate::shared::cli::row(Cmd::Set(Set::Password), "password [user]"),
+        ),
+        (
+            "zone-rollback",
+            crate::shared::cli::row(
+                Cmd::Set(Set::ZoneRollback),
+                "zone-rollback <zone> <snapshot-id>",
+            ),
+        ),
+        (
+            "healthcheck",
+            crate::shared::cli::row(Cmd::Set(Set::Healthcheck), "healthcheck"),
+        ),
+        (
+            DHCP_PROBE_CMD,
+            crate::shared::cli::row(Cmd::Set(Set::DhcpProbe), DHCP_PROBE_CMD),
+        ),
     ];
 
     // What: asks the own health route on loopback.
@@ -20517,8 +20661,8 @@ mod ui {
         let cmd = match args.first().map(String::as_str) {
             None => None,
             Some(word) => Some(
-                cli::pick(&COMMANDS, word)
-                    .ok_or_else(|| format!("{} (none: web server)", cli::commands(&COMMANDS)))?,
+                cli::op_of(&COMMANDS, Some(&word.to_string()))
+                    .ok_or_else(|| format!("{} (none: web server)", cli::help(&COMMANDS)))?,
             ),
         };
         let set = match cmd {
