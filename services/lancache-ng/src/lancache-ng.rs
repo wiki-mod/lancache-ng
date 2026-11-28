@@ -320,13 +320,6 @@ mod cachehamster {
         write(path, body, PRIVATE_MODE, Place::Replace, Owner::default())
     }
 
-    // What: remove a file; a missing file is fine.
-    // Why: logout and login cleanup must not hide IO errors
-    // From: Issue #871 | PR #1980
-    fn delete_file(path: &Path) -> Result<(), String> {
-        crate::shared::fs::delete_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
-    }
-
     // What: the 32-byte key that seals the session token.
     // Why: created once in the data dir, mode 0600.
     // From: Issue #871 | PR #1980
@@ -563,7 +556,7 @@ mod cachehamster {
                 access_token: field(&r, "access_token").unwrap_or_default(),
             };
             save_session(c, &session)?;
-            delete_file(&c.path(PENDING_FILE))?;
+            crate::shared::fs::delete_file(&c.path(PENDING_FILE))?;
             return Ok(json!({"state": "done", "account": session.account}));
         }
         // What: Steam rotates the QR after a while.
@@ -776,7 +769,7 @@ mod cachehamster {
                 Err(e) => eprintln!("cachehamster: dropped bad order: {e}"),
             }
             if consume {
-                delete_file(&path)?;
+                crate::shared::fs::delete_file(&path)?;
             }
         }
         Ok(())
@@ -2642,10 +2635,10 @@ mod cachehamster {
             },
             Op::LoginBegin => login_begin(&c, &client()?).await,
             Op::LoginPoll => login_poll(&c, &client()?).await,
-            Op::LoginCancel => {
-                delete_file(&c.path(PENDING_FILE)).map(|()| json!({"state": "idle"}))
-            }
-            Op::Logout => delete_file(&c.path(TOKEN_FILE)).map(|()| json!({"logged_in": false})),
+            Op::LoginCancel => crate::shared::fs::delete_file(&c.path(PENDING_FILE))
+                .map(|()| json!({"state": "idle"})),
+            Op::Logout => crate::shared::fs::delete_file(&c.path(TOKEN_FILE))
+                .map(|()| json!({"logged_in": false})),
             Op::Library => library(&c, &client()?).await,
             Op::Cached => cached(&c),
             Op::FetchCheck => fetch_check(&c, &args[1..]).await,
@@ -6860,7 +6853,7 @@ mod dns {
     pub(crate) async fn rotate_tsig(app: &Stack) -> Result<(), String> {
         let s = app.settings();
         let file = secret::tsig_file(&s)?;
-        fs::delete_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        fs::delete_file(&file)?;
         secret::load_or_create(&file, secret::new_tsig, fs::Owner::default())
             .map_err(|e| format!("DDNS_TSIG_KEY: {e}"))?;
         for line in apply_all(app, &s, &s, true).await? {
@@ -7336,6 +7329,13 @@ mod shared {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
             }
+        }
+
+        // What: delete a file; an absent one is fine.
+        // Why: the error names the path, as the readers do.
+        // From: Issue #1683 | PR #2020
+        pub fn delete_file(path: &Path) -> Result<(), String> {
+            delete_if_present(path).map_err(|e| format!("{}: {e}", path.display()))
         }
 
         // What: a file as text; the error names the path.
@@ -14304,8 +14304,7 @@ end
                     file.extension().and_then(|x| x.to_str()),
                     Some("crt" | "key")
                 ) {
-                    crate::shared::fs::delete_if_present(&file)
-                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    crate::shared::fs::delete_file(&file)?;
                 }
             }
             crate::shared::fs::write(
@@ -14465,8 +14464,7 @@ end
                 let (key, crt) = leaf_files(s, &name)?;
                 if crt.is_file() && crate::shared::cert::state(&crt, within)["renew"] == true {
                     for f in [&key, &crt] {
-                        crate::shared::fs::delete_if_present(f)
-                            .map_err(|e| format!("{}: {e}", f.display()))?;
+                        crate::shared::fs::delete_file(f)?;
                     }
                     gone.push(name);
                 }
@@ -16244,8 +16242,8 @@ end
         pub fn delete(pick: &[Item]) -> (u64, Vec<String>) {
             let (mut freed, mut errs) = (0u64, Vec::new());
             for f in pick {
-                match super::fs::delete_if_present(&f.path) {
-                    Err(e) => errs.push(format!("{}: {e}", f.path.display())),
+                match super::fs::delete_file(&f.path) {
+                    Err(e) => errs.push(e),
                     Ok(()) => freed = freed.saturating_add(f.size),
                 }
             }
@@ -16327,7 +16325,7 @@ end
                         std::io::copy(&mut from, &mut to).map_err(|e| err(dst, e))?;
                         to.sync_all().map_err(|e| err(dst, e))
                     });
-                let left = super::fs::delete_if_present(&part).map_err(|e| err(&part, e));
+                let left = super::fs::delete_file(&part);
                 joined.and(left)?;
             } else {
                 super::fs::write_with(dst, mode, Place::Replace, owner, encode)
@@ -16342,7 +16340,7 @@ end
                     .and_then(|f| f.set_modified(when))
                     .map_err(|e| err(dst, e))?;
             }
-            super::fs::delete_if_present(src).map_err(|e| err(src, e))
+            super::fs::delete_file(src)
         }
 
         // What: is a daily job due by its stamp.
@@ -16932,8 +16930,7 @@ mod stack {
     ) -> Result<Vec<PathBuf>, String> {
         let stale = stale_rendered(s, files)?;
         for path in &stale {
-            crate::shared::fs::delete_if_present(path)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            crate::shared::fs::delete_file(path)?;
         }
         Ok(stale)
     }
@@ -18496,7 +18493,7 @@ mod ui {
     pub(crate) fn renew_token(s: &Settings) -> Result<String, String> {
         let dir = secret::dir(s)?;
         let file = secret::file_of(&dir, "SECONDARY_REGISTRATION_TOKEN");
-        fs::delete_if_present(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        fs::delete_file(&file)?;
         registration_token(s)
     }
 
@@ -20700,12 +20697,12 @@ mod ui {
         // What: a socket file of an earlier run goes.
         // Why: bind fails on an existing path.
         // From: Issue #1683 | PR #2020
-        fs::delete_if_present(Path::new(&path)).map_err(|e| format!("{path}: {e}"))?;
+        fs::delete_file(Path::new(&path))?;
         // What: bind on a side name, close it, then move.
         // Why: the socket is never open with a wide mode.
         // From: Issue #1683 | PR #2020
         let side = fs::with_suffix(Path::new(&path), ".new");
-        fs::delete_if_present(&side).map_err(|e| format!("{}: {e}", side.display()))?;
+        fs::delete_file(&side)?;
         let sock = tokio::net::UnixListener::bind(&side).map_err(|e| format!("{path}: {e}"))?;
         std::fs::set_permissions(&side, std::fs::Permissions::from_mode(fs::PRIVATE_MODE))
             .map_err(|e| format!("{path}: {e}"))?;
