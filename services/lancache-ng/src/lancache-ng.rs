@@ -10326,7 +10326,9 @@ mod shared {
                 // Why: a read; it needs no running ui.
                 // From: Issue #871 | PR #2020
                 (Some(Op::Time), []) => {
-                    println!("{}", crate::shared::clock::report(&s)?);
+                    use crate::shared::http::{Body, Peer, call};
+                    let route = s.text("UI_ROUTE_SYSTEM_TIME")?;
+                    println!("{}", call(&s, Peer::Watchdog, &route, Body::None).await?);
                     return Ok(());
                 }
                 // What: Docker engine check; rc 1 on fail.
@@ -14953,6 +14955,18 @@ end
             Ok(out.into())
         }
 
+        // What: chronyc -c tracking of this container.
+        // Why: the watchdog runs it where chronyd runs.
+        // From: Issue #1683 | PR #2020
+        pub fn tracking_now(s: &crate::config::Settings) -> Result<serde_json::Value, String> {
+            let words = s.list("CHRONY_TRACKING_COMMAND")?;
+            let (program, args) = words
+                .split_first()
+                .ok_or("CHRONY_TRACKING_COMMAND is empty")?;
+            let out = crate::shared::tool::run(std::process::Command::new(program).args(args))?;
+            tracking(&String::from_utf8_lossy(&out))
+        }
+
         // What: what one ntp command does.
         // Why: the match runs these; the table names them.
         // From: Issue #1683 | PR #2020
@@ -14981,17 +14995,13 @@ end
             use crate::shared::cli;
             match cli::op_of(&COMMANDS, args.first()) {
                 Some(Op::Check) => {}
-                // What: tracking through the ui.
-                // Why: chronyc runs in services via docker.
+                // What: tracking through the watchdog.
+                // Why: chronyc runs in services.
                 // From: Issue #1683 | PR #2020
                 Some(Op::Tracking) => {
+                    use crate::shared::http::{Body, Peer, call};
                     let route = s.text("UI_ROUTE_NTP_TRACKING")?;
-                    let body = crate::shared::http::Body::None;
-                    println!(
-                        "{}",
-                        crate::shared::http::call(&s, crate::shared::http::Peer::Ui, &route, body)
-                            .await?
-                    );
+                    println!("{}", call(&s, Peer::Watchdog, &route, Body::None).await?);
                     return Ok(());
                 }
                 None => return Err(crate::shared::cli::help(&COMMANDS)),
@@ -17069,54 +17079,6 @@ mod stack {
         docker::container_name(&app.docker, s, service).await
     }
 
-    // What: run a command in a service container.
-    // Why: rc-service and cachehamster go this way.
-    // From: Issue #1683 | PR #1980
-    pub(crate) async fn exec_in(
-        app: &Stack,
-        s: &Settings,
-        service: &str,
-        cmd: &[&str],
-    ) -> Result<(i64, String), Fault> {
-        let name = container_of(app, s, service).await?;
-        let limit = docker::timeout(s)?;
-        Ok(app
-            .docker
-            .exec(&name, cmd, limit)
-            .await
-            .map_err(|e| e.to_string())?)
-    }
-
-    // What: run the first service:command row of a key.
-    // Why: chrony and the clock run their SOT row so.
-    // From: Issue #1683 | PR #2020
-    pub(crate) async fn exec_row(
-        app: &Stack,
-        s: &Settings,
-        key: &str,
-    ) -> Result<(Vec<String>, i64, String), String> {
-        let rows = s.list(key)?;
-        let (svc, cmd) = apply::exec_rows(&rows)
-            .next()
-            .ok_or_else(|| format!("{key} has no service:command row"))?;
-        let (code, text) = exec_in(app, s, svc, &cmd)
-            .await
-            .map_err(|e| crate::ui::say(&e))?;
-        Ok((cmd.iter().map(|c| c.to_string()).collect(), code, text))
-    }
-
-    // What: the last JSON line of a command output.
-    // Why: exec_row users read the answer so.
-    // From: Issue #1683 | PR #2020
-    pub(crate) fn last_json(out: &str) -> Result<Value, String> {
-        let line = out
-            .lines()
-            .rev()
-            .find(|l| l.starts_with('{'))
-            .unwrap_or_default();
-        serde_json::from_str(line).map_err(|e| format!("{e}: {out}"))
-    }
-
     // What: drop proxy render files no longer written.
     // Why: an old https.conf keeps the SSL server alive.
     // From: Issue #1683 | PR #2019
@@ -19105,7 +19067,6 @@ mod ui {
     // Why: a source that fails is unknown and reported.
     // From: Issue #1683 | PR #1980
     pub(crate) async fn service_values(
-        app: &Stack,
         s: &Settings,
         want: &[String],
     ) -> (BTreeMap<String, String>, Vec<String>) {
@@ -19185,7 +19146,7 @@ mod ui {
         // Why: the graph reads the tracking reader.
         // From: Issue #1683 | PR #1980
         if has("chrony") {
-            match chrony_tracking(app, s).await {
+            match chrony_tracking(s).await {
                 Ok(v) => {
                     out.insert("chrony:stratum".into(), v["stratum"].to_string());
                     out.insert("chrony:offset".into(), v["system_time"].to_string());
@@ -19196,15 +19157,18 @@ mod ui {
         (out, errs)
     }
 
-    // What: chrony tracking from its container.
-    // Why: sampler and REST run one command, one parser.
+    // What: chrony tracking, read by the watchdog.
+    // Why: sampler and REST ask one place.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn chrony_tracking(app: &Stack, s: &Settings) -> Result<Value, String> {
-        let (cmd, code, text) = crate::stack::exec_row(app, s, "CHRONY_TRACKING_EXEC").await?;
-        if code != 0 {
-            return Err(format!("{} exit {code}: {}", cmd.join(" "), text.trim()));
-        }
-        crate::shared::ntp::tracking(&text)
+    pub(crate) async fn chrony_tracking(s: &Settings) -> Result<Value, String> {
+        use crate::shared::http::{Body, Peer, call};
+        call(
+            s,
+            Peer::Watchdog,
+            &s.text("UI_ROUTE_NTP_TRACKING")?,
+            Body::None,
+        )
+        .await
     }
 
     // What: GET UI_ROUTE_DNS_SOA_PROBE?zone=&target=
@@ -19236,35 +19200,36 @@ mod ui {
         Ok(axum::Json(crate::dns::lan_view(&app.settings()).await?).into_response())
     }
 
-    // What: GET UI_ROUTE_NTP_TRACKING: chrony state.
-    // Why: REST and CLI read the tracking reader.
+    // What: GET UI_ROUTE_NTP_TRACKING via watchdog.
+    // Why: chronyc runs in services, next to it.
     // From: Issue #1683 | PR #2020
-    pub(crate) async fn ntp_tracking_api(State(app): Shared) -> Response {
-        let r = chrony_tracking(&app, &app.settings()).await;
-        json_reply(r.map(Some), "")
+    pub(crate) async fn ntp_tracking_api(State(app): Shared) -> Page {
+        let s = app.settings();
+        to_watchdog(
+            &s,
+            &s.text("UI_ROUTE_NTP_TRACKING")?,
+            crate::shared::http::Body::None,
+        )
+        .await
     }
 
-    // What: GET UI_ROUTE_SYSTEM_TIME: the services clock.
-    // Why: the window runs there; REST runs its CLI.
+    // What: GET UI_ROUTE_SYSTEM_TIME via watchdog.
+    // Why: the cachehamster window runs on that clock.
     // From: Issue #871 | PR #2020
-    pub(crate) async fn system_time_api(State(app): Shared) -> Response {
+    pub(crate) async fn system_time_api(State(app): Shared) -> Page {
         let s = app.settings();
-        let r = async {
-            let (cmd, code, text) = crate::stack::exec_row(&app, &s, "SYSTEM_TIME_EXEC").await?;
-            let v =
-                crate::stack::last_json(&text).map_err(|e| format!("{}: {e}", cmd.join(" ")))?;
-            match code {
-                0 => Ok(v),
-                code => Err(format!("{} exit {code}: {v}", cmd.join(" "))),
-            }
-        };
-        json_reply(r.await.map(Some), "")
+        to_watchdog(
+            &s,
+            &s.text("UI_ROUTE_SYSTEM_TIME")?,
+            crate::shared::http::Body::None,
+        )
+        .await
     }
 
     // What: program values into RRD each step.
     // Why: PowerDNS, nginx, Kea and chrony give values.
     // From: Issue #1683 | PR #1980
-    pub(crate) async fn sample_services(app: &Stack, s: &Settings) -> Vec<String> {
+    pub(crate) async fn sample_services(s: &Settings) -> Vec<String> {
         let all = match crate::shared::rrd::service_graphs(s) {
             Ok(v) => v,
             Err(e) => return vec![e],
@@ -19273,7 +19238,7 @@ mod ui {
             .iter()
             .flat_map(|g| g.sources.iter().map(|x| x.oid.clone()))
             .collect();
-        let (vals, mut errs) = service_values(app, s, &want).await;
+        let (vals, mut errs) = service_values(s, &want).await;
         for g in all {
             let row: Vec<String> = g
                 .sources
@@ -19299,7 +19264,7 @@ mod ui {
             Err(e) => vec![e.to_string()],
         };
         errs.extend(sample_containers(app, s).await);
-        errs.extend(sample_services(app, s).await);
+        errs.extend(sample_services(s).await);
         errs
     }
 
@@ -22252,6 +22217,46 @@ mod watchdog {
         )
     }
 
+    // What: GET UI_ROUTE_NTP_TRACKING: chrony here.
+    // Why: chronyd runs in this container.
+    // From: Issue #1683 | PR #2020
+    async fn api_tracking() -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                let s = settings()?;
+                let v = tokio::task::spawn_blocking(move || crate::shared::ntp::tracking_now(&s))
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Fault::from(e.to_string()),
+                        )
+                    })?
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                Ok(axum::Json(v).into_response())
+            }
+            .await,
+        )
+    }
+
+    // What: GET UI_ROUTE_SYSTEM_TIME: this clock.
+    // Why: the cachehamster window runs on it.
+    // From: Issue #871 | PR #2020
+    async fn api_time() -> axum::response::Response {
+        answer(
+            async {
+                use axum::http::StatusCode;
+                use axum::response::IntoResponse;
+                let s = settings()?;
+                let v = clock::report(&s).map_err(|e| (StatusCode::BAD_GATEWAY, Fault::from(e)))?;
+                Ok(axum::Json(v).into_response())
+            }
+            .await,
+        )
+    }
+
     // What: the watchdog REST routes from the SOT.
     // Why: ui and CLI reach them on WATCHDOG_SOCKET.
     // From: Issue #1683 | PR #2020
@@ -22265,7 +22270,9 @@ mod watchdog {
             .route(&s.text("UI_ROUTE_SERVICE_ACTION")?, post(api_program))
             .route(&s.text("UI_ROUTE_WATCHDOG_CONVERGE")?, post(api_converge))
             .route(&s.text("UI_ROUTE_WATCHDOG_APPLY")?, post(api_apply))
-            .route(&s.text("UI_ROUTE_WATCHDOG_EXEC")?, post(api_exec)))
+            .route(&s.text("UI_ROUTE_WATCHDOG_EXEC")?, post(api_exec))
+            .route(&s.text("UI_ROUTE_NTP_TRACKING")?, get(api_tracking))
+            .route(&s.text("UI_ROUTE_SYSTEM_TIME")?, get(api_time)))
     }
 
     // What: what one watchdog command does.

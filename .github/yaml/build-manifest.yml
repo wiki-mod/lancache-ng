@@ -1640,13 +1640,9 @@ runtime:
     # From: Issue #1683 | PR #2020
     - SERVICE_LIST_PROGRAM=rc-update
     # What: the command that reads the state of chronyd.
-    # Why: the statistics show stratum and offset.
-    # From: Issue #1683 | PR #2017
-    - CHRONY_TRACKING_EXEC=services:chronyc+-c+tracking
-    # What: the command that reads the services clock.
-    # Why: the cachehamster window runs on that clock.
-    # From: Issue #871 | PR #2020
-    - SYSTEM_TIME_EXEC=services:@SERVICES_PROGRAM@+system+time
+    # Why: the watchdog runs it next to chronyd.
+    # From: Issue #1683 | PR #2020
+    - CHRONY_TRACKING_COMMAND=chronyc -c tracking
     # What: snmpd reload per container on a new snmpd.conf.
     # Why: one file, several snmpd; HUP rereads it.
     # From: Issue #1683
@@ -2123,8 +2119,7 @@ runtime:
     - PDNS_RESTART_EXEC=list;;;fixed;ui
     - DNSDIST_RESTART_EXEC=list;;;fixed;ui
     - DNSMASQ_RESTART_EXEC=list;;;fixed;ui
-    - CHRONY_TRACKING_EXEC=list;;;fixed;ui
-    - SYSTEM_TIME_EXEC=list;;;fixed;ui
+    - CHRONY_TRACKING_COMMAND=list;;;fixed;services
     - NGINX_CONF_DIR=path;;;container;proxy
     - DNSMASQ_CONF_FILE=path;;;container;dhcp
     - KEA_CTRL_CONF_FILE=path;;;container;dhcp
