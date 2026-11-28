@@ -1924,13 +1924,12 @@ runtime:
     - CONNTRACK_MAX_FILE=/proc/sys/net/netfilter/nf_conntrack_max
     - CONNTRACK_STAT_FILE=nf_conntrack
     - WATCHDOG_CONNTRACK_WARN_PCT=80
-    # What: ui stop grace and the mode of rendered files.
-    # Why: the ui stops containers and writes files so.
+    # What: the mode of rendered files.
+    # Why: the ui writes files so.
     # From: Issue #1683 | PR #2020
-    - UI_STOP_GRACE=10
     - UI_CONFIG_FILE_MODE=0644
-    # What: ui wait for a restarted container to be healthy.
-    # Why: apply is done only when the service answers.
+    # What: wait for a restarted container to be healthy.
+    # Why: the watchdog ends a plan when it answers.
     # From: Issue #1683 | PR #1980
     - APPLY_HEALTH_WAIT_SECONDS=120
     - APPLY_HEALTH_POLL_SECONDS=1
@@ -2276,7 +2275,6 @@ runtime:
     - SYSLOG_LOG_ROOT_ALLOWED_PREFIX=path;;;fixed;services
     - SYSLOG_XZ_PRESET=uint;0;9;live;services
     - WATCHDOG_DISK_PATHS=list;;;live;services
-    - UI_STOP_GRACE=uint;1;600;live;ui
     - UI_CONFIG_FILE_MODE=text;;;fixed;ui
     - APPLY_HEALTH_WAIT_SECONDS=uint;0;3600;live;ui
     - APPLY_HEALTH_POLL_SECONDS=uint;1;60;live;ui

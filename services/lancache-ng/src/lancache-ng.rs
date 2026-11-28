@@ -4791,13 +4791,10 @@ mod dhcp {
     // Why: compose up may start it after the ui.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn stays_off(s: &Settings) -> Result<Option<String>, String> {
-        use crate::shared::http::{Body, Peer, call};
         let Some(service) = off_service(s)? else {
             return Ok(None);
         };
-        let to = s.text("UI_ROUTE_WATCHDOG_CONVERGE")?;
-        let route = crate::shared::fill(to, &[("service", service)]);
-        let v = call(s, Peer::Watchdog, &route, Body::Form(vec![])).await?;
+        let v = crate::stack::converge(s, &service).await?;
         Ok(match v["done"].as_str() {
             Some("kept") | None => None,
             Some(done) => Some(format!("mode off, {done}")),
@@ -16909,14 +16906,6 @@ mod stack {
                 Err(poisoned) => poisoned.into_inner().clone(),
             }
         }
-
-        // What: Docker stop grace and call limit.
-        // Why: every wait comes from the SOT.
-        // From: Issue #1683 | PR #1858
-        pub(crate) fn limits(&self, s: &Settings) -> Result<(u32, Duration), String> {
-            let grace = s.num::<u32>("UI_STOP_GRACE")?;
-            Ok((grace, crate::shared::docker::timeout(s)?))
-        }
     }
 
     // What: keep only real changes of known keys.
@@ -17090,7 +17079,7 @@ mod stack {
         cmd: &[&str],
     ) -> Result<(i64, String), Fault> {
         let name = container_of(app, s, service).await?;
-        let (_, limit) = app.limits(s)?;
+        let limit = docker::timeout(s)?;
         Ok(app
             .docker
             .exec(&name, cmd, limit)
@@ -17366,7 +17355,7 @@ mod stack {
     // What: a plan run by the watchdog; its report.
     // Why: apply and cert renewal end the same way.
     // From: Issue #1683 | PR #2020
-    async fn run_plan(
+    pub(crate) async fn run_plan(
         new: &Settings,
         plan: BTreeMap<String, config::Effect>,
         report: &mut Vec<Fault>,
@@ -17427,17 +17416,18 @@ mod stack {
             ));
         }
         commit_with(app, |s| list_change(s, "SERVICES_STOPPED", service, !run)).await?;
-        // What: the watchdog brings the container to it.
-        // Why: it runs and knows every start and stop.
-        // From: Issue #1683 | PR #2020
-        let s = app.settings();
-        let route = crate::shared::fill(
-            s.text("UI_ROUTE_WATCHDOG_CONVERGE")?,
-            &[("service", service.to_string())],
-        );
-        let body = crate::shared::http::Body::Form(vec![]);
-        crate::shared::http::call(&s, crate::shared::http::Peer::Watchdog, &route, body).await?;
+        converge(&app.settings(), service).await?;
         Ok(())
+    }
+
+    // What: the watchdog brings a container to its wish.
+    // Why: a saved wish and DHCP mode off ask alike.
+    // From: Issue #1683 | PR #2020
+    pub(crate) async fn converge(s: &Settings, service: &str) -> Result<Value, String> {
+        use crate::shared::http::{Body, Peer, call};
+        let to = s.text("UI_ROUTE_WATCHDOG_CONVERGE")?;
+        let route = crate::shared::fill(to, &[("service", service.to_string())]);
+        call(s, Peer::Watchdog, &route, Body::Form(vec![])).await
     }
 }
 
@@ -18923,7 +18913,7 @@ mod ui {
     ) -> Page {
         csrf.check_header(&headers)?;
         let s = app.settings();
-        let (_, limit) = app.limits(&s)?;
+        let limit = crate::shared::docker::timeout(&s)?;
         let wait = Duration::from_secs(s.uint("DHCP_PROBE_WAIT_TIMEOUT")?);
         let me = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
         let bad = |e: docker::Error| Fail(StatusCode::BAD_GATEWAY, e.to_string());
@@ -19074,8 +19064,8 @@ mod ui {
             Ok(v) => v,
             Err(e) => return vec![e],
         };
-        let limit = match app.limits(s) {
-            Ok((_, l)) => l,
+        let limit = match crate::shared::docker::timeout(s) {
+            Ok(l) => l,
             Err(e) => return vec![e],
         };
         let tabs = match s.list("STATS_CONTAINERS") {
@@ -19955,8 +19945,8 @@ mod ui {
     }
 
     // What: restart the ui container itself.
-    // Why: Docker restarts it; the page reloads.
-    // From: Issue #1683 | PR #1980
+    // Why: the watchdog restarts it; the page reloads.
+    // From: Issue #1683 | PR #2020
     pub(crate) async fn restart_ui(
         State(app): Shared,
         Extension(csrf): Extension<Csrf>,
@@ -19964,12 +19954,11 @@ mod ui {
     ) -> Page {
         csrf.check_header(&headers)?;
         let s = app.settings();
-        let (grace, limit) = app.limits(&s)?;
-        let name = container_of(&app, &s, &s.text("UI_SERVICE")?).await?;
-        app.docker
-            .act(&name, docker::Action::Restart, grace, limit)
+        let plan = BTreeMap::from([(s.text("UI_SERVICE")?, config::Effect::Restart)]);
+        let mut report = Vec::new();
+        crate::stack::run_plan(&s, plan, &mut report)
             .await
-            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e.to_string()))?;
+            .map_err(|e| Fail(StatusCode::BAD_GATEWAY, e))?;
         Ok(StatusCode::NO_CONTENT.into_response())
     }
 
@@ -22145,7 +22134,7 @@ mod watchdog {
         mut plan: BTreeMap<String, crate::config::Effect>,
     ) -> Result<(Vec<Line>, Vec<String>), String> {
         let api = docker::client(s)?;
-        let (grace, limit) = (s.num::<u32>("UI_STOP_GRACE")?, docker::timeout(s)?);
+        let (grace, limit) = (s.num::<u32>("WATCHDOG_STOP_GRACE")?, docker::timeout(s)?);
         let (mut names, mut report) = (BTreeMap::new(), Vec::new());
         for owner in plan.keys() {
             match docker::container_name(&api, s, owner).await {
