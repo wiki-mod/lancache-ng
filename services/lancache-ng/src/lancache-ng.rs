@@ -14529,15 +14529,14 @@ end
             confine(s, files)?;
             let mode = s.mode("UI_CONFIG_FILE_MODE")?;
             let mut out = Vec::new();
-            for f in files {
+            for (f, state) in file_states(files)? {
+                let owner = crate::shared::fs::Owner::default();
+                crate::shared::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner)
+                    .map_err(|e| format!("{}: {e}", f.path.display()))?;
                 // What: a first write wakes no owner.
                 // Why: owners read it at start; HUP kills.
                 // From: Issue #1683 | PR #1980
-                let wake = f.path.exists();
-                let owner = crate::shared::fs::Owner::default();
-                let changed =
-                    crate::shared::fs::write_if_changed(&f.path, f.body.as_bytes(), mode, owner);
-                if changed.map_err(|e| format!("{}: {e}", f.path.display()))? && wake {
+                if state == FileState::Changed {
                     out.push(change_of(f));
                 }
             }
