@@ -5075,7 +5075,7 @@ mod dns {
             (_, []) => Body::Form(vec![]),
             _ => return Err(usage),
         };
-        let route = route.replace("{name}", name);
+        let route = crate::shared::fill(route.to_string(), &[("name", name.to_string())]);
         let v = crate::shared::http::ui_socket(&s, &route, body).await?;
         println!("{}", json!({"done": route, "answer": v}));
         Ok(())
@@ -6894,7 +6894,7 @@ mod shared {
     }
 
     // What: {name} places of a text filled with values.
-    // Why: one filler for errors and alarm texts.
+    // Why: one filler for texts, alarms and routes.
     // From: Issue #1683 | PR #2020
     pub(crate) fn fill<K: AsRef<str>>(text: String, vals: &[(K, String)]) -> String {
         vals.iter().fold(text, |text, (name, value)| {
@@ -10091,7 +10091,10 @@ mod shared {
                 }
                 (Some(Op::Container), [svc, word @ ("start" | "stop")]) => {
                     let state = Wish::of(*word == "start").word();
-                    let r = s.text("UI_ROUTE_DESIRED_STATE")?.replace("{service}", svc);
+                    let r = crate::shared::fill(
+                        s.text("UI_ROUTE_DESIRED_STATE")?,
+                        &[("service", svc.to_string())],
+                    );
                     (r, Body::Json(json!({"state": state})))
                 }
                 (Some(Op::Ui), ["restart"]) => (s.text("UI_ROUTE_RESTART_UI")?, Body::Form(vec![])),
@@ -10148,11 +10151,14 @@ mod shared {
                     };
                 }
                 (Some(Op::Service), [c, p, a @ ("restart" | "reload")]) => {
-                    let r = s
-                        .text("UI_ROUTE_SERVICE_ACTION")?
-                        .replace("{container}", c)
-                        .replace("{program}", p)
-                        .replace("{action}", a);
+                    let r = crate::shared::fill(
+                        s.text("UI_ROUTE_SERVICE_ACTION")?,
+                        &[
+                            ("container", c.to_string()),
+                            ("program", p.to_string()),
+                            ("action", a.to_string()),
+                        ],
+                    );
                     (r, Body::Form(vec![]))
                 }
                 _ => return Err(crate::shared::cli::help(&COMMANDS)),
@@ -16207,7 +16213,10 @@ end
                 // Why: the ui lowers the shown sum at once.
                 // From: Issue #1683 | PR #2020
                 Some(Op::Wipe) => {
-                    let r = s.text("UI_ROUTE_HAMSTER_API")?.replace("{op}", "wipe");
+                    let r = crate::shared::fill(
+                        s.text("UI_ROUTE_HAMSTER_API")?,
+                        &[("op", "wipe".into())],
+                    );
                     let body = crate::shared::http::Body::Form(vec![]);
                     let v = crate::shared::http::ui_socket(&s, &r, body).await?;
                     println!("{v}");
@@ -17659,7 +17668,7 @@ mod ui {
             ctx.insert("langs", &langs);
             let html = self.tera.render(name, &ctx).map_err(|e| {
                 eprintln!("ui: template {name}: {e:?}");
-                tr("err_template").replace("{name}", name)
+                crate::shared::fill(tr("err_template"), &[("name", name.to_string())])
             })?;
             Ok(Html(html).into_response())
         }
@@ -17936,9 +17945,10 @@ mod ui {
         let s = app.settings();
         let min = s.uint("UI_PASSWORD_MIN_LENGTH")?;
         if (new.chars().count() as u64) < min {
-            return Err(bad_request(
-                tr("err_password_min").replace("{x}", &min.to_string()),
-            ));
+            return Err(bad_request(crate::shared::fill(
+                tr("err_password_min"),
+                &[("x", min.to_string())],
+            )));
         }
         let wrong = tr("err_password_wrong");
         let old = password_hash(&s);
@@ -18798,7 +18808,12 @@ mod ui {
             DhcpOp::StaticRemove => host(false)?,
             DhcpOp::LeaseRelease => KeaEdit::LeaseRelease(get("ip")),
             DhcpOp::KeaRollback => KeaEdit::Rollback(get("snapshot_id")),
-            other => return Err(tr("err_unknown_dhcp_action").replace("{op}", other.key())),
+            other => {
+                return Err(crate::shared::fill(
+                    tr("err_unknown_dhcp_action"),
+                    &[("op", other.key().to_string())],
+                ));
+            }
         })
     }
 
@@ -18882,9 +18897,10 @@ mod ui {
         let mut tabs = vec![json!({
             "id": crate::shared::rrd::MACHINE,
             "label": tr("stats_machine"),
-            "source": tr("stats_machine_source")
-                .replace("{x}", &snmp)
-                .replace("{y}", &step.to_string()),
+            "source": crate::shared::fill(
+                tr("stats_machine_source"),
+                &[("x", snmp.clone()), ("y", step.to_string())],
+            ),
         })];
         // What: no dhcp tab while DHCP_MODE is off.
         // Why: the tab would show a stopped container.
@@ -18897,9 +18913,10 @@ mod ui {
             tabs.push(json!({
                 "id": c,
                 "label": c,
-                "source": tr("stats_container_source")
-                    .replace("{x}", &c)
-                    .replace("{y}", &step.to_string()),
+                "source": crate::shared::fill(
+                    tr("stats_container_source"),
+                    &[("x", c.clone()), ("y", step.to_string())],
+                ),
             }));
         }
         ctx.insert("tabs", &tabs);
@@ -19380,7 +19397,10 @@ mod ui {
         // Why: REST shows which part failed.
         // From: Issue #871 | PR #2020
         if code != 0 && v.get("ok") != Some(&Value::Bool(false)) {
-            return Err(tr("hamster_exit").replace("{x}", &code.to_string()));
+            return Err(crate::shared::fill(
+                tr("hamster_exit"),
+                &[("x", code.to_string())],
+            ));
         }
         Ok(v)
     }
@@ -19702,7 +19722,7 @@ mod ui {
         let n: u64 = text
             .trim()
             .parse()
-            .map_err(|_| tr("err_no_gib").replace("{x}", text))?;
+            .map_err(|_| crate::shared::fill(tr("err_no_gib"), &[("x", text.to_string())]))?;
         crate::shared::human::gib_bytes(n).ok_or_else(|| format!("{text:?} is too big"))
     }
 
@@ -19721,11 +19741,10 @@ mod ui {
         let reachable = crate::shared::tidy::reachable(s, old, cached)?;
         if new > reachable {
             let room = human::bytes(reachable);
-            return Err(bad_request(
-                tr("err_cache_fit")
-                    .replace("{x}", wanted)
-                    .replace("{y}", &room),
-            ));
+            return Err(bad_request(crate::shared::fill(
+                tr("err_cache_fit"),
+                &[("x", wanted.to_string()), ("y", room)],
+            )));
         }
         Ok(())
     }
