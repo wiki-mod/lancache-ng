@@ -17383,7 +17383,14 @@ mod ui {
     // From: Issue #1683 | PR #2020
     fn built_in() -> &'static BTreeMap<String, String> {
         static EN: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
-        EN.get_or_init(|| serde_json::from_str(BUILT_IN_EN).unwrap_or_default())
+        EN.get_or_init(|| parse_built_in().unwrap_or_default())
+    }
+
+    // What: parse the built-in English file.
+    // Why: start and the CLI read the same embedded text.
+    // From: Issue #1683 | PR #2020
+    fn parse_built_in() -> Result<BTreeMap<String, String>, String> {
+        serde_json::from_str(BUILT_IN_EN).map_err(|e| format!("built-in en: {e}"))
     }
 
     // What: one text in the request language.
@@ -20010,8 +20017,7 @@ mod ui {
     // Why: a missing folder or key must not stop the ui.
     // From: Issue #1683 | PR #2020
     pub(crate) fn texts(dir: &str) -> Result<Texts, String> {
-        let mut base: BTreeMap<String, String> =
-            serde_json::from_str(BUILT_IN_EN).map_err(|e| format!("built-in en: {e}"))?;
+        let mut base = parse_built_in()?;
         let mut all = match lang_files(dir) {
             Ok(files) => files,
             Err(e) => {
