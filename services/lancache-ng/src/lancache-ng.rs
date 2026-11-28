@@ -4157,7 +4157,7 @@ mod dhcp {
     // Why: a stack restore puts Kea back as it ran.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_set(s: &Settings, cfg: Value) -> Result<(), String> {
-        let api = kea_api_in_kea_mode(s)?.ok_or("DHCP_MODE is not kea now")?;
+        let api = kea_api_required(s)?;
         apply_kea(&api, &kea_store(s)?, &cfg).await
     }
 
@@ -4177,6 +4177,13 @@ mod dhcp {
             return Ok(None);
         }
         kea_api(s).map(Some)
+    }
+
+    // What: the Kea API; an error when the mode is not Kea.
+    // Why: set, rollback, edit and action stop alike.
+    // From: Issue #1683 | PR #2020
+    fn kea_api_required(s: &Settings) -> Result<kea::Api, String> {
+        kea_api_in_kea_mode(s)?.ok_or_else(|| NOT_KEA.to_string())
     }
 
     // What: subnet rows and reservations of a Kea config.
@@ -4498,7 +4505,7 @@ mod dhcp {
     // Why: page and CLI repair Kea the same way.
     // From: Issue #1683 | PR #2020
     pub(crate) async fn kea_rollback(s: &Settings, id: &str) -> Result<(), String> {
-        let api = kea_api_in_kea_mode(s)?.ok_or(NOT_KEA)?;
+        let api = kea_api_required(s)?;
         let store = kea_store(s)?;
         let cfg: Value = store.read(id)?;
         // What: the state before is kept as a snapshot.
@@ -4535,7 +4542,7 @@ mod dhcp {
         s: &Settings,
         edit: impl FnOnce(&mut Vec<Value>) -> Result<(), Fault>,
     ) -> Result<(), Fault> {
-        let api = kea_api_in_kea_mode(s)?.ok_or(NOT_KEA)?;
+        let api = kea_api_required(s)?;
         let mut cfg = live_config(&api).await?;
         let mut subnets = kea_conf::subnets(&cfg).to_vec();
         edit(&mut subnets)?;
@@ -4665,7 +4672,7 @@ mod dhcp {
             KeaEdit::LeaseRelease(ip) => {
                 let ip = crate::shared::dns::canonical_ip(ip)
                     .map_err(|e| Fault::Plain(format!("ip: {e}")))?;
-                let api = kea_api_in_kea_mode(s)?.ok_or(NOT_KEA)?;
+                let api = kea_api_required(s)?;
                 Ok(api.release(&ip).await?)
             }
             KeaEdit::Rollback(id) => Ok(kea_rollback(s, id).await?),
