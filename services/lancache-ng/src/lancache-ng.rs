@@ -2946,6 +2946,11 @@ mod config {
     // Why: each syntax names what it cannot carry.
     // From: Issue #1683 | PR #2020
     impl Syntax {
+        // What: a bare word: letters, digits, '_' and '-'.
+        // Why: log groups and programs share one class.
+        // From: Issue #1683 | PR #2020
+        pub const BARE: Self = Self::Name("_-");
+
         // What: how a check failure names its syntax.
         // Why: the error says what the value cannot carry.
         // From: Issue #1683 | PR #2019
@@ -10677,11 +10682,6 @@ mod shared {
     pub mod log {
         use crate::config::{Settings, Syntax};
 
-        // What: names of groups and muted programs.
-        // Why: they go into syslog-ng text as bare words.
-        // From: Issue #1683 | PR #1980
-        const NAME: Syntax = Syntax::Name("_-");
-
         // What: one forward target host:port.
         // Why: a secondary also forwards to its primary.
         // From: Issue #1683 | PR #1980
@@ -10782,10 +10782,10 @@ mod shared {
             }
             crate::config::checked(Syntax::Template, &template)
                 .map_err(|e| format!("SYSLOG_LINE_TEMPLATE: {e}"))?;
-            if !crate::config::safe(NAME, &group) {
+            if !crate::config::safe(Syntax::BARE, &group) {
                 return Err(format!("LOG_READER_GROUP={group} is no group name"));
             }
-            if let Some(bad) = muted.iter().find(|m| !crate::config::safe(NAME, m)) {
+            if let Some(bad) = muted.iter().find(|m| !crate::config::safe(Syntax::BARE, m)) {
                 return Err(format!("SYSLOG_MUTED entry {bad:?} is no plain name"));
             }
             // What: a setting that must be one bare word.
@@ -19305,8 +19305,8 @@ mod ui {
         // What: the program is one bare name, never a path.
         // Why: the list is live; rc-service runs a path.
         // From: Issue #1683 | PR #2020
-        let bare = crate::config::safe(crate::config::Syntax::Name("_-"), &program)
-            && !program.starts_with('-');
+        let bare =
+            crate::config::safe(crate::config::Syntax::BARE, &program) && !program.starts_with('-');
         if !bare
             || !s
                 .list("UI_SERVICES")?
